@@ -364,6 +364,45 @@ side-by-side one. This matters more than it sounds, because the glasses keep the
 across host reboots - after a crash they are still in SBS, and the naive "just set SBS" then
 silently does nothing.
 
+### Switching mode swaps the EDID, and someone must re-probe
+
+**[verified, August 2026]** This is the mechanism behind every "the mode never appears"
+symptom, and it is not what it looks like from the outside.
+
+The glasses do not merely reconfigure themselves when told to go side-by-side - they present
+a **different EDID**. In 2D it advertises 1920x1080; in SBS its detailed timing decodes to a
+356.4 MHz pixel clock with 3840 horizontal active. Same 128 bytes, same `Air` product name,
+different modes.
+
+The transition therefore looks like this from the host:
+
+```
+before:  connected, 128 B EDID, full 1920x1080 mode list
+switch:  acked, R_DISP_MODE now reads 0x04
+after:   connected, 128 B EDID, modes = "800x600 640x480"   <- fallback list
+re-probe: modes = "3840x1080 1920x1080 ..."                 <- the new EDID
+```
+
+**800x600 + 640x480 is not an EDID failure.** EDID is still readable - it is the kernel's
+fallback list, used while the link is renegotiating and the cached mode list no longer
+matches what is on the wire. Forcing a re-detect resolves it:
+
+```
+echo detect > /sys/class/drm/card0-DP-1/status
+```
+
+A desktop environment does this for you: it reacts to the hotplug and re-probes, which is why
+the switch "works under KDE". **With no compositor running, nothing re-probes**, and the
+connector sits at 800x600 indefinitely - which reads as the glasses being broken rather than
+as nobody having asked.
+
+Two consequences for a compositor that owns the display itself:
+
+1. It must force a connector re-probe after switching, not wait to be told. There is no
+   hotplug uevent to wait for.
+2. Combined with the non-idempotence above, it must also force a real transition first -
+   re-probing after a no-op write finds nothing new, because no EDID swap happened.
+
 ### Reply layout is not command layout
 
 **[verified]** A reply to `R_DISP_MODE` (msgid `0x07`) has `length = 22`, not the 18 a
