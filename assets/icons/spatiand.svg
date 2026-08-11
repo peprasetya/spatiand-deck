@@ -1,0 +1,57 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="HoloFrame icon: AR glasses with a wide desktop passing through the lenses">
+  <defs>
+    <linearGradient id="b-bg" x1="0" y1="0" x2="0.25" y2="1">
+      <stop offset="0" stop-color="#2f3358"/>
+      <stop offset="0.5" stop-color="#15172e"/>
+      <stop offset="1" stop-color="#08090f"/>
+    </linearGradient>
+    <linearGradient id="b-strip" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#16e6c0"/>
+      <stop offset="0.45" stop-color="#37a6f7"/>
+      <stop offset="1" stop-color="#8f6bf2"/>
+    </linearGradient>
+    <filter id="b-soft" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="30"/>
+    </filter>
+    <clipPath id="b-lenses">
+      <path d="M 236 396 h 232 a 26 26 0 0 1 26 26 v 122 a 62 62 0 0 1 -62 62 h -160 a 62 62 0 0 1 -62 -62 v -122 a 26 26 0 0 1 26 -26 z"/>
+      <path d="M 556 396 h 232 a 26 26 0 0 1 26 26 v 122 a 62 62 0 0 1 -62 62 h -160 a 62 62 0 0 1 -62 -62 v -122 a 26 26 0 0 1 26 -26 z"/>
+    </clipPath>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#b-bg)"/>
+
+  <!-- the canvas runs on past the lenses: far wider than you can see at once -->
+  <rect x="138" y="452" width="748" height="112" rx="24" fill="url(#b-strip)" opacity="0.22"/>
+  <g filter="url(#b-soft)" opacity="0.45">
+    <rect x="220" y="470" width="584" height="76" rx="38" fill="url(#b-strip)"/>
+  </g>
+
+  <!-- only the part inside the lenses is lit -->
+  <g clip-path="url(#b-lenses)">
+    <rect x="138" y="430" width="748" height="152" rx="16" fill="url(#b-strip)"/>
+    <!-- suggestion of windows on the desktop -->
+    <g opacity="0.28" fill="#04101c">
+      <rect x="256" y="452" width="128" height="40" rx="9"/>
+      <rect x="256" y="516" width="88" height="44" rx="9"/>
+      <rect x="360" y="516" width="112" height="44" rx="9"/>
+      <rect x="588" y="452" width="164" height="40" rx="9"/>
+      <rect x="672" y="516" width="120" height="44" rx="9"/>
+    </g>
+  </g>
+
+  <!-- frames -->
+  <g fill="none" stroke="#eef1ff" stroke-width="19" stroke-linejoin="round">
+    <path d="M 236 396 h 232 a 26 26 0 0 1 26 26 v 122 a 62 62 0 0 1 -62 62 h -160 a 62 62 0 0 1 -62 -62 v -122 a 26 26 0 0 1 26 -26 z"/>
+    <path d="M 556 396 h 232 a 26 26 0 0 1 26 26 v 122 a 62 62 0 0 1 -62 62 h -160 a 62 62 0 0 1 -62 -62 v -122 a 26 26 0 0 1 26 -26 z"/>
+  </g>
+  <!-- bridge -->
+  <path d="M 494 434 q 18 -20 36 0" fill="none" stroke="#eef1ff" stroke-width="19"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- temples, hinting at the wider span -->
+  <g fill="none" stroke="#eef1ff" stroke-width="19" stroke-linecap="round" opacity="0.45">
+    <path d="M 212 418 l -58 -24"/>
+    <path d="M 812 418 l 58 -24"/>
+  </g>
+</svg>

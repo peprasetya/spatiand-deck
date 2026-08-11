@@ -26,7 +26,15 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-REAL_USER="${SUDO_USER:-deck}"
+# pkexec does not set SUDO_USER, it sets PKEXEC_UID. go-to-spatiand.sh launches this via
+# pkexec so the password prompt is graphical, so both paths have to work - otherwise the
+# re-registration installs itself for root and the launcher points at /root.
+REAL_USER="${SPATIAND_USER:-${SUDO_USER:-}}"
+if [[ -z "$REAL_USER" && -n "${PKEXEC_UID:-}" ]]; then
+    REAL_USER=$(getent passwd "$PKEXEC_UID" | cut -d: -f1)
+fi
+REAL_USER="${REAL_USER:-deck}"
+echo "== installing for user: $REAL_USER =="
 HOME_DIR=$(getent passwd "$REAL_USER" | cut -d: -f6)
 BIN="$HOME_DIR/spatiand/target/release/spatiand"
 LAUNCHER=/usr/local/bin/spatiand-session

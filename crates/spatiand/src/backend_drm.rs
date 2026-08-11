@@ -173,11 +173,18 @@ pub fn run(
         (),
         DrmDeviceFd,
     > = DrmCompositor::new(
-            smithay::output::OutputModeSource::Static {
-                size: (w as i32, h as i32).into(),
-                scale: Scale::from(1.0),
-                transform: Transform::Normal,
-            },
+            // Auto, not Static.
+            //
+            // A static mode source is fixed at construction, and construction has to happen
+            // before the stereo switch (the link must be up first). Adopting 3840x1080 later
+            // with use_mode resizes the surface and swapchain but leaves a static source
+            // still reporting 1920 - so the compositor composites into the left half of the
+            // framebuffer and never writes the right. The symptom is a perfect left eye and
+            // a black right eye, which looks like a stereo bug rather than a sizing one.
+            //
+            // Auto follows the Output, so updating the output's mode after use_mode keeps
+            // everything in step.
+            smithay::output::OutputModeSource::Auto(output.clone()),
             surface,
             None,
             allocator,
@@ -285,6 +292,14 @@ pub fn run(
                         w = sw;
                         h = sh;
                         on_glasses = true;
+                        // The compositor's mode source follows this; without it the
+                        // composited area stays the old size.
+                        let adopted = OutputMode {
+                            size: (sw as i32, sh as i32).into(),
+                            refresh: (stereo_mode.vrefresh() * 1000) as i32,
+                        };
+                        output.change_current_state(Some(adopted), None, None, None);
+                        output.set_preferred(adopted);
                     }
                     Err(e) => log::warn!("could not adopt the stereo mode ({e}); staying mono"),
                 }
@@ -325,6 +340,12 @@ pub fn run(
     let mut text = TextRenderer::new();
     let mut panel: Option<(u32, f32)> = None;
     let mut last_prompt = String::new();
+    // The status readout contains live pose numbers, so as a string it changes every frame.
+    // Rebuilding on every change then re-rasterises and re-uploads ~2 MB of RGBA at 72 Hz to
+    // show digits nobody can read that fast. Recompute it a few times a second instead; the
+    // "only rebuild when the text changes" check is right, it was the text that was wrong.
+    let mut last_status_update = std::time::Instant::now();
+    let mut status_text = String::new();
 
     // The scene is drawn here with raw GL, then handed to DrmCompositor as one element.
     //
@@ -419,14 +440,20 @@ pub fn run(
                 format!("{}\n\n{}\n\n{}", p.heading, p.body, p.status)
             }
             None => {
-                let e = tracker.euler_degrees();
-                format!(
-                    "Spatiand\n\nyaw {:.0}   pitch {:.0}   roll {:.0}\n\n{} window(s)",
-                    e.yaw,
-                    e.pitch,
-                    e.roll,
-                    runtime.state.space.elements().count()
-                )
+                if status_text.is_empty()
+                    || last_status_update.elapsed() >= Duration::from_millis(250)
+                {
+                    let e = tracker.euler_degrees();
+                    status_text = format!(
+                        "Spatiand\n\nyaw {:.0}   pitch {:.0}   roll {:.0}\n\n{} window(s)",
+                        e.yaw,
+                        e.pitch,
+                        e.roll,
+                        runtime.state.space.elements().count()
+                    );
+                    last_status_update = std::time::Instant::now();
+                }
+                status_text.clone()
             }
         };
 
@@ -507,7 +534,20 @@ pub fn run(
                     gl.Viewport(*x, 0, *vw, h as i32);
                     let eye = spatiand_render::eye_for(*side, orientation, DVec3::ZERO, &stereo);
                     let model = head_locked_panel(orientation, aspect, portrait);
-                    let mvp = eye.projection * eye.view * model;
+                    // Flip vertically when drawing into the offscreen texture.
+                    //
+                    // GL renders with the origin at the BOTTOM-left, so rendering into a
+                    // texture stores the image with row 0 holding its bottom. The compositor
+                    // then samples that texture with row 0 as the top, and everything comes
+                    // out mirrored top-to-bottom. It does not read as a clean 180 degree
+                    // rotation - glyphs are individually flipped while the line order
+                    // reverses - which is why it is harder to read than upside-down text.
+                    //
+                    // Only the offscreen path needs this. The nested winit backend draws
+                    // straight into a GL surface that is presented with GL's own convention,
+                    // so no correction applies there.
+                    let flip_y = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
+                    let mvp = flip_y * eye.projection * eye.view * model;
                     pipeline.draw(gl, tex, &mvp, [1.0, 1.0, 1.0, 1.0], (0.0, 1.0));
                 }
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
