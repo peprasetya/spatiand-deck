@@ -245,6 +245,21 @@ pub fn run(
     let mut on_glasses = false;
     if !internal {
         if let Some(x) = hmd.as_mut() {
+            // Force a real transition: mono first, then stereo.
+            //
+            // Writing the mode the glasses are already in is a no-op. They ack it happily,
+            // R_DISP_MODE reads back the right value, and *nothing renegotiates* - so the
+            // connector keeps advertising whatever timing it learned at link-up and
+            // 3840x1080 never appears. Since our own shutdown path sets mono, and a crash
+            // leaves them in stereo, the glasses can easily already be in the target mode
+            // when we start.
+            //
+            // Captured on hardware: from 0x01 (2D) the switch publishes 3840x1080 within two
+            // seconds; from 0x04 (already stereo) it publishes nothing, indefinitely.
+            if let Err(e) = x.set_display_mode(DisplayMode::Mono) {
+                log::warn!("could not force mono before switching ({e})");
+            }
+            std::thread::sleep(Duration::from_millis(800));
             match x.set_display_mode(DisplayMode::Stereo) {
                 Ok(m) => log::info!("headset display mode -> {m:?}"),
                 Err(e) => log::warn!("could not switch to stereo ({e}); staying mono"),

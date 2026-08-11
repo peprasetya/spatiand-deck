@@ -336,6 +336,49 @@ The `0x3D`–`0x48` and `0x11xx` ranges are firmware update. **Leave them alone.
 
 Everything above `W_UPDATE_DP` can brick the device.
 
+### Setting a mode the glasses are already in does nothing
+
+**[verified, August 2026]** `W_DISP_MODE` is not idempotent in any useful sense. Writing the
+mode the glasses are *currently* in is acked, and `R_DISP_MODE` reads back the expected
+value, but no renegotiation happens on the DisplayPort side. The host keeps whatever timing
+it learned when the link came up, so `3840x1080` never appears in the connector's mode list
+and no DRM hotplug uevent is emitted.
+
+Measured, glasses freshly plugged and reporting `0x01`:
+
+```
+write 0x04  -> acked, read back 0x04, 3840x1080 present within 2 s
+```
+
+Same command with the glasses already at `0x04`:
+
+```
+write 0x04  -> acked, read back 0x04, no mode change after 40 s
+```
+
+A forced sysfs re-detect (`echo detect > .../status`) does not help either, so this is not
+the host caching EDID - the glasses simply do not re-drive the link.
+
+**So a host that wants stereo must force a transition**: set a 2D mode, wait, then set the
+side-by-side one. This matters more than it sounds, because the glasses keep their mode
+across host reboots - after a crash they are still in SBS, and the naive "just set SBS" then
+silently does nothing.
+
+### Reply layout is not command layout
+
+**[verified]** A reply to `R_DISP_MODE` (msgid `0x07`) has `length = 22`, not the 18 a
+one-byte command uses, and the payload begins with a status byte:
+
+```
+fd 80f8726a 1600 6698baef1d6af420 0700 0000000000 00 04
+                 ^len=22          ^msg ^reserved  ^  ^mode
+                                                  status
+```
+
+The mode is at **offset 23**, with `0x00` at offset 22 meaning success. Reading offset 22 as
+the value - the obvious choice given §6's command layout - reports `mode 0x00` for every
+read, which looks like the device not answering rather than a layout mistake.
+
 ### Heartbeat
 
 The driver sends `P_HEARTBEAT` periodically. Whether the glasses revert or sleep without

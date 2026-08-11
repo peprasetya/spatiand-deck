@@ -2,3 +2,4 @@
 /assets/backgrounds/
 *.log
 .DS_Store
+/spatiand-logs/
