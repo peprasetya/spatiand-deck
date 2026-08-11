@@ -205,6 +205,8 @@ pub fn run(
         })
         .map_err(|e| format!("could not register the drm source: {e}"))?;
 
+    let mut pending_flip = false;
+
     // Present one blank frame before doing anything else.
     //
     // Creating a DrmSurface does NOT perform a modeset - that happens on the first atomic
@@ -221,11 +223,22 @@ pub fn run(
             FrameFlags::DEFAULT,
         )?;
         compositor.queue_frame(())?;
-        // Let the link finish training before asking the glasses to renegotiate. The flip
-        // completes during this wait; clear it so the loop starts unblocked.
+        // Let the link finish training before asking the glasses to renegotiate.
         std::thread::sleep(Duration::from_millis(600));
         event_loop.dispatch(Some(Duration::from_millis(50)), runtime)?;
-        vblank.set(false);
+        // Acknowledge this frame properly rather than discarding its completion.
+        //
+        // Clearing the flag without calling frame_submitted() leaves DrmCompositor believing
+        // a flip is still outstanding, so it never flips again: the loop draws one frame and
+        // then waits forever for a vblank that cannot arrive. From outside that is
+        // indistinguishable from "the renderer draws nothing" - the display just stays blank
+        // - which is exactly how it presented.
+        if vblank.take() {
+            let _ = compositor.frame_submitted();
+        } else {
+            // No completion seen yet; let the main loop handle it as a normal pending flip.
+            pending_flip = true;
+        }
         log::info!("link up (blank frame presented)");
     }
 
@@ -348,7 +361,13 @@ pub fn run(
         runtime.state.socket_name
     );
 
-    let mut pending_flip = false;
+    // Frame accounting. "Blank" has two very different causes - a loop that presents once
+    // and stalls, versus one running at full rate drawing nothing visible - and they are
+    // indistinguishable from the outside. Counting is the only way to tell them apart
+    // without asking someone to stare at the glasses.
+    let mut frames = 0u32;
+    let mut skipped = 0u32;
+    let mut last_report = std::time::Instant::now();
 
     while runtime.state.running {
         if let Some(x) = hmd.as_mut() {
@@ -419,6 +438,14 @@ pub fn run(
                 ppd * 1.6,
                 stereo.per_eye.0.saturating_sub(120).max(64),
                 [235, 240, 255, 255],
+            );
+            // "Blank" can also mean the text rasterised to nothing. ink_fraction is the
+            // cheap way to tell a drawing problem from an empty texture.
+            log::info!(
+                "panel rebuilt: {}x{} px, ink {:.1}%",
+                image.width,
+                image.height,
+                image.ink_fraction() * 100.0
             );
             let old = panel.take();
             panel = Some(renderer.with_context(|gl| unsafe {
@@ -496,6 +523,7 @@ pub fn run(
             pending_flip = false;
         }
         if pending_flip {
+            skipped += 1;
             // The display has not finished with the last frame. Keep servicing clients and
             // the event loop rather than piling up frames it cannot show.
             display.dispatch_clients(&mut runtime.state)?;
@@ -525,6 +553,17 @@ pub fn run(
         )?;
         compositor.queue_frame(())?;
         pending_flip = true;
+        frames += 1;
+        if last_report.elapsed() >= Duration::from_secs(2) {
+            let secs = last_report.elapsed().as_secs_f32();
+            log::info!(
+                "presented {frames} frames in {secs:.1}s ({:.0} fps), {skipped} waits for flip",
+                frames as f32 / secs
+            );
+            frames = 0;
+            skipped = 0;
+            last_report = std::time::Instant::now();
+        }
 
         runtime.state.space.elements().for_each(|window| {
             window.send_frame(&output, Duration::ZERO, Some(Duration::ZERO), |_, _| {
