@@ -1,0 +1,33 @@
+[package]
+name = "spatiand"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+spatiand-hmd = { path = "../spatiand-hmd" }
+spatiand-track = { path = "../spatiand-track" }
+spatiand-render = { path = "../spatiand-render" }
+
+glam.workspace = true
+log.workspace = true
+env_logger.workspace = true
+thiserror.workspace = true
+
+[dependencies.smithay]
+version = "0.7"
+default-features = false
+features = [
+    "backend_winit",   # nested development backend: runs as a window under KDE
+    "backend_drm",     # the real thing: owns the glasses and the Deck panel
+    "backend_gbm",
+    "backend_egl",
+    "backend_libinput",
+    "backend_session_libseat",
+    "backend_udev",
+    "renderer_gl",     # GLES 3.2 — see the plan for why not Vulkan
+    "wayland_frontend",
+    "desktop",
+    "use_system_lib",
+]

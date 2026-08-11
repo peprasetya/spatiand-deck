@@ -1,0 +1,12 @@
+[package]
+name = "spatiand-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+log.workspace = true
+serde.workspace = true
+cosmic-text = "0.19"

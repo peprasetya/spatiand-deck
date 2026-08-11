@@ -1,0 +1,78 @@
+# Supported headsets.
+#
+# Adding a device that speaks a protocol we already implement should be a row here, not a
+# patch to the driver. `driver` selects which module handles it.
+#
+# Sources: `docs/xreal-air.md` §2 (USB identity) and §6 (display modes). Rows marked
+# unverified come from the driver source rather than from hardware — the interface layout is
+# believed to match across the Air family, but only the Air gen 1 has actually been plugged
+# in and exercised.
+
+[[device]]
+name = "XREAL Air"
+driver = "xreal"
+vid = 0x3318
+pid = 0x0424
+verified = true            # confirmed on hardware: SBS at 72 Hz, IMU sane, 2026-08-11
+imu_interface = 3
+mcu_interface = 4
+imu_report_len = 64
+per_eye = [1920, 1080]
+h_fov_deg = 40.0           # horizontal; the 46 deg on the box is diagonal
+default_ipd_mm = 63.0
+# MCU W_DISP_MODE (msgid 0x0008) payload values.
+mode_mono = 0x05           # 1920x1080 @72
+mode_stereo = 0x04         # 3840x1080 @72  <- preferred, verified working on Steam Deck
+mode_stereo_fallback = 0x03 # 3840x1080 @60
+
+[[device]]
+name = "XREAL Air 2"
+driver = "xreal"
+vid = 0x3318
+pid = 0x0428
+verified = false
+imu_interface = 3
+mcu_interface = 4
+imu_report_len = 64
+per_eye = [1920, 1080]
+h_fov_deg = 42.0
+default_ipd_mm = 63.0
+mode_mono = 0x05
+mode_stereo = 0x04
+mode_stereo_fallback = 0x03
+
+[[device]]
+name = "XREAL Air 2 Pro"
+driver = "xreal"
+vid = 0x3318
+pid = 0x0432
+verified = false
+imu_interface = 3
+mcu_interface = 4
+imu_report_len = 64
+per_eye = [1920, 1080]
+h_fov_deg = 42.0
+default_ipd_mm = 63.0
+mode_mono = 0x05
+mode_stereo = 0x04
+mode_stereo_fallback = 0x03
+
+# The Ultra is deliberately listed with its real interface numbers even though it is not
+# expected to work yet: its 512-byte IMU reports mean the packet parser needs a second
+# layout, not just a table row. Better to fail with "unverified layout" than to silently
+# mis-parse.
+[[device]]
+name = "XREAL Air 2 Ultra"
+driver = "xreal"
+vid = 0x3318
+pid = 0x0426
+verified = false
+imu_interface = 2
+mcu_interface = 0
+imu_report_len = 512
+per_eye = [1920, 1080]
+h_fov_deg = 46.0
+default_ipd_mm = 63.0
+mode_mono = 0x05
+mode_stereo = 0x04
+mode_stereo_fallback = 0x03
