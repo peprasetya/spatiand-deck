@@ -164,6 +164,17 @@ pub trait Hmd: Send {
     }
 }
 
+/// Is a supported headset plugged in?
+///
+/// Deliberately cheap and side-effect free: it walks the hidraw nodes and matches against the
+/// device table without opening anything. The hotplug poll calls this on a timer, and opening
+/// the device to find out would send MCU traffic to hardware that may be mid-enumeration.
+pub fn is_present() -> bool {
+    hid::enumerate()
+        .iter()
+        .any(|n| device::lookup(n.vid, n.pid).is_some())
+}
+
 /// Probe for any supported headset.
 ///
 /// Ordered deliberately: real hardware first, then the null device only if explicitly asked

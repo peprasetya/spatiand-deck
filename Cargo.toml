@@ -4,12 +4,13 @@ members = [
     "crates/spatiand-hmd",
     "crates/spatiand-track",
     "crates/spatiand-render",
+    "crates/spatiand-input",
     "crates/spatiand",
 ]
 
 # Crates scaffolded but not yet implemented are deliberately left out of `members`
 # until they compile, so `cargo build` at the root always means something.
-#   spatiand-input     spatiand-platform
+#   spatiand-platform
 #   spatiand-shell     spatiand-media     spatiand-proto
 
 [workspace.package]

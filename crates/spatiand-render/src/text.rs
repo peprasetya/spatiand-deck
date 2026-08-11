@@ -10,7 +10,7 @@
 //! specified in pixels would silently become unreadable on different optics. Asking for "1.5°
 //! tall" is a statement about legibility that survives a hardware change.
 
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache};
+use cosmic_text::{Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache};
 
 /// An RGBA8 image, straight (non-premultiplied) alpha.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,7 +69,10 @@ impl TextRenderer {
             // every call.
             let mut b = buffer.borrow_with(&mut self.font_system);
             b.set_size(Some(max_width as f32), None);
-            b.set_text(text, &attrs, Shaping::Advanced, None);
+            // Centred. Left-aligned prompts read badly floating in space: with nothing
+            // around them there is no margin for the eye to register as an edge, so ragged
+            // starts look like a layout fault rather than a choice.
+            b.set_text(text, &attrs, Shaping::Advanced, Some(Align::Center));
             b.shape_until_scroll(false);
         }
 
@@ -83,6 +86,10 @@ impl TextRenderer {
         }
         let width = (used_width.ceil() as u32).clamp(1, max_width);
         let height = ((lines.max(1) as f32) * metrics.line_height).ceil() as u32;
+        // Centring lays every line out around max_width/2, so cropping to the widest line
+        // means shifting left by half the slack. Without this the image is the right size
+        // but its contents sit off to one side.
+        let x_offset = ((max_width as f32 - width as f32) / 2.0).round() as i32;
 
         let mut rgba = vec![0u8; (width * height * 4) as usize];
         let text_color = cosmic_text::Color::rgba(color[0], color[1], color[2], color[3]);
@@ -97,7 +104,7 @@ impl TextRenderer {
                 }
                 for dy in 0..h as i32 {
                     for dx in 0..w as i32 {
-                        let (px, py) = (x + dx, y + dy);
+                        let (px, py) = (x + dx - x_offset, y + dy);
                         if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
                             continue;
                         }

@@ -9,6 +9,7 @@ license.workspace = true
 spatiand-hmd = { path = "../spatiand-hmd" }
 spatiand-track = { path = "../spatiand-track" }
 spatiand-render = { path = "../spatiand-render" }
+spatiand-input = { path = "../spatiand-input" }
 
 glam.workspace = true
 log.workspace = true

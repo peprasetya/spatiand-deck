@@ -43,6 +43,8 @@ void main() {
 
 pub struct QuadPipeline {
     program: u32,
+    // Kept for `destroy`; the pipeline currently lives for the whole process.
+    #[allow(dead_code)]
     vbo: u32,
     vao: u32,
     loc_mvp: i32,
@@ -128,6 +130,7 @@ impl QuadPipeline {
 
     /// # Safety
     /// Context must be current.
+    #[allow(dead_code)]
     pub unsafe fn destroy(&self, gl: &ffi::Gles2) {
         gl.DeleteProgram(self.program);
         gl.DeleteBuffers(1, &self.vbo);

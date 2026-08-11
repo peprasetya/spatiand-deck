@@ -1,0 +1,14 @@
+[package]
+name = "spatiand-input"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# For the hidraw helpers. They are generic (enumerate by vid/pid/interface, read with a
+# timeout) and already proven against two different devices, so sharing them beats a second
+# copy. If a third consumer appears they should move to their own crate.
+spatiand-hmd = { path = "../spatiand-hmd" }
+log.workspace = true
+libc = "0.2"
