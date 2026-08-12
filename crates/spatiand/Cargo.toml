@@ -17,6 +17,8 @@ glam.workspace = true
 log.workspace = true
 env_logger.workspace = true
 thiserror.workspace = true
+# localtime_r for the status clock, and nothing else.
+libc = "0.2"
 
 # Only the two codecs panoramas and app icons actually come in. The default feature set drags
 # in a dozen more decoders that would never be reached and are not free to build on the Deck.

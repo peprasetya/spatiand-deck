@@ -36,9 +36,11 @@ pub const BTN_MIDDLE: u32 = 0x112;
 
 /// How tall the title bar is, as a fraction of the window's height.
 ///
-/// Generous. It is a target you have to hit with a head-anchored ray at two metres, where one
-/// degree is about 2% of a window's height — a thin desktop-sized bar would be unusable.
-pub const TITLE_BAR_FRACTION: f64 = 0.075;
+/// Generous, and it has to be. This is a target hit with a head-anchored ray at 2.2 m, where
+/// the whole window is only about 17° tall — so a desktop-proportioned bar works out at a
+/// degree or so, which is roughly the tremor in holding your head still. 11% gives a little
+/// over 2°, which is comfortably aimable. The test below is what caught 7.5% being too thin.
+pub const TITLE_BAR_FRACTION: f64 = 0.11;
 
 /// What the wearer is doing with a window.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -223,6 +225,7 @@ mod tests {
                 ..Default::default()
             },
             focused: true,
+            title: None,
         }
     }
 
@@ -315,6 +318,6 @@ mod tests {
         let quad = quad_of(&w);
         let bar_height = quad.height * TITLE_BAR_FRACTION;
         let angular = 2.0 * (bar_height / 2.0 / w.placement.radius).atan().to_degrees();
-        assert!(angular > 1.5, "title bar is only {angular} deg tall");
+        assert!(angular > 2.0, "title bar is only {angular} deg tall");
     }
 }

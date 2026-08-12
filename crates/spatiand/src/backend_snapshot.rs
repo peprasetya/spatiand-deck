@@ -279,6 +279,12 @@ pub fn run(
     };
     let ppd = TextRenderer::px_per_degree(stereo.per_eye.0, stereo.h_fov_deg);
     scene.sync_apps(&mut renderer, &mut text, &shell, ppd)?;
+    scene.sync_status(
+        &mut renderer,
+        &mut text,
+        &crate::status::line(runtime.state.space.elements().count()),
+        ppd,
+    )?;
     scene.sync_menu(
         &mut renderer,
         &mut text,
@@ -294,7 +300,9 @@ pub fn run(
             let p = c.prompt();
             format!("{}\n\n{}\n\n{}", p.heading, p.body, p.status)
         }
-        View::World => "Spatiand\n\nyaw 0   pitch 0   roll 0\n\n0 window(s)\n\nSTEAM settings    ... apps".into(),
+        // Nothing in the middle of the view: that space belongs to the windows, and the
+        // readout that used to live there is in the corner status bar now.
+        View::World => String::new(),
         _ => String::new(),
     };
     let panel = if panel_text.is_empty() {
@@ -355,6 +363,7 @@ pub fn run(
         let eye = spatiand_render::eye_for(EyeSide::Left, orientation, DVec3::ZERO, &stereo);
         scene_ref.draw_sky(gl, &eye);
         scene_ref.draw_windows(gl, &eye, &windows);
+        scene_ref.draw_status(gl, &eye, orientation);
         scene_ref.draw_menu(gl, &eye, shell_ref, (stereo.h_fov_deg, stereo.v_fov_deg()));
         if let Some((tex, aspect)) = panel {
             let (pw, ph) = crate::backend_drm::fit_panel(

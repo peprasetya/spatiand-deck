@@ -704,25 +704,9 @@ pub fn run(
                     let p = c.prompt();
                     format!("{}\n\n{}\n\n{}", p.heading, p.body, p.status)
                 }
-                // A menu owns the view while it is open; the status readout would sit on top
-                // of it saying nothing anyone needs at that moment.
-                None if shell.menu_is_open() => String::new(),
-                None => {
-                    if status_text.is_empty()
-                        || last_status_update.elapsed() >= Duration::from_millis(250)
-                    {
-                        let e = tracker.euler_degrees();
-                        status_text = format!(
-                            "Spatiand\n\nyaw {:.0}   pitch {:.0}   roll {:.0}\n\n{} window(s)\n\nSTEAM settings    ... apps",
-                            e.yaw,
-                            e.pitch,
-                            e.roll,
-                            runtime.state.space.elements().count()
-                        );
-                        last_status_update = std::time::Instant::now();
-                    }
-                    status_text.clone()
-                }
+                // Nothing in the middle of the view during normal use. That space belongs to
+                // the windows; the readout that used to live there is in the corner bar now.
+                None => String::new(),
             };
             let waiting = hmd.is_none();
 
@@ -768,6 +752,13 @@ pub fn run(
                 renderer.with_context(|gl| unsafe { scene.set_sky(gl, image) })?;
                 log::info!("environment now {}", environments.describe());
             }
+            // Once a second is plenty: the clock changes once a minute and the battery
+            // slower still, while rebuilding rasterises and uploads a texture.
+            if last_status_update.elapsed() >= Duration::from_secs(1) || status_text.is_empty() {
+                status_text = crate::status::line(runtime.state.space.elements().count());
+                last_status_update = std::time::Instant::now();
+            }
+            scene.sync_status(&mut renderer, &mut text, &status_text, ppd)?;
             scene.sync_apps(&mut renderer, &mut text, &shell, ppd)?;
             scene.sync_menu(
                 &mut renderer,

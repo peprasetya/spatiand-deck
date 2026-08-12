@@ -25,6 +25,7 @@ mod input_map;
 mod pointer;
 mod scene;
 mod state;
+mod status;
 mod window;
 
 pub use state::Spatiand;

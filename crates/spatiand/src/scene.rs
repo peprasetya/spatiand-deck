@@ -48,6 +48,10 @@ const LIGHT_DIR: Vec3 = Vec3::new(0.55, 0.6, 0.58);
 /// occupies roughly 140 px. 256 leaves room for the focused bubble's scale-up and for a
 /// headset with better optics, without being wasteful across forty apps.
 const ICON_TEXTURE_PX: u32 = 256;
+/// Half the width of a full launcher row, in degrees, for placing the page dots just outside
+/// it. Mirrors `spatiand_shell::launcher::COLUMN_SPACING_DEG` and is kept here so the scene
+/// does not have to reach into the shell's layout arithmetic.
+const COLUMN_SPACING_DEG_LOCAL: f32 = 9.0;
 
 /// One window, ready to draw: its imported texture and where it sits.
 pub struct WindowQuad {
@@ -102,6 +106,10 @@ pub struct Scene {
     /// lives (a browser tab, a file being edited) and two windows often share one. Bounded
     /// below so a client that rewrites its title every frame cannot grow this without limit.
     titles: std::collections::HashMap<String, Texture>,
+
+    /// The status bar, rebuilt when its text changes.
+    status: Option<Texture>,
+    status_text: String,
 
     /// The menu text, rebuilt when it changes.
     menu: Option<Texture>,
@@ -158,6 +166,8 @@ impl Scene {
             app_glyphs: Vec::new(),
             labels_built_for: usize::MAX,
             titles: std::collections::HashMap::new(),
+            status: None,
+            status_text: String::new(),
             menu: None,
             menu_text: String::new(),
             anchor_yaw: 0.0,
@@ -338,6 +348,93 @@ impl Scene {
             .ok()?;
         self.titles.insert(title.to_string(), Texture { id, aspect });
         Some(TitleTexture { id, aspect })
+    }
+
+    /// Rebuild the status bar if its text changed.
+    ///
+    /// Called every frame, but the text only changes once a minute or when a window opens, so
+    /// this is a string comparison almost always.
+    pub fn sync_status(
+        &mut self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        text: &mut TextRenderer,
+        wanted: &str,
+        px_per_degree: f32,
+    ) -> Result<(), String> {
+        if wanted == self.status_text && self.status.is_some() {
+            return Ok(());
+        }
+        self.status_text = wanted.to_string();
+        let image = text.render(wanted, px_per_degree * 0.8, 1400, [214, 226, 248, 255]);
+        let old = self.status.take();
+        self.status = Some(
+            renderer
+                .with_context(|gl| unsafe {
+                    if let Some(t) = old {
+                        gl.DeleteTextures(1, &t.id);
+                    }
+                    Texture {
+                        id: upload_rgba(gl, &image),
+                        aspect: image.width as f32 / image.height.max(1) as f32,
+                    }
+                })
+                .map_err(|e| format!("no GL context: {e}"))?,
+        );
+        Ok(())
+    }
+
+    /// Draw the status bar in the upper left, locked to the head.
+    ///
+    /// Head-locked rather than body-locked: the whole point is that it is there whenever you
+    /// glance for it, without having to remember which way you were facing when it appeared.
+    ///
+    /// # Safety
+    /// Context must be current.
+    pub unsafe fn draw_status(&self, gl: &ffi::Gles2, eye: &Eye, orientation: glam::DQuat) {
+        let Some(bar) = self.status else {
+            return;
+        };
+        // Sized by WIDTH, not height. Sizing by height and letting the aspect decide the
+        // width meant a long line ran 25 degrees across and off the side of the field -- the
+        // string length silently controlled the layout.
+        let distance = 1.5f32;
+        let half_width_deg = 7.5f32;
+        let width = 2.0 * distance * half_width_deg.to_radians().tan();
+        let height = width / bar.aspect.max(0.01);
+
+        // Anchored by its top-left corner rather than its centre, so the bar stays put in the
+        // corner whatever it happens to say.
+        let left_edge_deg = 17.0f32;
+        let yaw = (left_edge_deg - half_width_deg).to_radians();
+        let pitch = 8.0f32.to_radians();
+        let head = Quat::from_xyzw(
+            orientation.x as f32,
+            orientation.y as f32,
+            orientation.z as f32,
+            orientation.w as f32,
+        );
+        let direction = head * (Quat::from_rotation_z(yaw) * Quat::from_rotation_y(-pitch));
+        let cfg = spatiand_render::StereoConfig::default();
+        let centre = head * Vec3::new(cfg.neck_forward_m as f32, 0.0, cfg.neck_up_m as f32)
+            + direction * Vec3::X * distance;
+
+        // A plate behind it, or the text is unreadable over a bright environment.
+        let backdrop = self.panel_model(centre, direction, width * 1.12, height * 2.0);
+        self.quads.draw(
+            gl,
+            self.white,
+            &(eye.view_projection() * backdrop),
+            [0.02, 0.03, 0.06, 0.55],
+            (0.0, 1.0),
+        );
+        let model = self.panel_model(centre, direction, width, height);
+        self.quads.draw(
+            gl,
+            bar.id,
+            &(eye.view_projection() * model),
+            [1.0, 1.0, 1.0, 0.95],
+            (0.0, 1.0),
+        );
     }
 
     /// Rebuild the menu panel if its text changed.
@@ -544,6 +641,33 @@ impl Scene {
                     accent: [0.62, 0.78, 1.0, 1.0],
                 },
             );
+        }
+
+        // Page dots down the right-hand side, so it is obvious there is more above or below.
+        // Without them a paged grid is indistinguishable from a short one, and nobody presses
+        // down past the last visible row to find out.
+        let pages = launcher.pages();
+        if pages > 1 {
+            let current = launcher.page();
+            let spacing = 3.2f32.to_radians();
+            let side = (COLUMN_SPACING_DEG_LOCAL * 2.2).to_radians();
+            for page in 0..pages {
+                let offset = page as f32 - (pages as f32 - 1.0) * 0.5;
+                let orientation = Quat::from_rotation_z(self.anchor_yaw - side)
+                    * Quat::from_rotation_y(offset * spacing);
+                let centre = self.menu_origin()
+                    + orientation * Vec3::X * spatiand_shell::launcher::ARC_RADIUS_M;
+                let size = if page == current { 0.020f32 } else { 0.012 };
+                let alpha = if page == current { 0.95f32 } else { 0.40 };
+                let model = self.panel_model(centre, orientation, size, size);
+                self.quads.draw(
+                    gl,
+                    self.reticle,
+                    &(eye.view_projection() * model),
+                    [0.78, 0.86, 1.0, alpha],
+                    (0.0, 1.0),
+                );
+            }
         }
 
         // Labels last, so they are never occluded by a neighbouring bubble's glass.
