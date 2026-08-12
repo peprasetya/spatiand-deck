@@ -20,7 +20,8 @@
 //! LIBSEAT_BACKEND=seatd spatiand   # with SPATIAND_BACKEND=drm
 //! ```
 
-use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -84,6 +85,8 @@ pub fn run(
     display: &mut Display<Spatiand>,
     runtime: &mut Runtime,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    GLOBAL_DISPLAY_HANDLE.with(|h| *h.borrow_mut() = Some(runtime.display_handle.clone()));
+
     // --- session ---
     let (session, _notifier) = LibSeatSession::new()?;
     log::info!("seat: {}", session.seat());
@@ -157,6 +160,11 @@ pub fn run(
     let mut keyboard = spatiand_shell::Keyboard::default();
     // Left thumb position while a window is being dragged, for the depth adjustment.
     let mut drag_left_y: Option<f32> = None;
+    let mut monitors = crate::system::Monitors::new();
+    let backlight = crate::system::Backlight::find();
+    let mut cached_volume = crate::system::volume();
+    let mut cached_brightness = backlight.as_ref().and_then(|b| b.level());
+    let mut slow_status = std::time::Instant::now();
 
     // The shell — what is on screen and what a button means. Deliberately built once, outside
     // the output loop: unplugging the glasses must not close your launcher.
@@ -195,12 +203,18 @@ pub fn run(
     // scans out and then nothing ever presents again, which looks like the display going
     // blank a moment after start. That was real: the test pattern showed red for an instant
     // and then went dark.
-    let vblank = Rc::new(Cell::new(false));
+    // Keyed by CRTC, not a single flag. With two screens the flip completions interleave, and
+    // a shared flag lets one screen consume the other's -- after which the compositor believes
+    // a flip is still outstanding and never presents again. That failure is silent and looks
+    // like the second screen having simply stopped.
+    let vblank: Rc<RefCell<HashSet<crtc::Handle>>> = Rc::new(RefCell::new(HashSet::new()));
     let vblank_signal = vblank.clone();
     event_loop
         .handle()
         .insert_source(drm_notifier, move |event, _, _| match event {
-            DrmEvent::VBlank(_) => vblank_signal.set(true),
+            DrmEvent::VBlank(crtc) => {
+                vblank_signal.borrow_mut().insert(crtc);
+            }
             DrmEvent::Error(e) => log::error!("drm error: {e}"),
         })
         .map_err(|e| format!("could not register the drm source: {e}"))?;
@@ -330,6 +344,31 @@ pub fn run(
 
 
 
+        // --- the sidecar, on whatever screen the glasses are not using ---
+        //
+        // Only when the glasses have an external connector: with no headset the world is
+        // already on the panel, and a sidecar competing for it would leave nowhere to show the
+        // "plug in your glasses" prompt.
+        let mut sidecar_surface: Option<SidecarSurface> = None;
+        if !internal {
+            match build_sidecar(&mut drm, &gbm, &mut renderer, connector_info.handle()) {
+                Ok(Some(side)) => {
+                    log::info!(
+                        "sidecar on {} at {}x{}",
+                        side.name,
+                        side.size.0,
+                        side.size.1
+                    );
+                    sidecar_surface = Some(side);
+                }
+                Ok(None) => log::info!("no second connector for a sidecar"),
+                Err(e) => log::warn!("could not bring up the sidecar ({e}); carrying on"),
+            }
+        }
+        let mut sidecar_ui = sidecar_surface
+            .as_ref()
+            .map(|s| crate::sidecar::Sidecar::new(scene.white_texture(), s.size));
+
         let mut pending_flip = false;
 
         // Present one blank frame before doing anything else.
@@ -358,7 +397,7 @@ pub fn run(
             // then waits forever for a vblank that cannot arrive. From outside that is
             // indistinguishable from "the renderer draws nothing" - the display just stays blank
             // - which is exactly how it presented.
-            if vblank.take() {
+            if vblank.borrow_mut().remove(&crtc) {
                 let _ = compositor.frame_submitted();
             } else {
                 // No completion seen yet; let the main loop handle it as a normal pending flip.
@@ -1248,13 +1287,92 @@ pub fn run(
                 }
             }
 
+            // --- the sidecar ---
+            if let (Some(side), Some(ui)) = (sidecar_surface.as_mut(), sidecar_ui.as_mut()) {
+                monitors.tick();
+                if slow_status.elapsed() >= Duration::from_secs(2) {
+                    slow_status = std::time::Instant::now();
+                    cached_volume = crate::system::volume();
+                    cached_brightness = backlight.as_ref().and_then(|b| b.level());
+                }
+                let prepared = ui.prepare(
+                    &mut renderer,
+                    &mut text,
+                    &monitors,
+                    &status_text,
+                    cached_volume,
+                    cached_brightness,
+                );
+                let (sw, sh) = (side.size.0 as i32, side.size.1 as i32);
+                let fbo = side.fbo;
+                let white = scene.white_texture();
+                let quads = scene.quads();
+                let _ = white;
+                renderer.with_context(|gl| unsafe {
+                    gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+                    gl.Disable(ffi::SCISSOR_TEST);
+                    gl.Viewport(0, 0, sw, sh);
+                    gl.ClearColor(0.02, 0.03, 0.05, 1.0);
+                    gl.Clear(ffi::COLOR_BUFFER_BIT);
+                    ui.draw(
+                        gl,
+                        quads,
+                        &monitors,
+                        &status_text,
+                        cached_volume,
+                        cached_brightness,
+                        &prepared,
+                    );
+                    gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+                })?;
+
+                if !side.pending {
+                    let element = TextureRenderElement::from_static_texture(
+                        Id::new(),
+                        renderer.context_id(),
+                        (0.0, 0.0),
+                        side.scene.clone(),
+                        1,
+                        Transform::Normal,
+                        Some(1.0),
+                        None,
+                        None,
+                        None,
+                        Kind::Unspecified,
+                    );
+                    if side
+                        .compositor
+                        .render_frame(
+                            &mut renderer,
+                            &[element],
+                            Color32F::from([0.0, 0.0, 0.0, 1.0]),
+                            FrameFlags::DEFAULT,
+                        )
+                        .is_ok()
+                        && side.compositor.queue_frame(()).is_ok()
+                    {
+                        side.pending = true;
+                    }
+                }
+            }
+
             // --- present ---
             // Acknowledge a completed flip before drawing the next frame.
-            if vblank.take() {
+            if vblank.borrow_mut().remove(&crtc) {
                 if let Err(e) = compositor.frame_submitted() {
                     log::error!("frame_submitted failed: {e}");
                 }
                 pending_flip = false;
+            }
+            // The sidecar flips on its own schedule -- a different CRTC at a different refresh
+            // -- so its completion is acknowledged independently of the glasses'.
+            if let Some(side) = sidecar_surface.as_mut() {
+                if vblank.borrow_mut().remove(&side.crtc) {
+                    if let Err(e) = side.compositor.frame_submitted() {
+                        log::error!("sidecar frame_submitted failed: {e}");
+                    }
+                    side.pending = false;
+                }
             }
             if pending_flip {
                 skipped += 1;
@@ -1430,6 +1548,144 @@ fn first_free_crtc(drm: &DrmDevice, connector: &connector::Info) -> Option<crtc:
         .iter()
         .filter_map(|e| drm.get_encoder(*e).ok())
         .find_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()).first().copied())
+}
+
+/// A second screen, showing the sidecar.
+struct SidecarSurface {
+    compositor: DrmCompositor<
+        GbmAllocator<DrmDeviceFd>,
+        GbmFramebufferExporter<DrmDeviceFd>,
+        (),
+        DrmDeviceFd,
+    >,
+    crtc: crtc::Handle,
+    scene: GlesTexture,
+    fbo: u32,
+    size: (u32, u32),
+    name: String,
+    pending: bool,
+    /// Held so the wayland global lives as long as the surface.
+    _output: Output,
+    _global: smithay::reexports::wayland_server::backend::GlobalId,
+}
+
+/// Bring up the sidecar on a connector the main output is not using.
+///
+/// Returns `Ok(None)` rather than an error when there is simply no second screen: a Deck with
+/// the glasses on its only external port and the panel already in use is a normal state, not a
+/// failure.
+fn build_sidecar(
+    drm: &mut DrmDevice,
+    gbm: &GbmDevice<DrmDeviceFd>,
+    renderer: &mut GlesRenderer,
+    used: connector::Handle,
+) -> Result<Option<SidecarSurface>, Box<dyn std::error::Error>> {
+    let resources = drm.resource_handles()?;
+    let candidates: Vec<connector::Info> = resources
+        .connectors()
+        .iter()
+        .filter_map(|c| drm.get_connector(*c, true).ok())
+        .filter(|c| {
+            c.handle() != used
+                && c.state() == connector::State::Connected
+                && !c.modes().is_empty()
+        })
+        .collect();
+
+    for info in candidates {
+        let Some(mode) = info
+            .modes()
+            .iter()
+            .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+            .or_else(|| info.modes().first())
+            .copied()
+        else {
+            continue;
+        };
+        let Some(crtc) = first_free_crtc(drm, &info) else {
+            continue;
+        };
+        let (w, h) = mode.size();
+
+        let surface = drm.create_surface(crtc, mode, &[info.handle()])?;
+        let allocator = GbmAllocator::new(
+            gbm.clone(),
+            GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+        );
+        let formats = renderer.egl_context().dmabuf_render_formats().clone();
+
+        let name = format!("{}-{}", info.interface().as_str(), info.interface_id());
+        let output = Output::new(
+            name.clone(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Spatiand".into(),
+                model: "Sidecar".into(),
+            },
+        );
+        let output_mode = OutputMode {
+            size: (w as i32, h as i32).into(),
+            refresh: (mode.vrefresh() * 1000) as i32,
+        };
+        output.change_current_state(Some(output_mode), Some(Transform::Normal), None, Some((0, 0).into()));
+        output.set_preferred(output_mode);
+
+        let compositor = DrmCompositor::new(
+            smithay::output::OutputModeSource::Auto(output.clone()),
+            surface,
+            None,
+            allocator,
+            GbmFramebufferExporter::new(gbm.clone(), None),
+            [Fourcc::Argb8888, Fourcc::Xrgb8888],
+            formats,
+            drm.cursor_size(),
+            Some(gbm.clone()),
+        )?;
+
+        let scene: GlesTexture =
+            renderer.create_buffer(Fourcc::Abgr8888, (w as i32, h as i32).into())?;
+        let built = renderer.with_context(|gl| unsafe {
+            let mut fbo = 0;
+            gl.GenFramebuffers(1, &mut fbo);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+            gl.FramebufferTexture2D(
+                ffi::FRAMEBUFFER,
+                ffi::COLOR_ATTACHMENT0,
+                ffi::TEXTURE_2D,
+                scene.tex_id(),
+                0,
+            );
+            let status = gl.CheckFramebufferStatus(ffi::FRAMEBUFFER);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            (fbo, status)
+        })?;
+        if built.1 != ffi::FRAMEBUFFER_COMPLETE {
+            return Err(format!("sidecar framebuffer incomplete: {:#x}", built.1).into());
+        }
+
+        return Ok(Some(SidecarSurface {
+            compositor,
+            crtc,
+            scene,
+            fbo: built.0,
+            size: (w as u32, h as u32),
+            name,
+            pending: false,
+            _global: output.create_global::<Spatiand>(&GLOBAL_DISPLAY_HANDLE.with(|h| {
+                h.borrow().clone().expect("display handle set before build_sidecar")
+            })),
+            _output: output,
+        }));
+    }
+    Ok(None)
+}
+
+thread_local! {
+    /// The display handle, so `build_sidecar` can create the output's global without threading
+    /// `runtime` through a function that has no other use for it.
+    static GLOBAL_DISPLAY_HANDLE: RefCell<Option<smithay::reexports::wayland_server::DisplayHandle>> =
+        const { RefCell::new(None) };
 }
 
 /// Send one key press and release to whatever has keyboard focus.

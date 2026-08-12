@@ -24,8 +24,10 @@ mod icon;
 mod input_map;
 mod pointer;
 mod scene;
+mod sidecar;
 mod state;
 mod status;
+mod system;
 mod window;
 
 pub use state::Spatiand;

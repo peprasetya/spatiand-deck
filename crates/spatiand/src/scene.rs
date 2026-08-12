@@ -251,6 +251,11 @@ impl Scene {
         &self.quads
     }
 
+    /// A 1x1 white texture, for drawing solid shapes.
+    pub fn white_texture(&self) -> u32 {
+        self.white
+    }
+
     /// Replace the environment.
     ///
     /// This is the seam the media player will use: playing a 360 video is exactly "swap the
