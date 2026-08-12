@@ -157,7 +157,7 @@ pub fn run(
     } else {
         None
     };
-    let mut tracker = HeadTracker::new(stored.unwrap_or(AxisMap::IDENTITY), TrackerConfig::default());
+    let mut tracker = HeadTracker::new(stored.unwrap_or(AxisMap::XREAL_AIR), TrackerConfig::default());
 
     // --- the shell ---
     //

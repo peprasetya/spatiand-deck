@@ -65,6 +65,11 @@ const PANEL_DISTANCE: f32 = 1.4;
 /// A pad spans -1..1, so a corner-to-corner drag is 2 units. 260 makes that about two screens
 /// of a text document, which is the same ballpark as a laptop touchpad.
 const SCROLL_SCALE: f64 = 260.0;
+/// How long the headset may stay silent before it is reopened.
+///
+/// The glasses stream at about a kilohertz, so a second of nothing is already thousands of
+/// missing samples. Three is generous enough to survive a stall without flapping.
+const IMU_SILENCE_TIMEOUT: Duration = Duration::from_secs(3);
 const PANEL_WIDTH: f32 = 0.9;
 
 /// How long to wait for the glasses' stereo mode to appear on the connector.
@@ -106,23 +111,17 @@ pub fn run(
 
     // --- headset ---
     //
-    // Opened here, but deliberately NOT switched to stereo yet. See the mode negotiation
-    // below: the switch has to happen after the DisplayPort link is up, not before.
-    let mut hmd = match spatiand_hmd::open_any() {
-        Ok(h) => Some(h),
-        Err(e) => {
-            // Worth being loud. The usual cause is permissions, and the visible symptom is
-            // Spatiand rendering to the wrong screen rather than anything mentioning access:
-            // the hidraw ACL only exists for the active seat0 session, so running outside one
-            // silently loses the glasses. tools/install-udev-rules.sh fixes it for good.
-            log::error!("could not open a headset: {e}");
-            log::error!("  if this is a permissions problem, run: sudo tools/install-udev-rules.sh");
-            None
-        }
-    };
-    if let Some(h) = hmd.as_ref() {
-        log::info!("headset: {}", h.info().name);
-    }
+    // Deliberately NOT opened here. The rebuild loop below opens it as its first act, and
+    // opening it twice is actively harmful: dropping a handle stops the IMU stream, and
+    // `hmd = open_any()` evaluates the new handle *before* dropping the old one. So the second
+    // open starts the stream and the first one's Drop immediately stops it again.
+    //
+    // The result was a session that looked completely fine -- the world drew, stereo
+    // negotiated over the MCU, the glasses lit up -- with no head tracking and no headset
+    // buttons at all, because the device had been told to stop sending. Unplugging and
+    // replugging appeared to "fix" it only because that resets the device and leaves whichever
+    // handle opened last as the only one.
+    let mut hmd: Option<Box<dyn spatiand_hmd::Hmd>> = None;
 
     // Persistent across output changes: these belong to the renderer or the wearer, not
     // to whichever screen is currently being driven.
@@ -185,7 +184,7 @@ pub fn run(
         None
     };
     let mut tracker =
-        HeadTracker::new(stored.unwrap_or(AxisMap::IDENTITY), TrackerConfig::default());
+        HeadTracker::new(stored.unwrap_or(AxisMap::XREAL_AIR), TrackerConfig::default());
 
     // Page-flip completion drives the render loop.
     //
@@ -488,6 +487,9 @@ pub fn run(
         // What the output was built for. If reality diverges, rebuild.
         let built_for_glasses = on_glasses;
         let mut last_presence_check = std::time::Instant::now();
+        // Reset per rebuild: a freshly opened headset has not sent anything yet, and counting
+        // from before it existed would trip the watchdog immediately.
+        let mut last_imu = std::time::Instant::now();
 
         while runtime.state.running {
             // --- input ---
@@ -663,6 +665,19 @@ pub fn run(
                 break;
             }
 
+            // A headset that is open but silent is worse than one that is absent: the world
+            // renders, everything looks healthy, and nothing responds. Reopening costs a
+            // fraction of a second and is always the right answer -- the device is either
+            // wedged or something has told it to stop streaming.
+            if hmd.is_some() && last_imu.elapsed() >= IMU_SILENCE_TIMEOUT {
+                log::warn!(
+                    "no IMU samples for {:?}; reopening the headset",
+                    IMU_SILENCE_TIMEOUT
+                );
+                hmd = None;
+                break;
+            }
+
             // Poll for the glasses appearing or disappearing.
             //
             // Once a second, not per frame: this walks sysfs, and at 72 Hz that would be
@@ -687,6 +702,7 @@ pub fn run(
                 while let Ok(Some(event)) = x.poll(Duration::ZERO) {
                     match event {
                         HmdEvent::Imu(sample) => {
+                            last_imu = std::time::Instant::now();
                             if let Some(c) = calibration.as_mut() {
                                 c.feed(&sample);
                             }

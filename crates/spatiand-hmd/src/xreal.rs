@@ -57,6 +57,13 @@ pub struct XrealGlasses {
 
 impl XrealGlasses {
     /// Find and open the first supported pair of glasses.
+    /// Open the first supported pair of glasses.
+    ///
+    /// **Only ever hold one handle at a time.** [`Drop`] stops the IMU stream, so a second
+    /// handle opened while the first is still alive will be silenced the moment the first goes
+    /// away — and in Rust an assignment evaluates the new value before dropping the old, which
+    /// makes `hmd = open_any()` exactly that pattern. The symptom is a device that looks
+    /// perfectly healthy and never sends a sample.
     pub fn open_any() -> Result<Self> {
         let nodes = hid::enumerate();
         let spec = nodes

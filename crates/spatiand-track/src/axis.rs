@@ -65,6 +65,30 @@ impl AxisMap {
         roll_sign: -1.0,
     };
 
+    /// The XREAL Air's actual axis convention, measured against gravity.
+    ///
+    /// Not a guess and not a calibration result. The glasses were held in three known poses
+    /// while the accelerometer was recorded: level identifies the sensor axis that is head-UP,
+    /// and tipping the nose down leaves the head-LEFT axis unchanged, which names it outright.
+    /// Up is +Z, left is +X, and forward is therefore −Y.
+    ///
+    /// This is the fallback when nothing is stored, in place of [`Self::IDENTITY`]. A generic
+    /// identity map is the *wrong* answer for the only hardware this runs on, and getting it
+    /// wrong is not subtle: looking down rolls the world instead of nodding it.
+    ///
+    /// It belongs in `devices.toml` alongside the other per-device facts once there is a
+    /// second headset to compare against; putting it there now would mean threading an
+    /// `AxisMap` through `spatiand-hmd`, which does not otherwise know the tracker exists.
+    pub const XREAL_AIR: Self = Self {
+        version: CURRENT_VERSION,
+        yaw_axis: 2,
+        yaw_sign: 1.0,
+        pitch_axis: 0,
+        pitch_sign: 1.0,
+        roll_axis: 1,
+        roll_sign: 1.0,
+    };
+
     /// Reorder a raw sensor vector into the canonical head frame.
     ///
     /// Applied to the gyro **and** the accelerometer — gravity correction has to live in the
@@ -239,6 +263,26 @@ mod tests_swap {
             );
             assert!(swapped.is_usable(), "{swapped:?} is not usable");
         }
+    }
+
+    #[test]
+    fn the_measured_map_is_a_usable_rotation() {
+        // It is the default now, so a mistake in transcribing it from the measurement would
+        // ship to everyone rather than to whoever recalibrated.
+        assert!(AxisMap::XREAL_AIR.is_usable());
+        assert!(AxisMap::XREAL_AIR.is_right_handed());
+    }
+
+    #[test]
+    fn the_measured_map_is_not_the_generic_identity() {
+        // The whole point: the identity map differs from this hardware by exactly a pitch/roll
+        // exchange, which is why the wrong default produced "looking down rolls the world".
+        assert_ne!(AxisMap::XREAL_AIR, AxisMap::IDENTITY);
+        assert_eq!(
+            AxisMap::XREAL_AIR.pitch_axis,
+            AxisMap::IDENTITY.roll_axis,
+            "the two differ by exchanging pitch and roll"
+        );
     }
 
     #[test]

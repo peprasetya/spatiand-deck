@@ -54,6 +54,13 @@ pub fn save_axes(map: &AxisMap) -> std::io::Result<PathBuf> {
     let dir = config_dir();
     std::fs::create_dir_all(&dir)?;
     let path = axes_path();
+    // Keep the previous map alongside the new one. Both things that write here -- finishing a
+    // calibration and the HUD's cycle control -- are one button press, and the cycle control
+    // in particular is easy to hit while simply reading the menu. Losing a map that took a
+    // measurement to get right, with no way back, is not a reasonable outcome of that.
+    if path.exists() {
+        let _ = std::fs::copy(&path, dir.join("axes.previous.toml"));
+    }
     let text = toml::to_string_pretty(map)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(&path, text)?;
@@ -78,6 +85,24 @@ mod tests {
         let text = toml::to_string_pretty(&map).unwrap();
         let back: AxisMap = toml::from_str(&text).unwrap();
         assert_eq!(map, back);
+    }
+
+    #[test]
+    fn saving_keeps_the_previous_map() {
+        // The HUD's cycle control is one press away at all times, and a map that took a
+        // measurement to establish should survive being stepped past by accident.
+        let dir = std::env::temp_dir().join(format!("spatiand-axes-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let first = AxisMap::XREAL_AIR;
+        let second = AxisMap::IDENTITY;
+        save_axes(&first).expect("first save");
+        save_axes(&second).expect("second save");
+        let previous = std::fs::read_to_string(config_dir().join("axes.previous.toml"))
+            .expect("previous should have been kept");
+        let recovered: AxisMap = toml::from_str(&previous).expect("parses");
+        assert_eq!(recovered, first);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]
