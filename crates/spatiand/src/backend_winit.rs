@@ -293,8 +293,8 @@ pub fn run(
                             }
                         }
                         // Nothing to hand back in a window on someone else's desktop.
-                        HudAction::SwapPitchRoll => {
-                            let swapped = tracker.axes().with_pitch_roll_swapped();
+                        HudAction::CyclePitchRoll => {
+                            let swapped = tracker.axes().next_pitch_roll_variant();
                             tracker.set_axes(swapped);
                             let _ = spatiand_track::config::save_axes(&swapped);
                             log::info!("axes now {}", swapped.summary());

@@ -38,8 +38,8 @@ pub enum HudAction {
     Calibrate,
     /// Save what the wearer is looking at, so a problem can be shown rather than described.
     Screenshot,
-    /// Exchange the pitch and roll axes of the stored head-tracking map.
-    SwapPitchRoll,
+    /// Step to the next of the four valid pitch/roll interpretations.
+    CyclePitchRoll,
     /// Cycle the 360 environment.
     NextEnvironment,
     /// Hand the display back and return to the desktop session.
@@ -94,9 +94,9 @@ impl Hud {
                 action: HudAction::NextEnvironment,
             },
             HudItem {
-                label: "Swap pitch and roll",
-                detail: "If looking down tilts the world instead of nodding it",
-                action: HudAction::SwapPitchRoll,
+                label: "Fix pitch and roll",
+                detail: "Try the next of four options until nodding nods and leaning leans",
+                action: HudAction::CyclePitchRoll,
             },
             HudItem {
                 label: "Take a screenshot",

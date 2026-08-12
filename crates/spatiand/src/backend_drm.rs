@@ -168,8 +168,6 @@ pub fn run(
     };
     let mut tracker =
         HeadTracker::new(stored.unwrap_or(AxisMap::IDENTITY), TrackerConfig::default());
-    // What the axes were before the last pitch/roll swap, so the toggle is exact.
-    let mut previous_axes: Option<AxisMap> = None;
 
     // Page-flip completion drives the render loop.
     //
@@ -560,7 +558,7 @@ pub fn run(
                             sky_dirty = true;
                         }
                         HudAction::Screenshot => screenshot = true,
-                        HudAction::SwapPitchRoll => {
+                        HudAction::CyclePitchRoll => {
                             // Applied live and stored, so the wearer can see which way round
                             // is right rather than having to reason about it. Calibration
                             // cannot tell a nod from a tilt performed in its place -- both
@@ -570,18 +568,12 @@ pub fn run(
                             // Toggling restores the *remembered* previous map rather than
                             // swapping a second time: the swap is not its own inverse, so
                             // pressing twice would otherwise land on a third map.
-                            let current = tracker.axes();
-                            let swapped = match previous_axes.take() {
-                                Some(previous) => previous,
-                                None => {
-                                    previous_axes = Some(current);
-                                    current.with_pitch_roll_swapped()
-                                }
-                            };
+                            let swapped = tracker.axes().next_pitch_roll_variant();
                             tracker.set_axes(swapped);
                             match spatiand_track::config::save_axes(&swapped) {
                                 Ok(path) => log::info!(
-                                    "axes now {} (saved to {})",
+                                    "axes option {} of 4: {} (saved to {})",
+                                    swapped.variant_index() + 1,
                                     swapped.summary(),
                                     path.display()
                                 ),
@@ -755,7 +747,7 @@ pub fn run(
             scene.sync_menu(
                 &mut renderer,
                 &mut text,
-                &menu_text(&shell),
+                &menu_text_with(&shell, Some(tracker.axes())),
                 ppd,
                 stereo.per_eye.0.saturating_sub(160).max(64),
             )?;
@@ -1065,6 +1057,11 @@ fn first_free_crtc(drm: &DrmDevice, connector: &connector::Info) -> Option<crtc:
 /// resolution one eye actually resolves, a settings list *is* text — giving each row its own
 /// quad would buy nothing and cost a dozen uploads every time the cursor moved.
 pub fn menu_text(shell: &Shell) -> String {
+    menu_text_with(shell, None)
+}
+
+/// As [`menu_text`], but able to show live state the shell itself does not hold.
+fn menu_text_with(shell: &Shell, axes: Option<spatiand_track::AxisMap>) -> String {
     match shell.mode() {
         Mode::World => String::new(),
         Mode::Hud => {
@@ -1077,7 +1074,16 @@ pub fn menu_text(shell: &Shell) -> String {
                 out.push_str(item.label);
                 out.push('\n');
             }
-            out.push_str(&format!("\n{}\n\nA select    B back", hud.focused().detail));
+            out.push_str(&format!("\n{}", hud.focused().detail));
+            if let Some(map) = axes {
+                if matches!(hud.focused().action, HudAction::CyclePitchRoll) {
+                    out.push_str(&format!(
+                        "\n\nnow using option {} of 4",
+                        map.variant_index() + 1
+                    ));
+                }
+            }
+            out.push_str("\n\nA select    B back");
             out
         }
         Mode::Launcher if shell.launcher().is_empty() => {
