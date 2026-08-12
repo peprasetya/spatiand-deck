@@ -31,10 +31,23 @@ use crate::gl::{upload_raw, upload_rgba, BubbleParams, BubblePipeline, QuadPipel
 /// stays the same size on screen wherever it lands.
 const RETICLE_DEG: f32 = 1.1;
 /// Diameter of a launcher bubble, metres, at the arc radius.
-const BUBBLE_DIAMETER_M: f32 = 0.30;
+///
+/// 0.16 m at 2 m is about 4.6°. That sounds small and is not: it is roughly a thumbnail at
+/// arm's length, and at 48 px per degree it still gets ~220 px of icon.
+///
+/// The size is forced by the vertical field. Three rows of bubbles *plus their labels* have to
+/// fit inside 23°, and at the 0.30 m this started with, the top and bottom rows were simply
+/// outside the field — visible only by tilting your head.
+const BUBBLE_DIAMETER_M: f32 = 0.16;
 /// Where the key light sits, matching the one baked into the generated environment so the
 /// specular highlights agree with the background.
 const LIGHT_DIR: Vec3 = Vec3::new(0.55, 0.6, 0.58);
+/// Resolution icons are rasterised at.
+///
+/// A bubble is ~4.6° across and the display resolves ~48 px per degree, so the icon inside it
+/// occupies roughly 140 px. 256 leaves room for the focused bubble's scale-up and for a
+/// headset with better optics, without being wasteful across forty apps.
+const ICON_TEXTURE_PX: u32 = 256;
 
 /// A texture and the aspect ratio of the image in it.
 #[derive(Clone, Copy)]
@@ -195,16 +208,33 @@ impl Scene {
             .iter()
             .map(|a| text.render(&a.name, px_per_degree * 0.75, 512, [232, 238, 255, 255]))
             .collect();
-        // The glyph inside the glass. A real themed icon would be better and is the obvious
-        // next step; an initial is legible at bubble size and, unlike a missing icon file,
-        // always exists.
+        // The icon inside the glass: the system's own, so an app looks the same here as it
+        // does on the desktop. Falling back to the initial rather than to a blank or a
+        // question mark — plenty of entries name an icon that is not installed, and a letter
+        // is at least identifiable.
+        let mut resolved = 0usize;
         let glyphs: Vec<TextImage> = apps
             .iter()
             .map(|a| {
-                let initial = a.name.chars().next().unwrap_or('?').to_uppercase().to_string();
-                text.render(&initial, px_per_degree * 4.0, 256, [255, 255, 255, 235])
+                let from_theme = a
+                    .icon
+                    .as_deref()
+                    .and_then(|name| spatiand_platform::resolve_icon(name))
+                    .and_then(|path| crate::icon::load(&path, ICON_TEXTURE_PX));
+                match from_theme {
+                    Some(image) => {
+                        resolved += 1;
+                        image
+                    }
+                    None => {
+                        let initial =
+                            a.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                        text.render(&initial, px_per_degree * 4.0, 256, [255, 255, 255, 235])
+                    }
+                }
             })
             .collect();
+        log::info!("launcher icons: {resolved} of {} from the icon theme", apps.len());
 
         let old: Vec<u32> = self
             .app_labels
@@ -275,28 +305,28 @@ impl Scene {
     ///
     /// # Safety
     /// Context must be current.
-    pub unsafe fn draw_menu(&self, gl: &ffi::Gles2, eye: &Eye, shell: &Shell) {
+    pub unsafe fn draw_menu(&self, gl: &ffi::Gles2, eye: &Eye, shell: &Shell, fov: (f64, f64)) {
         match shell.mode() {
             Mode::World => {}
-            Mode::Hud => self.draw_hud(gl, eye),
-            Mode::Launcher => self.draw_launcher(gl, eye, shell),
+            Mode::Hud => self.draw_hud(gl, eye, fov),
+            Mode::Launcher => self.draw_launcher(gl, eye, shell, fov),
         }
     }
 
-    unsafe fn draw_hud(&self, gl: &ffi::Gles2, eye: &Eye) {
+    unsafe fn draw_hud(&self, gl: &ffi::Gles2, eye: &Eye, fov: (f64, f64)) {
         let Some(panel) = self.menu else {
             return;
         };
         let distance = 1.6f32;
-        // A dimming plate behind the text. Reading a list against a busy 360 photograph is
-        // otherwise genuinely hard, and no amount of text weight fixes it.
-        let height = 0.9f32;
-        let width = height * panel.aspect.max(0.01);
+        // Fitted to the field of view, not to a constant. A fixed 0.9 m tall panel at 1.6 m
+        // subtends 31 degrees against a 23 degree vertical field -- so the first and last rows
+        // of the settings list were always off screen, whatever the list contained.
+        let (width, height) = fit_to_fov(panel.aspect, fov.0, fov.1, distance);
         let backdrop = self.panel_model(
-            self.anchor_direction() * distance,
+            self.menu_centre(distance),
             self.anchor_quat(),
-            width * 1.18,
-            height * 1.25,
+            width * 1.14,
+            height * 1.18,
         );
         self.quads.draw(
             gl,
@@ -305,12 +335,7 @@ impl Scene {
             [0.02, 0.03, 0.06, 0.72],
             (0.0, 1.0),
         );
-        let model = self.panel_model(
-            self.anchor_direction() * distance,
-            self.anchor_quat(),
-            width,
-            height,
-        );
+        let model = self.panel_model(self.menu_centre(distance), self.anchor_quat(), width, height);
         self.quads.draw(
             gl,
             panel.id,
@@ -320,11 +345,11 @@ impl Scene {
         );
     }
 
-    unsafe fn draw_launcher(&self, gl: &ffi::Gles2, eye: &Eye, shell: &Shell) {
+    unsafe fn draw_launcher(&self, gl: &ffi::Gles2, eye: &Eye, shell: &Shell, fov: (f64, f64)) {
         let launcher = shell.launcher();
         if launcher.is_empty() {
             // Say so, rather than showing an empty sky that looks like a failure to open.
-            self.draw_hud(gl, eye);
+            self.draw_hud(gl, eye, fov);
             return;
         }
 
@@ -339,7 +364,7 @@ impl Scene {
         for (index, placement) in launcher.placements() {
             let yaw = placement.yaw + self.anchor_yaw;
             let orientation = Quat::from_rotation_z(yaw) * Quat::from_rotation_y(-placement.pitch);
-            let centre = orientation * Vec3::X * placement.radius;
+            let centre = self.menu_origin() + orientation * Vec3::X * placement.radius;
             let size = BUBBLE_DIAMETER_M * placement.scale;
             let focus = if placement.scale > 1.0 { 1.0 } else { 0.0 };
 
@@ -367,9 +392,13 @@ impl Scene {
             };
             let yaw = placement.yaw + self.anchor_yaw;
             let orientation = Quat::from_rotation_z(yaw) * Quat::from_rotation_y(-placement.pitch);
-            let drop = BUBBLE_DIAMETER_M * 0.78;
-            let centre = orientation * Vec3::X * placement.radius - Vec3::Z * drop;
-            let height = 0.045f32;
+            // Clear of the glass even when the bubble is the focused one and 18% larger --
+            // measured against that, not against the resting size, or the label rides up onto
+            // the icon of whichever bubble you are actually looking at.
+            let drop = BUBBLE_DIAMETER_M * 0.5 * placement.scale + 0.022;
+            let centre =
+                self.menu_origin() + orientation * Vec3::X * placement.radius - Vec3::Z * drop;
+            let height = 0.022f32;
             let width = height * label.aspect.max(0.01);
             let model = self.panel_model(centre, orientation, width, height);
             let alpha = if placement.scale > 1.0 { 1.0 } else { 0.55 };
@@ -442,9 +471,38 @@ impl Scene {
         Quat::from_rotation_z(self.anchor_yaw)
     }
 
-    fn anchor_direction(&self) -> Vec3 {
-        self.anchor_quat() * Vec3::X
+    /// Centre of a body-locked menu, in world space.
+    ///
+    /// Measured from the eye rather than the pivot: the neck model lifts the eyes about 7.5 cm,
+    /// and a menu centred on the origin therefore hangs a few degrees low - which costs it its
+    /// bottom row off the edge of the field.
+    fn menu_centre(&self, distance: f32) -> Vec3 {
+        self.menu_origin() + self.anchor_quat() * Vec3::X * distance
     }
+
+    /// Where the eyes are when facing the menu's anchor.
+    ///
+    /// Everything body-locked hangs off this rather than off the world origin. The neck model
+    /// puts the eyes ~7.5 cm above the pivot, which at a 2 m radius is 2.15° - small enough to
+    /// sound ignorable and large enough to push the bottom row of a three-row grid off the
+    /// edge of a 23° field, which is exactly what it did.
+    fn menu_origin(&self) -> Vec3 {
+        let cfg = spatiand_render::StereoConfig::default();
+        self.anchor_quat() * Vec3::new(cfg.neck_forward_m as f32, 0.0, cfg.neck_up_m as f32)
+    }
+}
+
+/// Largest quad of a given aspect ratio that fits inside a field of view at `distance`.
+///
+/// Shared by everything that has to sit in front of the wearer. The margin is not politeness:
+/// the glasses' usable area is meaningfully smaller than their nominal field, and content that
+/// reaches the nominal edge is already unreadable.
+fn fit_to_fov(aspect: f32, h_fov_deg: f64, v_fov_deg: f64, distance: f32) -> (f32, f32) {
+    let usable = 0.68;
+    let extent = |fov: f64| 2.0 * distance * ((fov * usable / 2.0).to_radians().tan() as f32);
+    let aspect = aspect.max(0.01);
+    let width = extent(h_fov_deg).min(extent(v_fov_deg) * aspect);
+    (width, width / aspect)
 }
 
 /// Build the pointer reticle: a bright dot inside a thin ring.
@@ -495,6 +553,27 @@ pub fn window_quad(placement: &crate::window::Placement, aspect: f64) -> Quad {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fitted_panel_stays_inside_both_axes_of_the_field() {
+        // The bug this guards: a panel correctly sized for its width but taller than the
+        // vertical field, which loses its first and last lines with no other symptom.
+        for aspect in [0.4f32, 1.0, 1.73, 4.0] {
+            let (w, h) = fit_to_fov(aspect, 40.0, 23.14, 1.6);
+            let angular = |extent: f32| 2.0 * (extent / 2.0 / 1.6).atan().to_degrees();
+            assert!(angular(w) <= 40.0, "aspect {aspect}: {} deg wide", angular(w));
+            assert!(angular(h) <= 23.14, "aspect {aspect}: {} deg tall", angular(h));
+            assert!((w / h - aspect).abs() < 1e-4, "aspect not preserved");
+        }
+    }
+
+    #[test]
+    fn a_fitted_panel_leaves_a_margin() {
+        // Filling the nominal field exactly is already too much: the optics are worst there.
+        let (_, h) = fit_to_fov(1.0, 40.0, 23.14, 1.6);
+        let angular = 2.0 * (h / 2.0 / 1.6).atan().to_degrees();
+        assert!(angular < 23.14 * 0.8, "no margin left: {angular} deg of 23.14");
+    }
 
     #[test]
     fn the_reticle_is_transparent_at_its_corners_and_solid_at_its_centre() {

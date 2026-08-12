@@ -25,17 +25,11 @@ const REG_LPAD_MODE: u8 = 0x07;
 const REG_RPAD_MODE: u8 = 0x08;
 const REG_RPAD_MARGIN: u8 = 0x18;
 const REG_GYRO_MODE: u8 = 0x30;
-const REG_LPAD_CLICK_PRESSURE: u8 = 0x34;
-const REG_RPAD_CLICK_PRESSURE: u8 = 0x35;
 
 /// Pad mode 7: report absolute position, no emulation.
 const PAD_MODE_ABSOLUTE: u16 = 0x07;
 /// Gyro mode 0x18: accelerometer *and* gyroscope.
 const GYRO_MODE_ACCEL_AND_GYRO: u16 = 0x18;
-/// Click pressure at maximum, i.e. the firmware never synthesises a click of its own. We read
-/// the click bit out of the report instead, which is what makes a click distinguishable from
-/// a firm touch.
-const CLICK_PRESSURE_MAX: u16 = 0xFFFF;
 
 /// Reports are 64 bytes; the ioctl buffer carries a leading report-id byte as well.
 const FEATURE_BUF_LEN: usize = 65;
@@ -95,8 +89,11 @@ pub fn take(device: &HidDevice) -> Result<()> {
             // No dead margin at the edge of the right pad: the pointer maps the pad
             // absolutely, so a margin would make the edges of the view unreachable.
             (REG_RPAD_MARGIN, 0x0000),
-            (REG_LPAD_CLICK_PRESSURE, CLICK_PRESSURE_MAX),
-            (REG_RPAD_CLICK_PRESSURE, CLICK_PRESSURE_MAX),
+            // Click pressure is deliberately LEFT ALONE. Raising it to maximum stops the
+            // firmware registering a click at all, and the pads then feel dead under the
+            // thumb - no detent, no haptic - while still reporting position. That is a
+            // horrible failure mode, because the pad looks like it is working in the logs.
+            // The click bit we read comes from the physical switch either way.
             (REG_GYRO_MODE, GYRO_MODE_ACCEL_AND_GYRO),
         ],
     )?;

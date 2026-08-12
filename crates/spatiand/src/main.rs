@@ -15,10 +15,12 @@ use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
 
 mod backend_drm;
+mod backend_snapshot;
 mod backend_winit;
 mod calib;
 mod environment;
 mod gl;
+mod icon;
 mod input_map;
 mod scene;
 mod state;
@@ -63,8 +65,16 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        // Renders one frame to a PNG with no display, no session and no headset. The only
+        // way to see a layout bug without putting the glasses on and describing it.
+        "snapshot" => {
+            if let Err(e) = backend_snapshot::run() {
+                log::error!("snapshot backend failed: {e}");
+                std::process::exit(1);
+            }
+        }
         other => {
-            log::error!("unknown backend {other:?}; expected winit or drm");
+            log::error!("unknown backend {other:?}; expected winit, drm or snapshot");
             std::process::exit(1);
         }
     }

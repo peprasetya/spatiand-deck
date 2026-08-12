@@ -157,9 +157,6 @@ pub fn run(
     let mut environments = Environments::discover();
     let mut sky_image = environments.current();
     let mut sky_dirty = false;
-    // Whether to ask the glasses for side-by-side at all. Toggled from the HUD; consulted by
-    // the negotiation below, which is why it lives outside the rebuild loop.
-    let mut want_stereo = true;
     // Owns the three pipelines and every texture that outlives one frame.
     let mut scene = Scene::new(&mut renderer, &sky_image)?;
     let stored = spatiand_track::config::load_axes();
@@ -213,8 +210,18 @@ pub fn run(
         };
 
         // --- pick a connector, at its native mode ---
-        let (connector_info, crtc, mode) =
-            pick_output(&drm).ok_or("no usable connector found")?;
+        //
+        // Every failure from here to the end of setup is *retried*, not propagated. Unplugging
+        // the glasses tears the connector out from under this loop mid-rebuild, and treating
+        // that as fatal ended the whole session - which is exactly the opposite of what
+        // unplugging should do. Whatever went wrong, the right answer is to wait and look
+        // again.
+        let Some((connector_info, crtc, mode)) = pick_output(&drm) else {
+            log::warn!("no usable connector right now; waiting for one");
+            std::thread::sleep(Duration::from_millis(500));
+            event_loop.dispatch(Some(Duration::from_millis(50)), runtime)?;
+            continue;
+        };
         let (w, h) = mode.size();
         log::info!(
             "output: {}-{} at {w}x{h}@{}",
@@ -240,7 +247,15 @@ pub fn run(
             log::info!("output is portrait ({w}x{h}); rotating content a quarter turn");
         }
 
-        let surface = drm.create_surface(crtc, mode, &[connector_info.handle()])?;
+        let surface = match drm.create_surface(crtc, mode, &[connector_info.handle()]) {
+            Ok(s) => s,
+            Err(e) => {
+                // Almost always "the display just went away". Retry rather than quit.
+                log::warn!("could not create a surface ({e}); retrying");
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        };
         let allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
         let formats = renderer.egl_context().dmabuf_render_formats().clone();
 
@@ -347,7 +362,7 @@ pub fn run(
         let mut w = w;
         let mut h = h;
         let mut on_glasses = false;
-        if !internal && want_stereo {
+        if !internal {
             if let Some(x) = hmd.as_mut() {
                 // Force a real transition: mono first, then stereo.
                 //
@@ -368,7 +383,7 @@ pub fn run(
                     Ok(m) => log::info!("headset display mode -> {m:?}"),
                     Err(e) => log::warn!("could not switch to stereo ({e}); staying mono"),
                 }
-                if let Some(stereo_mode) = wait_for_stereo_mode(&drm, connector_info.handle()) {
+                if let Some(stereo_mode) = wait_for_stereo_mode(&drm, connector_info.handle(), w) {
                     let (sw, sh) = stereo_mode.size();
                     log::info!("stereo mode {sw}x{sh}@{} appeared; adopting", stereo_mode.vrefresh());
                     match compositor.use_mode(stereo_mode) {
@@ -389,16 +404,6 @@ pub fn run(
                     }
                 } else {
                     log::warn!("the glasses never advertised a double-width mode; staying mono");
-                }
-            }
-        } else if !internal && !want_stereo {
-            // Stereo turned off from the HUD. The glasses have to be told: left in
-            // side-by-side they go on splitting a signal we are no longer rendering that way,
-            // and each eye gets half a squashed desktop.
-            if let Some(x) = hmd.as_mut() {
-                match x.set_display_mode(DisplayMode::Mono) {
-                    Ok(m) => log::info!("headset display mode -> {m:?}"),
-                    Err(e) => log::warn!("could not return the glasses to mono ({e})"),
                 }
             }
         }
@@ -475,7 +480,7 @@ pub fn run(
             let mut shell_events: Vec<ShellEvent> = Vec::new();
             let mut pointer: Option<(f32, f32, bool)> = None;
             let mut leaving = false;
-            let mut rebuild = false;
+            let mut screenshot = false;
             if let Some(c) = controller.as_mut() {
                 c.poll();
                 if hmd.is_none() {
@@ -488,6 +493,17 @@ pub fn run(
                     }
                 } else {
                     for control in c.pressed() {
+                        // Calibration owns B while it runs. It takes over the whole view and
+                        // drives itself on timers, so the shell's menus are unreachable
+                        // anyway - and without this there is no way to abandon a run.
+                        if *control == spatiand_input::Control::B && calibration.is_some() {
+                            match calibration.as_mut() {
+                                Some(c) if c.is_finished() => calibration = None,
+                                Some(c) => c.cancel(),
+                                None => {}
+                            }
+                            continue;
+                        }
                         if let Some(intent) = intent_for(*control) {
                             if let Some(event) = shell.handle(intent) {
                                 shell_events.push(event);
@@ -541,14 +557,7 @@ pub fn run(
                             sky_image = environments.current();
                             sky_dirty = true;
                         }
-                        HudAction::ToggleStereo => {
-                            // Handled by rebuilding the output rather than switching in
-                            // place: the mode change swaps the glasses' EDID, so the
-                            // connector, the surface and the swapchain all have to follow.
-                            want_stereo = !want_stereo;
-                            log::info!("stereo -> {want_stereo}; rebuilding the output");
-                            rebuild = true;
-                        }
+                        HudAction::Screenshot => screenshot = true,
                         HudAction::ReturnToDesktop => leaving = true,
                         HudAction::OpenSystemSettings(module) => {
                             let command = format!("kcmshell6 {module}");
@@ -561,12 +570,6 @@ pub fn run(
                         HudAction::Dismiss => {}
                     },
                 }
-            }
-            if rebuild {
-                // Leave the frame loop so the output is built again from scratch. Breaking
-                // out of the `for` above would only have ended the event loop, and the
-                // presence check cannot notice this because the glasses have not moved.
-                break;
             }
             if leaving {
                 // Exiting is not enough. SDDM restarts whatever the default session is, and
@@ -622,7 +625,10 @@ pub fn run(
                         log::info!("adopting measured axes: {}", map.summary());
                         tracker.set_axes(map);
                     }
-                    if c.stage() == crate::calib::Stage::Done {
+                    if matches!(
+                        c.stage(),
+                        crate::calib::Stage::Done | crate::calib::Stage::Cancelled
+                    ) {
                         calibration = None;
                     }
                 }
@@ -801,7 +807,7 @@ pub fn run(
                         if !waiting {
                             scene.draw_sky(gl, &eye);
                         }
-                        scene.draw_menu(gl, &eye, &shell);
+                        scene.draw_menu(gl, &eye, &shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
                         if let Some(ray) = pointer_ray {
                             scene.draw_pointer(gl, &eye, &ray, None);
                         }
@@ -823,6 +829,15 @@ pub fn run(
                     }
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
                 })?;
+            }
+
+            if screenshot {
+                // Read back the frame we just drew rather than re-rendering it, so what lands
+                // in the file is exactly what was on the glass -- including both eyes.
+                match capture(&mut renderer, target_fbo, w as u32, h as u32) {
+                    Ok(path) => log::info!("screenshot saved to {}", path.display()),
+                    Err(e) => log::warn!("could not save a screenshot: {e}"),
+                }
             }
 
             // --- present ---
@@ -971,17 +986,27 @@ fn pick_output(
 fn wait_for_stereo_mode(
     drm: &DrmDevice,
     handle: connector::Handle,
+    mono_width: u16,
 ) -> Option<smithay::reexports::drm::control::Mode> {
     let deadline = std::time::Instant::now() + STEREO_MODE_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if let Ok(fresh) = drm.get_connector(handle, true) {
             // A double-width mode is how the glasses advertise that side-by-side is live -
             // the same signal XREAL's own software uses (docs/xreal-air.md §9).
-            if let Some(m) = fresh
+            //
+            // Matched by *shape* rather than against a hardcoded 3840x1080. That number is one
+            // model's answer: the Air is 1920x1080 per eye, but the One Pro is 1920x1200, and
+            // whatever comes next will be something else again. What is always true is that
+            // the side-by-side mode is twice as wide as the mono one at the same height.
+            let best = fresh
                 .modes()
                 .iter()
-                .find(|m| m.size().0 >= 3840 && m.size().1 == 1080)
-            {
+                .filter(|m| {
+                    let (w, _) = m.size();
+                    w >= mono_width.saturating_mul(2)
+                })
+                .max_by_key(|m| (m.size().0 as u32) * (m.size().1 as u32));
+            if let Some(m) = best {
                 return Some(*m);
             }
         }
@@ -1027,6 +1052,67 @@ pub fn menu_text(shell: &Shell) -> String {
     }
 }
 
+/// Save the frame just drawn.
+///
+/// Goes to the user's screenshot folder rather than anywhere Spatiand-specific, because the
+/// point of it is to be found: with the world only visible inside the glasses, a photograph is
+/// impossible and describing a layout bug is slow and lossy. A file with a timestamp is the
+/// difference between "the text is off screen" and being able to see which text and by how far.
+fn capture(
+    renderer: &mut GlesRenderer,
+    fbo: u32,
+    width: u32,
+    height: u32,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    renderer.with_context(|gl| unsafe {
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+        gl.ReadPixels(
+            0,
+            0,
+            width as i32,
+            height as i32,
+            ffi::RGBA,
+            ffi::UNSIGNED_BYTE,
+            pixels.as_mut_ptr() as *mut _,
+        );
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+    })?;
+
+    // The scene texture already holds the image flipped (see the note on flip_y), so reading
+    // it back bottom-row-first flips it a second time and lands the right way up.
+    let dir = screenshot_directory();
+    std::fs::create_dir_all(&dir)?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("spatiand-{stamp}.png"));
+    image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8)?;
+    Ok(path)
+}
+
+/// Where screenshots go: `XDG_PICTURES_DIR/Screenshots` if the user has one, else the
+/// conventional `~/Pictures/Screenshots`.
+fn screenshot_directory() -> std::path::PathBuf {
+    if let Ok(explicit) = std::env::var("SPATIAND_SCREENSHOTS") {
+        return std::path::PathBuf::from(explicit);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    // user-dirs.dirs is the freedesktop record of where Pictures actually is, which is not
+    // always ~/Pictures once a locale is involved.
+    let config = std::path::Path::new(&home).join(".config/user-dirs.dirs");
+    if let Ok(text) = std::fs::read_to_string(&config) {
+        for line in text.lines() {
+            if let Some(value) = line.strip_prefix("XDG_PICTURES_DIR=") {
+                let cleaned = value.trim().trim_matches('"').replace("$HOME", &home);
+                return std::path::PathBuf::from(cleaned).join("Screenshots");
+            }
+        }
+    }
+    std::path::Path::new(&home).join("Pictures/Screenshots")
+}
+
 /// Point SDDM back at the desktop session, so exiting actually leaves spatial mode.
 ///
 /// steamosctl owns the autologin drop-in; writing that file directly does not work, because
@@ -1050,7 +1136,7 @@ fn return_to_desktop() {
 /// portrait panel the same panel is rolled a quarter turn, so the image's *width* now runs
 /// along the screen's short axis and the heading runs off the edge. Fitting to the actual
 /// FOV handles both, and any future headset, without a magic number per device.
-fn fit_panel(aspect: f32, h_fov_deg: f64, v_fov_deg: f64, portrait: bool) -> (f32, f32) {
+pub fn fit_panel(aspect: f32, h_fov_deg: f64, v_fov_deg: f64, portrait: bool) -> (f32, f32) {
     // After a quarter turn the image's width spans the screen's vertical extent and its
     // height spans the horizontal one.
     let (fov_for_width, fov_for_height) = if portrait {
@@ -1059,8 +1145,10 @@ fn fit_panel(aspect: f32, h_fov_deg: f64, v_fov_deg: f64, portrait: bool) -> (f3
         (h_fov_deg, v_fov_deg)
     };
     // Leave a margin. Text touching the edge of the field is uncomfortable to read even when
-    // it technically fits, because it sits where the optics are worst.
-    let usable = 0.8;
+    // it technically fits, because it sits where the optics are worst -- and the glasses'
+    // usable area is smaller than their nominal field, so 0.8 was still too generous in
+    // practice: every prompt reached the edge.
+    let usable = 0.68;
     let extent = |fov: f64| 2.0 * PANEL_DISTANCE * ((fov * usable / 2.0).to_radians().tan() as f32);
     let max_w = extent(fov_for_width);
     let max_h = extent(fov_for_height);
@@ -1075,13 +1163,25 @@ fn fit_panel(aspect: f32, h_fov_deg: f64, v_fov_deg: f64, portrait: bool) -> (f3
 /// `portrait` rolls the content a quarter turn for the Deck's built-in screen, which is
 /// mounted sideways. The roll is applied about the view axis (+X, forward) *after* the head
 /// orientation, so it rotates the image on the glass rather than tilting the world.
-fn head_locked_panel_sized(orientation: DQuat, width: f32, height: f32, portrait: bool) -> Mat4 {
+///
+/// The panel hangs off the **eye centre**, not the origin. The neck model puts the eyes about
+/// 7.5 cm above and 10 cm in front of the pivot, so a panel centred on the origin sits a few
+/// degrees below where you are looking - enough that a correctly-sized panel still loses its
+/// bottom line off the edge of the field. That was the bug behind "the text is off screen":
+/// the panel was the right size and in the wrong place.
+pub fn head_locked_panel_sized(orientation: DQuat, width: f32, height: f32, portrait: bool) -> Mat4 {
     let _ = PANEL_WIDTH;
+    let cfg = StereoConfig::default();
+    let centre = Vec3::new(
+        (cfg.neck_forward_m as f32) + PANEL_DISTANCE,
+        0.0,
+        cfg.neck_up_m as f32,
+    );
     let basis = Mat4::from_cols(
         (-Vec3::Y * width).extend(0.0),
         (Vec3::Z * height).extend(0.0),
         Vec3::X.extend(0.0),
-        (Vec3::X * PANEL_DISTANCE).extend(1.0),
+        centre.extend(1.0),
     );
     let roll = if portrait {
         Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2)

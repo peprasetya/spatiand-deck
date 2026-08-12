@@ -206,39 +206,52 @@ impl Sky {
                 let azimuth = (u - 0.5) * 2.0 * PI;
                 let dir = [ce * azimuth.cos(), -ce * azimuth.sin(), se];
 
-                // Vertical grade: near-black underfoot, a warm band at the horizon, deep blue
-                // overhead. The horizon band is what gives the eye a level reference, which
-                // matters more for comfort than for looks.
-                let horizon = (1.0 - (se.abs() * 3.0).min(1.0)).powf(2.2);
-                let sky = (se.max(0.0)).powf(0.75);
-                let ground = (-se).max(0.0).powf(0.6);
+                // Vertical grade. Deliberately dark and high-contrast: a pale, even sky
+                // gives the eye nothing to converge on and the whole world reads as flat fog,
+                // which is exactly how the first version looked. Depth here comes from the
+                // floor's perspective and from what is drawn against it, so the background's
+                // job is to stay out of the way and give those something to sit against.
+                let horizon = (1.0 - (se.abs() * 4.0).min(1.0)).powf(3.0);
+                let sky = (se.max(0.0)).powf(0.7);
+                let ground = (-se).max(0.0).powf(0.5);
 
-                let mut r = 0.030 + sky * 0.055 + horizon * 0.170 - ground * 0.020;
-                let mut g = 0.038 + sky * 0.085 + horizon * 0.150 - ground * 0.026;
-                let mut b = 0.062 + sky * 0.180 + horizon * 0.135 - ground * 0.040;
+                let mut r = 0.008 + sky * 0.020 + horizon * 0.085 - ground * 0.004;
+                let mut g = 0.011 + sky * 0.034 + horizon * 0.070 - ground * 0.006;
+                let mut b = 0.024 + sky * 0.085 + horizon * 0.062 - ground * 0.012;
 
                 // Key light: a soft, wide glow rather than a disc, so it reads as studio
                 // lighting instead of as a sun someone forgot to draw.
                 let cos_key = dot(dir, key_dir).max(0.0);
-                let glow = cos_key.powf(18.0) * 0.55 + cos_key.powf(3.0) * 0.10;
+                let glow = cos_key.powf(24.0) * 0.42 + cos_key.powf(4.0) * 0.055;
                 r += glow * 1.00;
-                g += glow * 0.95;
-                b += glow * 0.86;
+                g += glow * 0.94;
+                b += glow * 0.84;
 
-                // A faint ground grid, fading out with distance. Gives the floor a sense of
-                // scale, which a pure gradient cannot, and costs nothing to generate.
-                if se < -0.02 {
-                    let fade = ((-se - 0.02) * 2.2).min(1.0).powf(0.7);
+                // The floor grid is what actually carries the depth cue. Concentric rings
+                // converging towards the horizon give the eye a perspective reference that no
+                // amount of gradient can, and it is the one part of the background that says
+                // "this is a space" rather than "this is a backdrop".
+                if se < -0.015 {
+                    let fade = ((-se - 0.015) * 2.6).min(1.0).powf(0.55);
                     let radius = ce / (-se).max(1e-3);
-                    if radius < 40.0 {
-                        let ring = grid_line(radius, 1.0);
-                        let spoke = grid_line(azimuth * 12.0 / PI, 1.0);
-                        let line = ring.max(spoke) * fade * (1.0 - (radius / 40.0)).max(0.0);
-                        r += line * 0.10;
-                        g += line * 0.13;
-                        b += line * 0.18;
+                    if radius < 60.0 {
+                        let distance_fade = (1.0 - radius / 60.0).max(0.0).powf(1.4);
+                        let ring = grid_line(radius * 0.5, 1.0);
+                        let spoke = grid_line(azimuth * 16.0 / PI, 1.0);
+                        let line = ring.max(spoke * 0.8) * fade * distance_fade;
+                        r += line * 0.16;
+                        g += line * 0.26;
+                        b += line * 0.38;
                     }
                 }
+
+                // A thin bright horizon. Gives a level reference, which matters more for
+                // comfort than for looks -- without one the eye has nothing to tell it where
+                // upright is when the world is otherwise featureless.
+                let horizon_line = (1.0 - (se.abs() * 90.0).min(1.0)).powf(2.0);
+                r += horizon_line * 0.10;
+                g += horizon_line * 0.16;
+                b += horizon_line * 0.24;
 
                 let i = ((py * width + px) * 4) as usize;
                 rgba[i] = to_srgb_byte(r);

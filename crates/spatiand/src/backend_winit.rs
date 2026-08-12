@@ -292,9 +292,8 @@ pub fn run(
                                 log::warn!("could not open {module}: {e}");
                             }
                         }
-                        // Neither means anything in a window on someone else's desktop: there
-                        // is no display to hand back and no glasses mode to own.
-                        HudAction::ToggleStereo | HudAction::ReturnToDesktop => {
+                        // Nothing to hand back in a window on someone else's desktop.
+                        HudAction::ReturnToDesktop | HudAction::Screenshot => {
                             log::info!("{action:?} does nothing in the nested backend");
                         }
                         HudAction::Dismiss => {}
@@ -425,7 +424,7 @@ pub fn run(
                 let eye = spatiand_render::eye_for(*side, orientation, DVec3::ZERO, &stereo);
 
                 scene.draw_sky(gl, &eye);
-                scene.draw_menu(gl, &eye, shell);
+                scene.draw_menu(gl, &eye, shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
                 if let Some(ray) = pointer_ray {
                     scene.draw_pointer(gl, &eye, &ray, None);
                 }

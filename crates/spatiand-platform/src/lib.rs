@@ -9,7 +9,9 @@
 //! the pieces that genuinely are distribution-shaped sit behind a backend.
 
 pub mod desktop_entry;
+pub mod icons;
 pub mod launch;
 
 pub use desktop_entry::{scan, DesktopEntry};
+pub use icons::resolve as resolve_icon;
 pub use launch::launch;

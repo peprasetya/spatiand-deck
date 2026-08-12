@@ -35,6 +35,8 @@ pub enum Stage {
     TooSmall,
     Done,
     Failed,
+    /// Abandoned by the wearer.
+    Cancelled,
 }
 
 /// What the renderer should put in front of the wearer this frame.
@@ -73,8 +75,20 @@ impl Calibration {
         self.stage
     }
 
+    /// Abandon the run, keeping whatever mapping was already stored.
+    ///
+    /// There has to be a way out. The flow waits for a shake to begin and then runs on its own
+    /// timers, so someone who starts it by accident -- or whose glasses will not produce a
+    /// clean measurement -- was previously stuck in it with no exit at all, which is worse
+    /// than never offering calibration.
+    pub fn cancel(&mut self) {
+        log::info!("calibration cancelled; the stored axes are unchanged");
+        self.result = None;
+        self.enter(Stage::Cancelled);
+    }
+
     pub fn is_finished(&self) -> bool {
-        matches!(self.stage, Stage::Done | Stage::Failed)
+        matches!(self.stage, Stage::Done | Stage::Failed | Stage::Cancelled)
     }
 
     pub fn result(&self) -> Option<AxisMap> {
@@ -170,20 +184,20 @@ impl Calibration {
             Stage::WaitingForShake => Prompt {
                 heading: "Set up head tracking".into(),
                 body: "Put the glasses on,\nthen shake your head to begin.".into(),
-                status: "waiting".into(),
+                status: "B to cancel".into(),
             },
             Stage::Countdown => {
                 let left = COUNTDOWN.saturating_sub(self.since.elapsed()).as_secs() + 1;
                 Prompt {
                     heading: self.phase().heading().into(),
                     body: self.phase().instruction().into(),
-                    status: format!("{step}   ·   get ready {}", left.min(3)),
+                    status: format!("{step}  ·  get ready {}  ·  B to cancel", left.min(3)),
                 }
             }
             Stage::Collecting => Prompt {
                 heading: self.phase().heading().into(),
                 body: self.phase().instruction().into(),
-                status: format!("{step}   ·   MOVE NOW"),
+                status: format!("{step}  ·  MOVE NOW  ·  B to cancel"),
             },
             Stage::Accepted => Prompt {
                 heading: self.phase().heading().into(),
@@ -199,6 +213,11 @@ impl Calibration {
                 heading: "All set".into(),
                 body: "Head tracking is calibrated.".into(),
                 status: self.result.map(|m| m.summary()).unwrap_or_default(),
+            },
+            Stage::Cancelled => Prompt {
+                heading: "Calibration cancelled".into(),
+                body: "Nothing was changed.".into(),
+                status: "B again to close".into(),
             },
             Stage::Failed => Prompt {
                 heading: "Didn't work".into(),
@@ -265,6 +284,7 @@ mod tests {
             Stage::TooSmall,
             Stage::Done,
             Stage::Failed,
+            Stage::Cancelled,
         ] {
             let mut c = Calibration::new();
             c.stage = stage;
@@ -284,6 +304,41 @@ mod tests {
             c.feed(&sample(i * 1_000_000, DVec3::new(0.0, 0.0, 50.0)));
         }
         assert_eq!(c.collector.samples(), 0);
+    }
+
+    #[test]
+    fn there_is_always_a_way_out() {
+        // From every stage, cancelling must finish the flow and change nothing. Before this
+        // existed the only escape from a calibration you did not mean to start was killing
+        // the session.
+        for stage in [
+            Stage::WaitingForShake,
+            Stage::Countdown,
+            Stage::Collecting,
+            Stage::Accepted,
+            Stage::TooSmall,
+        ] {
+            let mut c = Calibration::new();
+            c.stage = stage;
+            c.cancel();
+            assert!(c.is_finished(), "{stage:?} could not be cancelled");
+            assert!(c.result().is_none(), "{stage:?} left a result behind");
+        }
+    }
+
+    #[test]
+    fn every_prompt_before_the_end_says_how_to_get_out() {
+        // In an otherwise empty world there is no other clue that B does anything.
+        for stage in [Stage::WaitingForShake, Stage::Countdown, Stage::Collecting] {
+            let mut c = Calibration::new();
+            c.stage = stage;
+            let p = c.prompt();
+            assert!(
+                p.status.contains('B') || p.body.contains('B'),
+                "{stage:?} never mentions the way out: {p:?}",
+                p = p.status
+            );
+        }
     }
 
     #[test]

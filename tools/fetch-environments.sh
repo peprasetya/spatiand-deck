@@ -19,11 +19,15 @@ RES="${RES:-4k}"
 
 # A spread rather than a set: an interior, an outdoor evening, and a neutral studio, so the
 # glass bubbles have something different to refract in each.
+# Five, spread deliberately: an open sky, a lit interior, a night scene, woodland and a
+# neutral studio -- so the glass bubbles have something different to refract in each, and so
+# there is at least one dark one for reading against.
 SLUGS=(
     "kloofendal_48d_partly_cloudy_puresky"
     "studio_small_09"
     "moonless_golf"
     "phalzer_forest_01"
+    "brown_photostudio_02"
 )
 
 mkdir -p "$DEST"

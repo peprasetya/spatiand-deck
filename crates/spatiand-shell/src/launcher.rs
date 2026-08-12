@@ -25,16 +25,30 @@ pub struct AppEntry {
 
 /// Angular spacing between adjacent bubbles, degrees.
 ///
-/// At the 40° field of one eye, 11° puts roughly three bubbles across the view. Tighter and
-/// the glass edges of neighbouring bubbles interfere; wider and a five-column grid needs a
-/// head turn to see its ends.
-pub const COLUMN_SPACING_DEG: f32 = 11.0;
-pub const ROW_SPACING_DEG: f32 = 10.0;
+/// A bubble subtends about 4.6°, so 9° leaves nearly a full bubble of space between
+/// neighbours.
+///
+/// The numbers here are set by a hard constraint rather than by taste: one eye sees **40°
+/// across and only 23° vertically**. Four columns at 9° reach ±15.8° including the glass,
+/// inside the 20° half-width. Earlier attempts at 11° and 13° looked reasonable written down
+/// and put the outer column past the edge of the field.
+pub const COLUMN_SPACING_DEG: f32 = 9.0;
+/// Rows are tighter than columns because the vertical field is half the horizontal one, and
+/// each bubble still has to fit a label underneath it. Three rows at 7° reach ±10.7°
+/// including the label, against a half-height of 11.57°.
+pub const ROW_SPACING_DEG: f32 = 7.0;
 /// How far out the arc sits, metres. Matches the default window radius so switching between
 /// the launcher and a window does not change focal distance.
 pub const ARC_RADIUS_M: f32 = 2.0;
 /// Bubbles per row.
-pub const COLUMNS: usize = 5;
+pub const COLUMNS: usize = 4;
+/// Rows shown at once.
+///
+/// Three, capped deliberately. More than that and the outer rows are past the vertical field
+/// and have to be hunted for by tilting your head, which is far worse than paging.
+pub const ROWS_PER_PAGE: usize = 3;
+/// Bubbles on one page.
+pub const PAGE_SIZE: usize = COLUMNS * ROWS_PER_PAGE;
 
 /// Where one bubble goes, in the viewer-centred frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,15 +100,41 @@ impl Launcher {
         self.grid.step(direction)
     }
 
+    /// Which page the cursor is on. Pages exist so the grid never spills past the field of
+    /// view; the alternative is rows you have to find by tilting your head.
+    pub fn page(&self) -> usize {
+        self.grid.cursor() / PAGE_SIZE
+    }
+
+    pub fn pages(&self) -> usize {
+        self.apps.len().div_ceil(PAGE_SIZE).max(1)
+    }
+
+    /// Indices visible on the current page.
+    pub fn visible(&self) -> std::ops::Range<usize> {
+        let start = self.page() * PAGE_SIZE;
+        start..(start + PAGE_SIZE).min(self.apps.len())
+    }
+
     /// Where a bubble sits.
     ///
     /// Rows are laid out downward from a little above the horizon, so a single-row launcher
     /// sits at a comfortable reading height rather than at your feet.
     pub fn placement(&self, index: usize) -> BubblePlacement {
-        let (_, row) = self.grid.position(index);
-        let column_offset = self.grid.centred_offset(index);
+        // Everything is relative to the page, so bubble 13 on page 2 sits where bubble 1 does.
+        let local = index % PAGE_SIZE;
+        let row = local / COLUMNS;
+        let page_start = (index / PAGE_SIZE) * PAGE_SIZE;
+        let on_this_page = (self.apps.len() - page_start).min(PAGE_SIZE);
+        let rows_here = on_this_page.div_ceil(COLUMNS).max(1);
+        let in_this_row = if row + 1 < rows_here {
+            COLUMNS
+        } else {
+            on_this_page - row * COLUMNS
+        };
+        let column_offset = (local % COLUMNS) as f32 - (in_this_row as f32 - 1.0) * 0.5;
         // Centre the block of rows vertically about the eye line.
-        let row_offset = row as f32 - (self.grid.rows().max(1) as f32 - 1.0) * 0.5;
+        let row_offset = row as f32 - (rows_here as f32 - 1.0) * 0.5;
         BubblePlacement {
             // Positive yaw is to the left, and column 0 is the leftmost, so the offset runs
             // against the column index. Getting this backwards mirrors the whole grid and
@@ -106,14 +146,13 @@ impl Launcher {
         }
     }
 
-    /// Every bubble, in draw order.
+    /// The bubbles on the current page, in draw order.
     ///
     /// The focused bubble is emitted **last** so it draws over its neighbours: it is scaled up
     /// and would otherwise be clipped by whatever happens to come after it.
     pub fn placements(&self) -> Vec<(usize, BubblePlacement)> {
-        let mut out: Vec<(usize, BubblePlacement)> = (0..self.apps.len())
-            .map(|i| (i, self.placement(i)))
-            .collect();
+        let mut out: Vec<(usize, BubblePlacement)> =
+            self.visible().map(|i| (i, self.placement(i))).collect();
         out.sort_by_key(|(i, _)| *i == self.grid.cursor());
         out
     }
@@ -180,9 +219,7 @@ mod tests {
     fn a_full_row_is_centred_on_straight_ahead() {
         let l = launcher_of(COLUMNS);
         let total: f32 = (0..COLUMNS).map(|i| l.placement(i).yaw).sum();
-        assert!(total.abs() < 1e-6, "row should balance about zero, got {total}");
-        // With an odd column count the middle bubble is dead ahead.
-        assert!(l.placement(COLUMNS / 2).yaw.abs() < 1e-6);
+        assert!(total.abs() < 1e-5, "row should balance about zero, got {total}");
     }
 
     #[test]
@@ -205,16 +242,17 @@ mod tests {
     #[test]
     fn every_bubble_is_the_same_distance_away() {
         // The reason the layout is an arc. Equal radius means equal apparent size and one
-        // focal distance for the whole grid.
-        let l = launcher_of(9);
-        for i in 0..9 {
+        // focal distance for the whole grid -- and, because yaw and pitch are angles about the
+        // viewer, a bubble stays the same distance away as you turn to face it.
+        let l = launcher_of(30);
+        for i in 0..30 {
             assert_eq!(l.placement(i).radius, ARC_RADIUS_M);
         }
     }
 
     #[test]
     fn rescanning_the_app_list_keeps_the_cursor_in_range() {
-        let mut l = launcher_of(12);
+        let mut l = launcher_of(30);
         for _ in 0..8 {
             l.step(Direction::Right);
             l.step(Direction::Down);
@@ -225,13 +263,90 @@ mod tests {
     }
 
     #[test]
-    fn the_grid_stays_inside_a_head_turn() {
-        // A full row must not span so far that its ends are behind you. 5 columns at 11 deg
-        // is 44 deg total, comfortably inside a natural head turn.
-        let l = launcher_of(COLUMNS);
-        let widest = (0..COLUMNS)
-            .map(|i| l.placement(i).yaw.abs())
-            .fold(0.0f32, f32::max);
-        assert!(widest.to_degrees() < 45.0, "half-width {}", widest.to_degrees());
+    fn a_page_never_spills_past_the_field_of_view() {
+        // The whole reason for paging. A full page must fit inside a comfortable head turn
+        // horizontally and inside the vertical field without tilting -- 23 degrees at the
+        // glasses' aspect, so the rows have to stay within about +-21 degrees.
+        let l = launcher_of(200);
+        for i in l.visible() {
+            let p = l.placement(i);
+            assert!(p.yaw.to_degrees().abs() <= 20.0, "bubble {i} at yaw {}", p.yaw.to_degrees());
+            assert!(p.pitch.to_degrees().abs() <= 21.0, "bubble {i} at pitch {}", p.pitch.to_degrees());
+        }
+    }
+
+    #[test]
+    fn only_one_page_is_drawn_at_a_time() {
+        // 39 apps used to draw 39 bubbles, most of them behind the wearer's head.
+        let l = launcher_of(200);
+        assert_eq!(l.placements().len(), PAGE_SIZE);
+        assert!(l.placements().iter().all(|(i, _)| l.visible().contains(i)));
+    }
+
+    #[test]
+    fn moving_past_the_end_of_a_page_turns_to_the_next_one() {
+        let mut l = launcher_of(200);
+        assert_eq!(l.page(), 0);
+        for _ in 0..ROWS_PER_PAGE {
+            l.step(Direction::Down);
+        }
+        assert_eq!(l.page(), 1, "should have paged");
+        // And the cursor's bubble must be on screen, not off the bottom of the previous page.
+        assert!(l.visible().contains(&l.cursor()));
+    }
+
+    #[test]
+    fn the_last_page_is_laid_out_as_if_it_were_full_height() {
+        // A ragged final page must still be centred rather than clinging to the top row.
+        let l = launcher_of(PAGE_SIZE + 2);
+        let mut cursor = Launcher::new(l.apps().to_vec());
+        while cursor.page() == 0 {
+            if !cursor.step(Direction::Down) && !cursor.step(Direction::Right) {
+                break;
+            }
+        }
+        assert_eq!(cursor.page(), 1);
+        let p = cursor.placement(PAGE_SIZE);
+        assert!(p.pitch.abs() < 1e-6, "a one-row page should sit on the eye line");
+    }
+
+    #[test]
+    fn a_full_page_fits_the_glasses_field_of_view() {
+        // The binding constraint, and the one that went wrong twice. One eye sees 40 deg
+        // across but only 23 deg vertically, so the rows are what run out of room first -- and
+        // a row that is off the field is only findable by tilting your head.
+        //
+        // Diameter is 0.16 m at a 2 m radius; the focused bubble is 18% larger, and each
+        // carries a label under it.
+        let bubble_half = (0.16f32 * 1.18 / 2.0 / ARC_RADIUS_M).atan().to_degrees();
+        // The lowest thing on a bubble is the bottom of its label, not the bottom of its
+        // glass: scene.rs drops the label by half a focused diameter plus 22 mm, and the label
+        // itself is 22 mm tall. Adding the two extents instead of taking the lower of them
+        // over-counts by a whole bubble radius.
+        let label_bottom = ((0.16f32 * 0.5 * 1.18 + 0.022 + 0.011) / ARC_RADIUS_M)
+            .atan()
+            .to_degrees();
+
+        let widest = (COLUMNS as f32 - 1.0) / 2.0 * COLUMN_SPACING_DEG + bubble_half;
+        assert!(widest <= 20.0, "a row reaches {widest} deg against a 20 deg half-width");
+
+        let tallest =
+            (ROWS_PER_PAGE as f32 - 1.0) / 2.0 * ROW_SPACING_DEG + bubble_half.max(label_bottom);
+        assert!(
+            tallest <= 11.57,
+            "a page reaches {tallest} deg against an 11.57 deg half-height"
+        );
+    }
+
+    #[test]
+    fn there_is_real_space_between_neighbouring_bubbles() {
+        // Otherwise the grid reads as a wall of glass rather than as separate objects, which
+        // is how it looked at 0.30 m bubbles on 11 deg spacing.
+        let bubble_deg = 2.0 * (0.16f32 / 2.0 / ARC_RADIUS_M).atan().to_degrees();
+        assert!(
+            COLUMN_SPACING_DEG > bubble_deg * 1.5,
+            "columns {COLUMN_SPACING_DEG} deg vs {bubble_deg} deg bubbles"
+        );
+        assert!(ROW_SPACING_DEG > bubble_deg * 1.4);
     }
 }

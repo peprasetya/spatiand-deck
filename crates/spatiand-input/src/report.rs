@@ -82,9 +82,13 @@ impl Buttons {
 
 /// One touchpad.
 ///
-/// `x` and `y` are normalised to −1..1 with **+x right and +y up**, matching the world frame's
-/// handedness rather than the report's. The raw report has +y pointing down, which is a screen
-/// convention and would silently invert every vertical gesture if it leaked out of here.
+/// `x` and `y` are normalised to −1..1 with **+x right and +y up**.
+///
+/// The report already uses +y up. That is easy to get backwards from reading `hid-steam.c`,
+/// which negates it — but it negates it in order to *produce* evdev's convention, where
+/// `ABS_*Y` grows downward. Negating here as well put it back where it started and inverted
+/// the pointer's vertical axis while leaving horizontal correct, which is exactly how it
+/// presented on hardware.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Pad {
     pub x: f32,
@@ -141,8 +145,7 @@ impl ControllerState {
 
         let pad = |x_at: usize, touch: Control, click: Control| Pad {
             x: axis(x_at),
-            // Report y grows downward; the world's grows up.
-            y: -axis(x_at + 2),
+            y: axis(x_at + 2),
             touched: buttons.is_down(touch),
             clicked: buttons.is_down(click),
         };
@@ -152,8 +155,9 @@ impl ControllerState {
             buttons,
             left_pad: pad(16, Control::LPadTouch, Control::LPadClick),
             right_pad: pad(20, Control::RPadTouch, Control::RPadClick),
-            left_stick: (axis(48), -axis(50)),
-            right_stick: (axis(52), -axis(54)),
+            // Sticks share the pads' convention: +y is already up.
+            left_stick: (axis(48), axis(50)),
+            right_stick: (axis(52), axis(54)),
             left_trigger: u16_at(44) as f32 / i16::MAX as f32,
             right_trigger: u16_at(46) as f32 / i16::MAX as f32,
             accel: [
@@ -232,13 +236,13 @@ mod tests {
 
     #[test]
     fn pad_y_points_up() {
-        // The report's +y is down. If this inversion is ever dropped, dragging a window up
-        // sends it down and scrolling runs backwards — both of which read as "the gesture code
-        // is wrong" rather than as a decode bug.
+        // Confirmed on hardware: a thumb at the TOP of the right pad must give a positive y.
+        // This was inverted once — horizontal felt right and vertical did not, which is the
+        // signature of exactly one axis being negated.
         let mut r = blank();
-        put_i16(&mut r, 22, i16::MAX); // right pad Y at full deflection
+        put_i16(&mut r, 22, i16::MAX); // right pad Y at full deflection, top of the pad
         let s = ControllerState::parse(&r).expect("valid report");
-        assert!(s.right_pad.y < -0.99, "got {}", s.right_pad.y);
+        assert!(s.right_pad.y > 0.99, "top of the pad should be +y, got {}", s.right_pad.y);
     }
 
     #[test]
@@ -248,7 +252,7 @@ mod tests {
         put_i16(&mut r, 18, i16::MIN);
         let s = ControllerState::parse(&r).expect("valid report");
         assert!((s.left_pad.x - 1.0).abs() < 1e-3);
-        assert!(s.left_pad.y <= 1.001 && s.left_pad.y >= 0.999);
+        assert!((s.left_pad.y + 1.0).abs() < 1e-3, "got {}", s.left_pad.y);
     }
 
     #[test]

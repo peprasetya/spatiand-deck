@@ -15,6 +15,15 @@
 
 use crate::grid::Direction;
 
+// There is deliberately no "stereo on/off" row.
+//
+// Spatiand is a stereo desktop; a mono mode is not a feature of it, it is a broken version of
+// it. The row existed because the display negotiation *could* be toggled, which is not the
+// same as it being worth offering — and in use it did nothing legible except make the glasses
+// flicker while they renegotiated. Resolution is never a user setting either, for the same
+// reason: the glasses have one native mode and apparent size is controlled by moving things
+// in the world.
+
 /// What activating a HUD row asks the compositor to do.
 ///
 /// The shell never performs these itself. It has no headset handle, no tracker and no process
@@ -27,8 +36,8 @@ pub enum HudAction {
     Recentre,
     /// Re-run the in-world axis calibration.
     Calibrate,
-    /// Toggle the glasses between mono and side-by-side.
-    ToggleStereo,
+    /// Save what the wearer is looking at, so a problem can be shown rather than described.
+    Screenshot,
     /// Cycle the 360 environment.
     NextEnvironment,
     /// Hand the display back and return to the desktop session.
@@ -83,9 +92,9 @@ impl Hud {
                 action: HudAction::NextEnvironment,
             },
             HudItem {
-                label: "Stereo",
-                detail: "Switch the glasses between 3D and flat",
-                action: HudAction::ToggleStereo,
+                label: "Take a screenshot",
+                detail: "Saves what you are looking at to your Pictures folder",
+                action: HudAction::Screenshot,
             },
         ];
         if has_desktop_settings {
