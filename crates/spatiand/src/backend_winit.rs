@@ -20,16 +20,46 @@ use smithay::reexports::wayland_server::Display;
 use smithay::utils::{Rectangle, Transform};
 
 use spatiand_hmd::{DisplayMode, HmdEvent};
+use spatiand_render::ray::{ray_from_pad, PointerConfig};
 use spatiand_render::{EyeSide, StereoConfig, TextRenderer};
+use spatiand_shell::{HudAction, Shell, ShellEvent};
 use spatiand_track::{AxisMap, HeadTracker, TrackerConfig};
 
 use crate::calib::Calibration;
-use crate::gl::{upload_rgba, QuadPipeline};
+use crate::environment::Environments;
+use crate::gl::upload_rgba;
+use crate::input_map::intent_for;
+use crate::scene::Scene;
 use crate::{Runtime, Spatiand};
 
 /// Half-height, so the side-by-side pair fits an ordinary screen while keeping its shape.
-const DEV_WIDTH: i32 = 1920;
-const DEV_HEIGHT: i32 = 540;
+///
+/// The default is deliberately small enough to fit the Deck's own 800x1280 panel. Asking for a
+/// 1920-wide window there fails inside EGL as `BAD_ALLOC` on the window surface, and what
+/// reaches the log first is `GL_INVALID_FRAMEBUFFER_OPERATION in glClear` — which reads as a
+/// renderer bug rather than as a window that was never created.
+const DEFAULT_DEV_WIDTH: i32 = 760;
+const DEFAULT_DEV_HEIGHT: i32 = 428;
+
+/// `SPATIAND_WINDOW=1280x720` on a larger screen.
+fn dev_window_size() -> (i32, i32) {
+    let Ok(spec) = std::env::var("SPATIAND_WINDOW") else {
+        return (DEFAULT_DEV_WIDTH, DEFAULT_DEV_HEIGHT);
+    };
+    match spec.split_once(['x', 'X']) {
+        Some((w, h)) => match (w.trim().parse(), h.trim().parse()) {
+            (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
+            _ => {
+                log::warn!("SPATIAND_WINDOW={spec:?} is not WIDTHxHEIGHT; using the default");
+                (DEFAULT_DEV_WIDTH, DEFAULT_DEV_HEIGHT)
+            }
+        },
+        None => {
+            log::warn!("SPATIAND_WINDOW={spec:?} is not WIDTHxHEIGHT; using the default");
+            (DEFAULT_DEV_WIDTH, DEFAULT_DEV_HEIGHT)
+        }
+    }
+}
 
 /// How far in front of the face head-locked panels sit, metres. Close enough to read, far
 /// enough that the eyes are not straining to converge on a fixed-focus display.
@@ -78,8 +108,10 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut backend, winit_source) = winit::init::<GlesRenderer>()?;
 
+    let (dev_w, dev_h) = dev_window_size();
+    log::info!("nested window {dev_w}x{dev_h} (set SPATIAND_WINDOW=WxH to change)");
     let mode = Mode {
-        size: (DEV_WIDTH, DEV_HEIGHT).into(),
+        size: (dev_w, dev_h).into(),
         refresh: 72_000,
     };
     let output = Output::new(
@@ -127,8 +159,35 @@ pub fn run(
     };
     let mut tracker = HeadTracker::new(stored.unwrap_or(AxisMap::IDENTITY), TrackerConfig::default());
 
+    // --- the shell ---
+    //
+    // The same objects the DRM backend builds. Running them here is the point of having a
+    // nested backend at all: the launcher, the HUD and the environment can be looked at
+    // without taking over the only display on the machine.
+    //
+    // Note the controller *is* usable from here, but only with Steam stopped -- it configures
+    // the device for itself and every payload field then reads zero.
+    let apps: Vec<spatiand_shell::AppEntry> = spatiand_platform::scan()
+        .into_iter()
+        .map(|e| spatiand_shell::AppEntry {
+            name: e.name,
+            exec: e.exec,
+            icon: e.icon,
+        })
+        .collect();
+    log::info!("launcher: {} application(s)", apps.len());
+    let has_kde = std::path::Path::new("/usr/bin/kcmshell6").exists()
+        || std::path::Path::new("/usr/bin/systemsettings").exists();
+    let mut shell = Shell::new(apps, has_kde);
+    let mut environments = Environments::discover();
+    let mut sky_image = environments.current();
+    let mut sky_dirty = false;
+    let mut controller = spatiand_input::DeckController::open();
+    let mut gesture = spatiand_input::TwoPadGesture::new();
+    let pointer_config = PointerConfig::default();
+
     // --- gpu resources ---
-    let pipeline = QuadPipeline::new(backend.renderer())?;
+    let mut scene = Scene::new(backend.renderer(), &sky_image)?;
     let mut text = TextRenderer::new();
     let mut panel: Option<PanelTexture> = None;
     let mut last_prompt = String::new();
@@ -180,6 +239,70 @@ pub fn run(
             }
         }
 
+        // --- input ---
+        let mut pointer: Option<(f32, f32, bool)> = None;
+        if let Some(c) = controller.as_mut() {
+            c.poll();
+            let mut events: Vec<ShellEvent> = Vec::new();
+            for control in c.pressed() {
+                if let Some(intent) = intent_for(*control) {
+                    if let Some(event) = shell.handle(intent) {
+                        events.push(event);
+                    }
+                }
+            }
+            let input = *c.state();
+            let two_handed = gesture.update(&input.left_pad, &input.right_pad);
+            if two_handed.is_none() && !shell.menu_is_open() && input.right_pad.touched {
+                pointer = Some((input.right_pad.x, input.right_pad.y, input.right_pad.clicked));
+            }
+
+            for event in events {
+                match event {
+                    ShellEvent::ModeChanged(mode) => {
+                        if mode == spatiand_shell::Mode::World {
+                            scene.forget_anchor();
+                        } else {
+                            scene.anchor_menu(mode, tracker.euler_degrees().yaw.to_radians() as f32);
+                        }
+                    }
+                    ShellEvent::Launch(app) => {
+                        if let Err(e) =
+                            spatiand_platform::launch(&app.exec, &runtime.state.socket_name)
+                        {
+                            log::warn!("could not launch {}: {e}", app.name);
+                        }
+                    }
+                    ShellEvent::Hud(action) => match action {
+                        HudAction::Recentre => {
+                            tracker.recenter();
+                            log::info!("recentred");
+                        }
+                        HudAction::Calibrate => calibration = Some(Calibration::new()),
+                        HudAction::NextEnvironment => {
+                            environments.advance();
+                            sky_image = environments.current();
+                            sky_dirty = true;
+                        }
+                        HudAction::OpenSystemSettings(module) => {
+                            let command = format!("kcmshell6 {module}");
+                            if let Err(e) =
+                                spatiand_platform::launch(&command, &runtime.state.socket_name)
+                            {
+                                log::warn!("could not open {module}: {e}");
+                            }
+                        }
+                        // Neither means anything in a window on someone else's desktop: there
+                        // is no display to hand back and no glasses mode to own.
+                        HudAction::ToggleStereo | HudAction::ReturnToDesktop => {
+                            log::info!("{action:?} does nothing in the nested backend");
+                        }
+                        HudAction::Dismiss => {}
+                    },
+                }
+            }
+        }
+
         // Adopt a freshly measured mapping the moment it lands, so the world becomes
         // correctly head-locked without a restart.
         if let Some(c) = calibration.as_mut() {
@@ -196,6 +319,15 @@ pub fn run(
         }
 
         let size = backend.window_size();
+        // A Wayland surface has no size until the compositor has configured it, and winit
+        // reports 0x0 until then. Binding and drawing into that produces an incomplete
+        // framebuffer and then EGL BAD_ALLOC when the swap tries to allocate a zero-sized
+        // buffer -- which surfaces as `GL_INVALID_FRAMEBUFFER_OPERATION in glClear` and reads
+        // as a renderer fault rather than as a window that does not exist yet.
+        if size.w <= 0 || size.h <= 0 {
+            event_loop.dispatch(Some(Duration::from_millis(16)), runtime)?;
+            continue;
+        }
         let viewports = eye_mode.viewports(size.w);
         let (eye_w, eye_h) = (viewports[0].2, size.h);
 
@@ -211,6 +343,7 @@ pub fn run(
                 let p = c.prompt();
                 format!("{}\n\n{}\n\n{}", p.heading, p.body, p.status)
             }
+            None if shell.menu_is_open() => String::new(),
             None => {
                 let e = tracker.euler_degrees();
                 format!(
@@ -225,12 +358,32 @@ pub fn run(
 
         let (renderer, framebuffer) = backend.bind()?;
 
+        let ppd = TextRenderer::px_per_degree(eye_w.max(1) as u32, stereo.h_fov_deg);
+        if sky_dirty {
+            sky_dirty = false;
+            let image = &sky_image;
+            renderer.with_context(|gl| unsafe { scene.set_sky(gl, image) })?;
+            log::info!("environment now {}", environments.describe());
+        }
+        scene.sync_apps(renderer, &mut text, &shell, ppd)?;
+        scene.sync_menu(
+            renderer,
+            &mut text,
+            &crate::backend_drm::menu_text(&shell),
+            ppd,
+            (eye_w as u32).saturating_sub(120).max(64),
+        )?;
+
         // Re-rasterise only when the words change. At 72 Hz, re-uploading an unchanged string
         // every frame is pure waste — the same reasoning that let HoloFrame idle at 0 fps
         // captured while panning.
-        if prompt_text != last_prompt {
+        if prompt_text.is_empty() {
+            if let Some(p) = panel.take() {
+                renderer.with_context(|gl| unsafe { gl.DeleteTextures(1, &p.id) })?;
+            }
+            last_prompt.clear();
+        } else if prompt_text != last_prompt {
             last_prompt = prompt_text.clone();
-            let ppd = TextRenderer::px_per_degree(eye_w.max(1) as u32, stereo.h_fov_deg);
             // ~1.6 degrees tall: comfortably readable across a 40 degree field.
             let image = text.render(
                 &prompt_text,
@@ -252,22 +405,40 @@ pub fn run(
         }
 
         let panel_snapshot = panel.as_ref().map(|p| (p.id, p.aspect));
+        // Where the pointer is aiming, latched with the pose this frame.
+        let pointer_ray = pointer
+            .map(|(px, py, _)| ray_from_pad(px, py, orientation, DVec3::ZERO, &pointer_config));
+        let scene = &scene;
+        let shell = &shell;
         renderer.with_context(|gl| unsafe {
             gl.Disable(ffi::SCISSOR_TEST);
             gl.Viewport(0, 0, size.w, size.h);
             gl.ClearColor(0.02, 0.02, 0.05, 1.0);
             gl.Clear(ffi::COLOR_BUFFER_BIT);
 
-            let Some((tex, aspect)) = panel_snapshot else {
-                return;
-            };
             for (side, x, w) in &viewports {
                 gl.Viewport(*x, 0, *w, eye_h);
 
+                // No vertical flip here, unlike the DRM path. This draws straight into a GL
+                // surface that is presented with GL's own bottom-left convention; the flip
+                // exists there only because the frame goes through an offscreen texture.
                 let eye = spatiand_render::eye_for(*side, orientation, DVec3::ZERO, &stereo);
-                let model = head_locked_panel(orientation, aspect);
-                let mvp = eye.projection * eye.view * model;
-                pipeline.draw(gl, tex, &mvp, [1.0, 1.0, 1.0, 1.0], (0.0, 1.0));
+
+                scene.draw_sky(gl, &eye);
+                scene.draw_menu(gl, &eye, shell);
+                if let Some(ray) = pointer_ray {
+                    scene.draw_pointer(gl, &eye, &ray, None);
+                }
+                if let Some((tex, aspect)) = panel_snapshot {
+                    let model = head_locked_panel(orientation, aspect);
+                    scene.quads().draw(
+                        gl,
+                        tex,
+                        &(eye.view_projection() * model),
+                        [1.0, 1.0, 1.0, 1.0],
+                        (0.0, 1.0),
+                    );
+                }
             }
         })?;
 

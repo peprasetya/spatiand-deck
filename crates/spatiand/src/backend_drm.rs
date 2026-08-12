@@ -1004,7 +1004,7 @@ fn first_free_crtc(drm: &DrmDevice, connector: &connector::Info) -> Option<crtc:
 /// The HUD is rendered as one text panel rather than as a row of separate textures. At the
 /// resolution one eye actually resolves, a settings list *is* text — giving each row its own
 /// quad would buy nothing and cost a dozen uploads every time the cursor moved.
-fn menu_text(shell: &Shell) -> String {
+pub fn menu_text(shell: &Shell) -> String {
     match shell.mode() {
         Mode::World => String::new(),
         Mode::Hud => {

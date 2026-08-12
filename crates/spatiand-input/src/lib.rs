@@ -58,6 +58,14 @@ impl DeckController {
     /// Permission is the likely failure: the hidraw ACL exists only for the active seat0
     /// session, so outside one this needs the udev rule from `tools/install-udev-rules.sh`.
     pub fn open() -> Option<Self> {
+        // Claiming the controller reconfigures it, and that reconfiguration outlives us. Under
+        // a desktop that is still running Steam -- the nested development case -- it takes the
+        // pads away from whoever is using them and leaves them inert until restored. So there
+        // is a way to say "look, do not touch".
+        if std::env::var("SPATIAND_INPUT").as_deref() == Ok("off") {
+            log::info!("SPATIAND_INPUT=off — not opening the controller");
+            return None;
+        }
         let node = hid::find(VALVE_VID, DECK_PID, VENDOR_INTERFACE)?;
         let device = match HidDevice::open(&node) {
             Ok(d) => d,
