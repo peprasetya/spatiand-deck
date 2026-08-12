@@ -12,15 +12,24 @@
 //!
 //! | control | in a window | on a title bar | in the world |
 //! |---|---|---|---|
+//! | right pad | move the pointer | — | — |
 //! | right pad click | left mouse button | grab and move the window | — |
+//! | left pad | scroll | — | — |
 //! | left pad click | right mouse button | change the window's distance | — |
+//! | both pads moving | move and resize the focused window | | |
 //! | A / B / X | left / right / middle button | — | — |
+//!
+//! The precedence is: **both thumbs moving beats one**. Resting a thumb on the left pad while
+//! pointing with the right is common and must not be mistaken for a two-handed gesture, which
+//! is why the gesture only takes over once there is actual correlated movement — the deadband
+//! in `spatiand_input::gesture` is what makes that distinction possible.
 //!
 //! The face buttons duplicate the pad clicks deliberately: clicking a pad moves your thumb
 //! slightly as you press, which is fine for a button and bad for a precise click. Holding the
 //! thumb still and pressing A is the accurate way to click on something small.
 
-use smithay::input::pointer::{ButtonEvent, MotionEvent};
+use smithay::backend::input::{Axis, AxisSource};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
 use spatiand_render::ray::{pick, Quad, Ray};
@@ -182,6 +191,42 @@ impl PointerState {
                 time: time_ms,
             },
         );
+        pointer.frame(state);
+    }
+
+    /// Scroll the surface under the pointer.
+    ///
+    /// Reported as a finger source rather than a wheel, because it is one: clients use that to
+    /// decide between smooth pixel scrolling and notched jumps, and a touchpad claiming to be
+    /// a wheel scrolls in ugly steps.
+    pub fn scroll(&mut self, state: &mut Spatiand, dx: f64, dy: f64, time_ms: u32) {
+        let Some(pointer) = state.seat.get_pointer() else {
+            return;
+        };
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        let mut frame = AxisFrame::new(time_ms).source(AxisSource::Finger);
+        if dx != 0.0 {
+            frame = frame.value(Axis::Horizontal, dx);
+        }
+        if dy != 0.0 {
+            frame = frame.value(Axis::Vertical, dy);
+        }
+        pointer.axis(state, frame);
+        pointer.frame(state);
+    }
+
+    /// Tell clients the scroll gesture ended, so kinetic scrolling can settle.
+    pub fn scroll_stop(&mut self, state: &mut Spatiand, time_ms: u32) {
+        let Some(pointer) = state.seat.get_pointer() else {
+            return;
+        };
+        let frame = AxisFrame::new(time_ms)
+            .source(AxisSource::Finger)
+            .stop(Axis::Vertical)
+            .stop(Axis::Horizontal);
+        pointer.axis(state, frame);
         pointer.frame(state);
     }
 

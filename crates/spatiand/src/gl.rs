@@ -129,6 +129,9 @@ uniform vec3 u_light_dir;
 uniform float u_focus;
 uniform float u_has_icon;
 uniform vec4 u_accent;
+// 0 while a bubble is arriving or leaving, 1 once settled. Multiplies the whole bubble out
+// rather than only its glass, so an appearing icon fades with the sphere around it.
+uniform float u_appear;
 out vec4 f_color;
 
 const float PI = 3.14159265358979;
@@ -194,7 +197,7 @@ void main() {
     // Anti-alias the silhouette. Without this the bubbles crawl badly as the head moves,
     // which at 640 usable pixels across is very visible.
     float alpha = (0.55 + 0.35 * u_focus) * (1.0 - smoothstep(0.985, 1.0, r));
-    f_color = vec4(colour, clamp(alpha + fresnel * 0.35, 0.0, 1.0));
+    f_color = vec4(colour, clamp(alpha + fresnel * 0.35, 0.0, 1.0) * u_appear);
 }
 "#;
 
@@ -398,6 +401,8 @@ pub struct BubbleParams<'a> {
     pub focus: f32,
     pub icon: Option<u32>,
     pub accent: [f32; 4],
+    /// 0..1 arrival progress.
+    pub appear: f32,
 }
 
 pub struct BubblePipeline {
@@ -415,6 +420,7 @@ pub struct BubblePipeline {
     loc_focus: i32,
     loc_has_icon: i32,
     loc_accent: i32,
+    loc_appear: i32,
 }
 
 impl BubblePipeline {
@@ -440,6 +446,7 @@ impl BubblePipeline {
                     loc_focus: at("u_focus"),
                     loc_has_icon: at("u_has_icon"),
                     loc_accent: at("u_accent"),
+                    loc_appear: at("u_appear"),
                 })
             })
             .map_err(|e| format!("no GL context: {e}"))?
@@ -499,6 +506,7 @@ impl BubblePipeline {
             params.light_dir.z,
         );
         gl.Uniform1f(self.loc_focus, params.focus);
+        gl.Uniform1f(self.loc_appear, params.appear);
         gl.Uniform4f(
             self.loc_accent,
             params.accent[0],

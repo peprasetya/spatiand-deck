@@ -11,12 +11,16 @@
 //! colour attachment — which matters because that target is 3840x1080 and is reallocated on
 //! every hotplug.
 //!
-//! ## Why the pointer is a reticle and not a beam
+//! ## The laser beams
 //!
-//! A laser drawn from between the eyes is foreshortened to a dot: it starts at the viewpoint,
-//! so there is nothing of it to see. With no tracked hand to emit from, the honest rendering
-//! of a head-anchored ray is its *intersection* — a cursor. The aiming metaphor is still the
-//! laser one; only the visible part differs.
+//! A ray cast from between the eyes is foreshortened to a dot — it starts at the viewpoint, so
+//! there is nothing of it to see. That was the reason the pointer began as a bare reticle.
+//!
+//! The fix is not to move the *aim*, which has to stay head-relative because the pads are
+//! absolute in head space, but to move where the beam is *drawn from*: an anchor roughly where
+//! the Deck is being held, below and in front of the eyes and offset to the correct side. The
+//! beam then runs from your hands to the cursor, which is what a laser pointer looks like and
+//! what every VR headset does, while the aiming maths is untouched.
 
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use spatiand_render::sky::{SkyEye, SkyProjection, SkySource};
@@ -123,7 +127,25 @@ pub struct Scene {
     /// it while facing away puts it behind you.
     anchor_yaw: f32,
     anchored_for: Option<Mode>,
+    /// When the current menu opened, for the arrival animation.
+    anchored_at: std::time::Instant,
+    /// A menu that has just closed, still playing its exit. Kept so the launcher can be drawn
+    /// for a moment after the shell has already moved on -- without it, closing is a hard cut,
+    /// which in a 3D space reads as a glitch rather than as a dismissal.
+    closing: Option<(Mode, std::time::Instant)>,
 }
+
+/// How long bubbles take to arrive, and to leave.
+///
+/// Short. This is a menu someone opens dozens of times a session, and anything that reads as
+/// "an animation" rather than as "the thing appearing" becomes an obstacle by the tenth time.
+const APPEAR_SECONDS: f32 = 0.28;
+const DISMISS_SECONDS: f32 = 0.16;
+/// Delay between one bubble arriving and the next, seconds.
+///
+/// The stagger is what makes it read as a group of objects rather than one fading rectangle.
+/// Small enough that the whole grid is still settled well inside half a second.
+const STAGGER_SECONDS: f32 = 0.022;
 
 impl Scene {
     pub fn new(
@@ -172,6 +194,8 @@ impl Scene {
             menu_text: String::new(),
             anchor_yaw: 0.0,
             anchored_for: None,
+            anchored_at: std::time::Instant::now(),
+            closing: None,
         })
     }
 
@@ -197,11 +221,47 @@ impl Scene {
         if self.anchored_for != Some(mode) {
             self.anchor_yaw = current_yaw;
             self.anchored_for = Some(mode);
+            self.anchored_at = std::time::Instant::now();
+            self.closing = None;
         }
     }
 
     pub fn forget_anchor(&mut self) {
-        self.anchored_for = None;
+        if let Some(mode) = self.anchored_for.take() {
+            self.closing = Some((mode, std::time::Instant::now()));
+        }
+    }
+
+    /// Arrival progress for one bubble, 0..1, or the exit if the menu is closing.
+    ///
+    /// Eased with a smoothstep and overshoot-free: a bubble that springs past its size and
+    /// settles back looks lively on a monitor and reads as wobbling in stereo, where the eyes
+    /// are tracking its actual distance.
+    fn appear_progress(&self, index: usize) -> f32 {
+        let ease = |t: f32| {
+            let t = t.clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        if let Some((_, since)) = self.closing {
+            let t = since.elapsed().as_secs_f32() / DISMISS_SECONDS;
+            // Leaving is not staggered. On the way out the wearer has already decided, and a
+            // ripple just delays getting back to the world.
+            return 1.0 - ease(t);
+        }
+        let elapsed = self.anchored_at.elapsed().as_secs_f32() - index as f32 * STAGGER_SECONDS;
+        ease(elapsed / APPEAR_SECONDS)
+    }
+
+    /// True while a closing menu is still worth drawing.
+    pub fn is_dismissing(&self) -> bool {
+        self.closing
+            .map(|(_, since)| since.elapsed().as_secs_f32() < DISMISS_SECONDS)
+            .unwrap_or(false)
+    }
+
+    /// The menu still being drawn on the way out, if any.
+    pub fn dismissing_mode(&self) -> Option<Mode> {
+        self.is_dismissing().then(|| self.closing.map(|(m, _)| m))?
     }
 
     fn eye_rect(&self, side: EyeSide) -> (f32, f32, f32, f32) {
@@ -581,7 +641,16 @@ impl Scene {
     /// # Safety
     /// Context must be current.
     pub unsafe fn draw_menu(&self, gl: &ffi::Gles2, eye: &Eye, shell: &Shell, fov: (f64, f64)) {
-        match shell.mode() {
+        // While a menu is leaving, the shell has already returned to the world -- so the mode
+        // to draw comes from the dismissal, not from the shell.
+        let mode = match shell.mode() {
+            Mode::World => match self.dismissing_mode() {
+                Some(mode) => mode,
+                None => return,
+            },
+            other => other,
+        };
+        match mode {
             Mode::World => {}
             Mode::Hud => self.draw_hud(gl, eye, fov),
             Mode::Launcher => self.draw_launcher(gl, eye, shell, fov),
@@ -640,7 +709,14 @@ impl Scene {
             let yaw = placement.yaw + self.anchor_yaw;
             let orientation = Quat::from_rotation_z(yaw) * Quat::from_rotation_y(-placement.pitch);
             let centre = self.menu_origin() + orientation * Vec3::X * placement.radius;
-            let size = BUBBLE_DIAMETER_M * placement.scale;
+            let appear = self.appear_progress(index);
+            if appear <= 0.001 {
+                continue;
+            }
+            // Arriving bubbles are smaller and closer to their final place rather than flying
+            // in from somewhere: a bubble that travels has to be tracked by the eye, and there
+            // are twelve of them.
+            let size = BUBBLE_DIAMETER_M * placement.scale * (0.72 + 0.28 * appear);
             let focus = if placement.scale > 1.0 { 1.0 } else { 0.0 };
 
             let model = self.panel_model(centre, orientation, size, size);
@@ -656,6 +732,7 @@ impl Scene {
                     focus,
                     icon: self.app_glyphs.get(index).map(|t| t.id),
                     accent: [0.62, 0.78, 1.0, 1.0],
+                    appear,
                 },
             );
         }
@@ -703,7 +780,7 @@ impl Scene {
             let height = 0.022f32;
             let width = height * label.aspect.max(0.01);
             let model = self.panel_model(centre, orientation, width, height);
-            let alpha = if placement.scale > 1.0 { 1.0 } else { 0.55 };
+            let alpha = if placement.scale > 1.0 { 1.0 } else { 0.55 } * self.appear_progress(index);
             self.quads.draw(
                 gl,
                 label.id,
@@ -765,6 +842,92 @@ impl Scene {
             tint,
             (0.0, 1.0),
         );
+    }
+
+    /// Draw a pointer complete with its beam.
+    ///
+    /// # Safety
+    /// Context must be current.
+    pub unsafe fn draw_pointer_ray(
+        &self,
+        gl: &ffi::Gles2,
+        eye: &Eye,
+        orientation: glam::DQuat,
+        ray: &Ray,
+        hit: Option<Hit>,
+        right_hand: bool,
+    ) {
+        let distance = hit.map(|h| h.distance as f32).unwrap_or(2.5);
+        let point = (ray.origin + ray.direction * distance as f64).as_vec3();
+        let hue = if right_hand {
+            [1.0, 0.78, 0.42]
+        } else {
+            [0.52, 0.82, 1.0]
+        };
+        let alpha = if hit.is_some() { 0.55 } else { 0.28 };
+        self.draw_beam(
+            gl,
+            eye,
+            Self::hand_anchor(orientation, right_hand),
+            point,
+            [hue[0], hue[1], hue[2], alpha],
+        );
+        self.draw_pointer(gl, eye, ray, hit, right_hand);
+    }
+
+    /// Draw a beam between two points, turned to face the eye.
+    ///
+    /// # Safety
+    /// Context must be current.
+    pub unsafe fn draw_beam(
+        &self,
+        gl: &ffi::Gles2,
+        eye: &Eye,
+        from: Vec3,
+        to: Vec3,
+        colour: [f32; 4],
+    ) {
+        let along = to - from;
+        let length = along.length();
+        if length < 1e-4 {
+            return;
+        }
+        let direction = along / length;
+        let middle = (from + to) * 0.5;
+        let to_eye = (eye.position.as_vec3() - middle).normalize_or(Vec3::X);
+        // Billboard: the quad's width runs perpendicular to both the beam and the view, so it
+        // stays visible however the beam is angled. A beam viewed exactly end-on collapses,
+        // which is correct -- it is pointing at your eye.
+        let side = direction.cross(to_eye).normalize_or_zero();
+        if side.length_squared() < 1e-6 {
+            return;
+        }
+        // Thin, and slightly thicker further away so it does not vanish at distance.
+        let width = 0.004 + length * 0.0016;
+        let model = Mat4::from_cols(
+            (side * width).extend(0.0),
+            (direction * length).extend(0.0),
+            to_eye.extend(0.0),
+            middle.extend(1.0),
+        );
+        self.quads
+            .draw(gl, self.white, &(eye.view_projection() * model), colour, (0.0, 1.0));
+    }
+
+    /// Where a beam should appear to come from, for one hand.
+    ///
+    /// Roughly where the Deck is held: below the eyes, a little forward, offset to the correct
+    /// side. Not a tracked position -- there is nothing tracking the hands -- but a plausible
+    /// one, and plausible is all a beam's origin has to be for the gesture to read correctly.
+    pub fn hand_anchor(orientation: glam::DQuat, right_hand: bool) -> Vec3 {
+        let head = Quat::from_xyzw(
+            orientation.x as f32,
+            orientation.y as f32,
+            orientation.z as f32,
+            orientation.w as f32,
+        );
+        let lateral = if right_hand { -0.13 } else { 0.13 };
+        head * Vec3::new(0.16, lateral, -0.30)
     }
 
     /// Model matrix for a quad of `width` x `height` metres centred at `centre`.

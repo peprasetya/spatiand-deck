@@ -60,6 +60,11 @@ use crate::scene::{eye_centre, Scene};
 use crate::{Runtime, Spatiand};
 
 const PANEL_DISTANCE: f32 = 1.4;
+/// Scroll distance for a full sweep of the left pad, in wl_pointer units.
+///
+/// A pad spans -1..1, so a corner-to-corner drag is 2 units. 260 makes that about two screens
+/// of a text document, which is the same ballpark as a laptop touchpad.
+const SCROLL_SCALE: f64 = 260.0;
 const PANEL_WIDTH: f32 = 0.9;
 
 /// How long to wait for the glasses' stereo mode to appear on the connector.
@@ -147,6 +152,9 @@ pub fn run(
     let mut right_was_down = false;
     let mut left_was_down = false;
     let mut face_down: Vec<u32> = Vec::new();
+    // Where the left thumb was last frame, so an absolute pad reads as a scroll delta rather
+    // than jumping the moment it lands.
+    let mut last_left_pad: Option<(f32, f32)> = None;
 
     // The shell — what is on screen and what a button means. Deliberately built once, outside
     // the output loop: unplugging the glasses must not close your launcher.
@@ -488,6 +496,7 @@ pub fn run(
             // each would let them disagree about whether a thumb is down.
             let mut shell_events: Vec<ShellEvent> = Vec::new();
             let mut pads: Option<spatiand_input::ControllerState> = None;
+            let mut two_handed: Option<spatiand_input::GestureDelta> = None;
             let mut leaving = false;
             let mut screenshot = false;
             if let Some(c) = controller.as_mut() {
@@ -526,6 +535,31 @@ pub fn run(
                                 None => {}
                             }
                             continue;
+                        }
+                        // In the world the D-pad moves focus between windows. The shell has no
+                        // window list -- deliberately, it has no Wayland at all -- so this is
+                        // the one navigation case the compositor answers itself.
+                        if !shell.menu_is_open() {
+                            let step = match control {
+                                spatiand_input::Control::Left => -1i32,
+                                spatiand_input::Control::Right => 1,
+                                _ => 0,
+                            };
+                            if step != 0 {
+                                let count = runtime.state.space.elements().count() as i32;
+                                if count > 0 {
+                                    let current = runtime
+                                        .state
+                                        .space
+                                        .elements()
+                                        .position(|w| runtime.state.layout.is_focused(w))
+                                        .unwrap_or(0)
+                                        as i32;
+                                    let next = (current + step).rem_euclid(count) as usize;
+                                    runtime.state.focus_window(next);
+                                }
+                                continue;
+                            }
                         }
                         if let Some(intent) = intent_for(*control) {
                             if let Some(event) = shell.handle(intent) {
@@ -834,8 +868,60 @@ pub fn run(
                         }
                     }
                     None => {
-                        if let Some(a) = right_aim.as_ref() {
-                            pointers.motion(&mut runtime.state, a, &windows, time_ms);
+                        // Both thumbs moving together manipulates the focused window and takes
+                        // the pads away from pointing. Merely *resting* a thumb does not --
+                        // that is common while pointing with the other hand, and the gesture's
+                        // deadband is what separates the two.
+                        let gesturing = two_handed
+                            .map(|d| !d.is_negligible())
+                            .unwrap_or(false);
+                        if gesturing {
+                            if let Some(delta) = two_handed {
+                                let focused = runtime
+                                    .state
+                                    .space
+                                    .elements()
+                                    .find(|w| runtime.state.layout.is_focused(w))
+                                    .cloned();
+                                if let Some(window) = focused {
+                                    if let Some(mut placement) = runtime.state.layout.get(&window)
+                                    {
+                                        // Pad units are roughly a radian of arc across, so the
+                                        // window follows the thumbs at about the rate they move.
+                                        placement.yaw -= delta.pan.0 as f64 * 0.6;
+                                        placement.pitch = (placement.pitch
+                                            + delta.pan.1 as f64 * 0.6)
+                                            .clamp(-1.2, 1.2);
+                                        placement.width =
+                                            (placement.width * delta.scale as f64).clamp(0.3, 3.0);
+                                        runtime.state.layout.set(&window, placement);
+                                    }
+                                }
+                            }
+                        } else {
+                            if let Some(a) = right_aim.as_ref() {
+                                pointers.motion(&mut runtime.state, a, &windows, time_ms);
+                            }
+                            // The left pad scrolls whatever the pointer is over. Absolute pad
+                            // position turned into a delta, so it behaves like a touchpad
+                            // rather than jumping when the thumb lands.
+                            if let Some(p) = pads.as_ref() {
+                                if p.left_pad.touched && !p.left_pad.clicked {
+                                    if let Some((px, py)) = last_left_pad {
+                                        let dx = (p.left_pad.x - px) as f64 * SCROLL_SCALE;
+                                        let dy = (p.left_pad.y - py) as f64 * SCROLL_SCALE;
+                                        // Natural direction: dragging the thumb up sends the
+                                        // content up, which is what every touchpad does.
+                                        pointers.scroll(&mut runtime.state, -dx, dy, time_ms);
+                                    }
+                                    last_left_pad = Some((p.left_pad.x, p.left_pad.y));
+                                } else {
+                                    if last_left_pad.is_some() {
+                                        pointers.scroll_stop(&mut runtime.state, time_ms);
+                                    }
+                                    last_left_pad = None;
+                                }
+                            }
                         }
                     }
                 }
@@ -1017,10 +1103,24 @@ pub fn run(
                         }
                         scene.draw_menu(gl, &eye, &shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
                         if let Some(a) = right_aim.as_ref() {
-                            scene.draw_pointer(gl, &eye, &a.ray, a.hit.map(|(_, h)| h), true);
+                            scene.draw_pointer_ray(
+                                gl,
+                                &eye,
+                                orientation,
+                                &a.ray,
+                                a.hit.map(|(_, h)| h),
+                                true,
+                            );
                         }
                         if let Some(a) = left_aim.as_ref() {
-                            scene.draw_pointer(gl, &eye, &a.ray, a.hit.map(|(_, h)| h), false);
+                            scene.draw_pointer_ray(
+                                gl,
+                                &eye,
+                                orientation,
+                                &a.ray,
+                                a.hit.map(|(_, h)| h),
+                                false,
+                            );
                         }
 
                         // The head-locked panel: the waiting prompt, the calibration flow, or
