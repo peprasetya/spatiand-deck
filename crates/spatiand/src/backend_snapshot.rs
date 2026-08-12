@@ -55,6 +55,7 @@ enum View {
     Hud,
     Launcher,
     Calibrate,
+    Keyboard,
 }
 
 impl View {
@@ -63,6 +64,7 @@ impl View {
             Ok("hud") => Self::Hud,
             Ok("launcher") => Self::Launcher,
             Ok("calibrate") => Self::Calibrate,
+            Ok("keyboard") => Self::Keyboard,
             _ => Self::World,
         }
     }
@@ -154,6 +156,11 @@ pub fn run(
             shell.handle(Intent::ToggleLauncher);
         }
         _ => {}
+    }
+
+    let mut keyboard = spatiand_shell::Keyboard::default();
+    if view == View::Keyboard {
+        keyboard.open = true;
     }
 
     // --- optionally host a real application ---
@@ -280,6 +287,9 @@ pub fn run(
     };
     let ppd = TextRenderer::px_per_degree(stereo.per_eye.0, stereo.h_fov_deg);
     scene.sync_apps(&mut renderer, &mut text, &shell, ppd)?;
+    if keyboard.open {
+        scene.sync_keyboard(&mut renderer, &mut text, &keyboard, ppd)?;
+    }
     scene.sync_status(
         &mut renderer,
         &mut text,
@@ -351,6 +361,7 @@ pub fn run(
     let orientation = DQuat::from_axis_angle(DVec3::Z, yaw_deg.to_radians());
     let shell_ref = &shell;
     let scene_ref = &scene;
+    let keyboard_open = keyboard.open;
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     renderer.with_context(|gl| unsafe {
         gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
@@ -366,6 +377,9 @@ pub fn run(
         scene_ref.draw_windows(gl, &eye, &windows);
         if !shell_ref.menu_is_open() {
             scene_ref.draw_status(gl, &eye, orientation);
+        }
+        if keyboard_open {
+            scene_ref.draw_keyboard(gl, &eye, orientation, (stereo.h_fov_deg, stereo.v_fov_deg()));
         }
         scene_ref.draw_menu(gl, &eye, shell_ref, (stereo.h_fov_deg, stereo.v_fov_deg()));
         if let Some((tex, aspect)) = panel {

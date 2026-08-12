@@ -960,7 +960,7 @@ pub fn run(
                     if keyboard.open && right_click && !right_was_down {
                         if let Some(a) = right_aim.as_ref() {
                             let (centre, facing, width, height) =
-                                scene.keyboard_placement(orientation);
+                                scene.keyboard_placement(orientation, (stereo.h_fov_deg, stereo.v_fov_deg()));
                             let quad = spatiand_render::Quad {
                                 centre: centre.as_dvec3(),
                                 orientation: facing.as_dquat(),

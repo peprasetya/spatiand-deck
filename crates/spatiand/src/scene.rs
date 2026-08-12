@@ -54,11 +54,15 @@ const LIGHT_DIR: Vec3 = Vec3::new(0.55, 0.6, 0.58);
 const ICON_TEXTURE_PX: u32 = 256;
 /// How far below level the keyboard hangs, radians, and how far away.
 ///
-/// Down and close, the way a real keyboard sits: you glance down at it and back up at what you
-/// are typing into. Putting it at window distance and window height means it covers whatever
-/// you are working on, which is the one thing it must not do.
-const KEYBOARD_PITCH: f32 = 0.52;
-const KEYBOARD_DISTANCE: f32 = 0.85;
+/// The first attempt put it where a real keyboard sits -- 30 degrees down and close -- which
+/// is right for a desk and wrong here: the vertical field is 23 degrees, so at 30 degrees the
+/// keyboard was entirely outside it. You could point at it, but not see what you were
+/// pointing at.
+///
+/// The budget is unforgiving. A window is about 17 degrees tall against 23 total, so the
+/// keyboard gets half the vertical field and hangs just below the eye line.
+const KEYBOARD_GAP: f32 = 0.026;
+const KEYBOARD_DISTANCE: f32 = 1.3;
 /// Half the width of a full launcher row, in degrees, for placing the page dots just outside
 /// it. Mirrors `spatiand_shell::launcher::COLUMN_SPACING_DEG` and is kept here so the scene
 /// does not have to reach into the shell's layout arithmetic.
@@ -470,6 +474,9 @@ impl Scene {
             }
             face.push('\n');
         }
+        // Without this the trailing newline rasterises as a blank sixth row, and since the
+        // plate is sized from the image it grows a strip of empty glass along the bottom.
+        let face = face.trim_end().to_string();
         let image = text.render(&face, px_per_degree * 0.9, 2048, [225, 233, 250, 255]);
         let old = self.keys.take();
         self.keys = Some(
@@ -493,7 +500,11 @@ impl Scene {
     /// Below the eye line and closer than a window, the way a real keyboard sits: you glance
     /// down at it and back up at what you are typing into, rather than having it cover the
     /// thing you are working on.
-    pub fn keyboard_placement(&self, orientation: glam::DQuat) -> (Vec3, Quat, f32, f32) {
+    pub fn keyboard_placement(
+        &self,
+        orientation: glam::DQuat,
+        fov: (f64, f64),
+    ) -> (Vec3, Quat, f32, f32) {
         let head = Quat::from_xyzw(
             orientation.x as f32,
             orientation.y as f32,
@@ -502,13 +513,27 @@ impl Scene {
         );
         // Yaw follows the head; pitch is fixed downward so looking up does not drag it away.
         let (yaw, _, _) = head.to_euler(glam::EulerRot::ZYX);
-        let facing = Quat::from_rotation_z(yaw) * Quat::from_rotation_y(-KEYBOARD_PITCH);
+
+        // Size follows the rendered face and the field, not constants. A fixed width with a
+        // derived height turns the face's aspect ratio into the layout: the keyboard grew
+        // until its bottom row was outside the field, which looks like bad placement rather
+        // than a sizing rule with no upper bound.
+        let aspect = self.keys.map(|k| k.aspect).unwrap_or(2.6).max(0.01);
+        // Half the vertical field, so a window still has room above it.
+        let (width, height) = fit_to_fov(aspect, fov.0, fov.1 * 0.5, KEYBOARD_DISTANCE);
+
+        // Hang it just under the eye line: far enough down not to sit over what is being typed
+        // into, close enough up that its bottom row is still inside the field.
+        let half_height = (height / 2.0 / KEYBOARD_DISTANCE).atan();
+        let pitch = half_height + KEYBOARD_GAP;
+        // POSITIVE rotation about +Y pitches DOWN in this frame, because +Y is left. Negating
+        // it put the keyboard above the eye line, overlapping the status bar -- which looked
+        // like a placement choice rather than a sign error.
+        let facing = Quat::from_rotation_z(yaw) * Quat::from_rotation_y(pitch);
         let cfg = spatiand_render::StereoConfig::default();
         let centre = Quat::from_rotation_z(yaw)
             * Vec3::new(cfg.neck_forward_m as f32, 0.0, cfg.neck_up_m as f32)
             + facing * Vec3::X * KEYBOARD_DISTANCE;
-        let width = 0.62f32;
-        let height = width * 0.38;
         (centre, facing, width, height)
     }
 
@@ -516,11 +541,17 @@ impl Scene {
     ///
     /// # Safety
     /// Context must be current.
-    pub unsafe fn draw_keyboard(&self, gl: &ffi::Gles2, eye: &Eye, orientation: glam::DQuat) {
+    pub unsafe fn draw_keyboard(
+        &self,
+        gl: &ffi::Gles2,
+        eye: &Eye,
+        orientation: glam::DQuat,
+        fov: (f64, f64),
+    ) {
         let Some(face) = self.keys else {
             return;
         };
-        let (centre, facing, width, height) = self.keyboard_placement(orientation);
+        let (centre, facing, width, height) = self.keyboard_placement(orientation, fov);
         let plate = self.panel_model(centre, facing, width * 1.05, height * 1.15);
         self.quads.draw(
             gl,
@@ -593,9 +624,13 @@ impl Scene {
 
         // Anchored by its top-left corner rather than its centre, so the bar stays put in the
         // corner whatever it happens to say.
-        let left_edge_deg = 17.0f32;
+        let left_edge_deg = 16.0f32;
         let yaw = (left_edge_deg - half_width_deg).to_radians();
-        let pitch = 8.0f32.to_radians();
+        // Above a centred window rather than beside it. A default window's top edge reaches
+        // about 8.5 degrees, and the bar is 15 degrees wide -- so there is no horizontal
+        // position that clears it. Going over the top is the only placement that works, and it
+        // leaves the bar inside the 11.57 degree half-field with a little to spare.
+        let pitch = 10.2f32.to_radians();
         let head = Quat::from_xyzw(
             orientation.x as f32,
             orientation.y as f32,
