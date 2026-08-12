@@ -70,6 +70,15 @@ const COLUMN_SPACING_DEG_LOCAL: f32 = 9.0;
 
 /// One window, ready to draw: its imported texture and where it sits.
 pub struct WindowQuad {
+    /// The window itself, not an index into anything.
+    ///
+    /// Positional indices into `Space::elements()` are **not stable**: raising a window on
+    /// click reorders that iterator, so the index the pointer was holding then refers to a
+    /// different window. The symptom was clicking inside an application and having focus jump
+    /// to another one, which reads as the pointer being broken rather than as identity being
+    /// wrong.
+    pub window: smithay::desktop::Window,
+    pub surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     pub texture: u32,
     /// Surface size in pixels, for the aspect ratio.
     pub pixels: (u32, u32),
@@ -133,8 +142,17 @@ pub struct Scene {
     status: Option<Texture>,
     status_text: String,
 
-    /// The menu text, rebuilt when it changes.
+    /// The menu's list of rows, and its description, as separate textures.
+    ///
+    /// Separate because they are sized differently and the panel's width must come from the
+    /// **list**. Rendering them as one image makes the widest line win, and the description is
+    /// always the widest line — so a one-word row like "Recentre" produced a panel as wide as
+    /// its explanation, which then had to shrink to fit the field and took the readable part
+    /// down with it.
     menu: Option<Texture>,
+    menu_detail: Option<Texture>,
+    /// Width of the description relative to the rows, so the two keep their measure.
+    menu_detail_ratio: f32,
     menu_text: String,
 
     /// Yaw the open menu is pinned to.
@@ -219,6 +237,8 @@ impl Scene {
             status: None,
             status_text: String::new(),
             menu: None,
+            menu_detail: None,
+            menu_detail_ratio: 1.0,
             menu_text: String::new(),
             anchor_yaw: 0.0,
             anchored_for: None,
@@ -675,32 +695,63 @@ impl Scene {
         &mut self,
         renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
         text: &mut TextRenderer,
-        wanted: &str,
+        list: &str,
+        detail: &str,
         px_per_degree: f32,
         max_width: u32,
     ) -> Result<(), String> {
+        let wanted = format!("{list}\u{1f}{detail}");
         if wanted == self.menu_text && self.menu.is_some() {
             return Ok(());
         }
-        self.menu_text = wanted.to_string();
-        if wanted.is_empty() {
+        self.menu_text = wanted;
+        if list.is_empty() {
             return Ok(());
         }
-        let image = text.render(wanted, px_per_degree * 1.05, max_width, [236, 241, 255, 255]);
-        let old = self.menu.take();
-        self.menu = Some(
-            renderer
-                .with_context(|gl| unsafe {
-                    if let Some(t) = old {
-                        gl.DeleteTextures(1, &t.id);
-                    }
-                    Texture {
-                        id: upload_rgba(gl, &image),
-                        aspect: image.width as f32 / image.height.max(1) as f32,
-                    }
-                })
-                .map_err(|e| format!("no GL context: {e}"))?,
-        );
+
+        let rows = text.render(list, px_per_degree * 1.05, max_width, [236, 241, 255, 255]);
+        // The description is wrapped to the *rows'* measure, not the panel's maximum, so it
+        // can never widen the panel -- and smaller, because it is reference material read once
+        // rather than the thing being chosen between.
+        let detail_image = (!detail.is_empty()).then(|| {
+            text.render(
+                detail,
+                px_per_degree * 0.72,
+                rows.width.max(64),
+                [176, 190, 216, 255],
+            )
+        });
+
+        let old = (self.menu.take(), self.menu_detail.take());
+        let (rows_texture, detail_texture) = renderer
+            .with_context(|gl| unsafe {
+                if let Some(t) = old.0 {
+                    gl.DeleteTextures(1, &t.id);
+                }
+                if let Some(t) = old.1 {
+                    gl.DeleteTextures(1, &t.id);
+                }
+                let upload = |image: &TextImage| Texture {
+                    id: upload_rgba(gl, image),
+                    aspect: image.width as f32 / image.height.max(1) as f32,
+                };
+                (
+                    upload(&rows),
+                    detail_image.as_ref().map(|i| {
+                        (
+                            upload(i),
+                            // How much of the rows' width the description occupies, so the two
+                            // keep their relative measure once scaled into the world.
+                            i.width as f32 / rows.width.max(1) as f32,
+                        )
+                    }),
+                )
+            })
+            .map_err(|e| format!("no GL context: {e}"))?;
+
+        self.menu = Some(rows_texture);
+        self.menu_detail_ratio = detail_texture.map(|(_, ratio)| ratio).unwrap_or(1.0);
+        self.menu_detail = detail_texture.map(|(t, _)| t);
         Ok(())
     }
 
@@ -818,20 +869,33 @@ impl Scene {
     }
 
     unsafe fn draw_hud(&self, gl: &ffi::Gles2, eye: &Eye, fov: (f64, f64)) {
-        let Some(panel) = self.menu else {
+        let Some(rows) = self.menu else {
             return;
         };
         let distance = 1.6f32;
-        // Fitted to the field of view, not to a constant. A fixed 0.9 m tall panel at 1.6 m
-        // subtends 31 degrees against a 23 degree vertical field -- so the first and last rows
-        // of the settings list were always off screen, whatever the list contained.
-        let (width, height) = fit_to_fov(panel.aspect, fov.0, fov.1, distance);
-        let backdrop = self.panel_model(
-            self.menu_centre(distance),
-            self.anchor_quat(),
-            width * 1.14,
-            height * 1.18,
-        );
+
+        // The panel's width comes from the ROWS, and the description is laid out inside it.
+        // Sizing from a combined image let the description -- always the longest line -- set
+        // the width, so the whole panel shrank to fit the field and took the rows with it.
+        let ratio = self.menu_detail_ratio.clamp(0.01, 1.0);
+        let gap_fraction = 0.12f32;
+        // Total height in units of the panel's width, so a single fit solves for both blocks.
+        let mut height_per_width = 1.0 / rows.aspect.max(0.01);
+        if let Some(detail) = self.menu_detail {
+            height_per_width += gap_fraction / rows.aspect.max(0.01);
+            height_per_width += ratio / detail.aspect.max(0.01);
+        }
+        let (width, total_height) =
+            fit_to_fov(1.0 / height_per_width, fov.0, fov.1, distance);
+
+        let rows_height = width / rows.aspect.max(0.01);
+        let centre = self.menu_centre(distance);
+        let quat = self.anchor_quat();
+        let up = quat * Vec3::Z;
+
+        // A dimming plate behind the lot. Reading a list against a busy 360 photograph is
+        // otherwise genuinely hard, and no amount of text weight fixes it.
+        let backdrop = self.panel_model(centre, quat, width * 1.14, total_height * 1.18);
         self.quads.draw(
             gl,
             self.white,
@@ -839,14 +903,33 @@ impl Scene {
             [0.02, 0.03, 0.06, 0.72],
             (0.0, 1.0),
         );
-        let model = self.panel_model(self.menu_centre(distance), self.anchor_quat(), width, height);
+
+        // Rows sit at the top of the block, description under them.
+        let rows_centre = centre + up * ((total_height - rows_height) * 0.5);
+        let model = self.panel_model(rows_centre, quat, width, rows_height);
         self.quads.draw(
             gl,
-            panel.id,
+            rows.id,
             &(eye.view_projection() * model),
             [1.0, 1.0, 1.0, 1.0],
             (0.0, 1.0),
         );
+
+        if let Some(detail) = self.menu_detail {
+            let detail_width = width * ratio;
+            let detail_height = detail_width / detail.aspect.max(0.01);
+            let detail_centre = centre + up * ((total_height * 0.5) - rows_height
+                - rows_height * gap_fraction
+                - detail_height * 0.5);
+            let model = self.panel_model(detail_centre, quat, detail_width, detail_height);
+            self.quads.draw(
+                gl,
+                detail.id,
+                &(eye.view_projection() * model),
+                [1.0, 1.0, 1.0, 0.92],
+                (0.0, 1.0),
+            );
+        }
     }
 
     unsafe fn draw_launcher(&self, gl: &ffi::Gles2, eye: &Eye, shell: &Shell, fov: (f64, f64)) {
@@ -1298,6 +1381,8 @@ pub fn collect_windows(
             continue;
         };
         out.push(WindowQuad {
+            window: window.clone(),
+            surface: surface.clone(),
             texture,
             pixels: (width, height),
             placement,

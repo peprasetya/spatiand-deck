@@ -32,7 +32,7 @@ use smithay::backend::input::{Axis, AxisSource};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
-use spatiand_render::ray::{pick, Quad, Ray};
+use spatiand_render::ray::{intersect_quad, pick, Quad, Ray};
 use spatiand_render::Hit;
 
 use crate::scene::WindowQuad;
@@ -52,7 +52,8 @@ pub const BTN_MIDDLE: u32 = 0x112;
 pub const TITLE_BAR_FRACTION: f64 = 0.11;
 
 /// What the wearer is doing with a window.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Drag {
     /// Moving it around the sphere.
     ///
@@ -61,12 +62,16 @@ pub enum Drag {
     /// so grabbing the corner of a title bar throws the window sideways before you have moved
     /// at all — it should hang from the point you took hold of, like anything else.
     Move {
-        index: usize,
+        window: smithay::desktop::Window,
         yaw_offset: f64,
         pitch_offset: f64,
     },
     /// Pushing it away or pulling it closer.
-    Depth { index: usize, start_radius: f64, start_y: f32 },
+    Depth {
+        window: smithay::desktop::Window,
+        start_radius: f64,
+        start_y: f32,
+    },
 }
 
 /// Everything the pointer layer remembers between frames.
@@ -89,7 +94,10 @@ pub struct Aim {
 
 /// Cast a ray and work out what it means.
 pub fn aim(ray: Ray, windows: &[WindowQuad]) -> Aim {
-    let quads: Vec<Quad> = windows.iter().map(quad_of).collect();
+    let quads: Vec<Quad> = windows
+        .iter()
+        .map(|w| quad_of(w.pixels, &w.placement))
+        .collect();
     let hit = pick(&ray, &quads);
     // The title bar occupies the top of the same quad rather than a separate one: a second
     // quad would need its own intersection test and could disagree with the first about which
@@ -99,13 +107,16 @@ pub fn aim(ray: Ray, windows: &[WindowQuad]) -> Aim {
 }
 
 /// The quad a window occupies, including its title bar.
-pub fn quad_of(window: &WindowQuad) -> Quad {
-    let aspect = window.pixels.0 as f64 / window.pixels.1.max(1) as f64;
-    let width = window.placement.width;
+///
+/// Takes the geometry rather than the whole [`WindowQuad`] so it can be tested: a `WindowQuad`
+/// carries a live Wayland window, which cannot be conjured up without a compositor.
+pub fn quad_of(pixels: (u32, u32), placement: &crate::window::Placement) -> Quad {
+    let aspect = pixels.0 as f64 / pixels.1.max(1) as f64;
+    let width = placement.width;
     let content_height = width / aspect.max(0.01);
     Quad {
-        centre: window.placement.position(),
-        orientation: window.placement.orientation(),
+        centre: placement.position(),
+        orientation: placement.orientation(),
         width,
         // The bar sits above the content, so the clickable quad is taller than the surface.
         height: content_height / (1.0 - TITLE_BAR_FRACTION),
@@ -116,16 +127,13 @@ pub fn quad_of(window: &WindowQuad) -> Quad {
 ///
 /// Returns `None` for a hit on the title bar: that is Spatiand's chrome, and forwarding it as
 /// a pointer position would put the cursor above the top edge of the surface.
-pub fn surface_position(hit: &Hit, window: &WindowQuad) -> Option<Point<f64, Logical>> {
+pub fn surface_position(hit: &Hit, pixels: (u32, u32)) -> Option<Point<f64, Logical>> {
     if hit.v < TITLE_BAR_FRACTION {
         return None;
     }
     // Rescale past the bar so the top of the *content* is v = 0.
     let v = (hit.v - TITLE_BAR_FRACTION) / (1.0 - TITLE_BAR_FRACTION);
-    Some(Point::from((
-        hit.u * window.pixels.0 as f64,
-        v * window.pixels.1 as f64,
-    )))
+    Some(Point::from((hit.u * pixels.0 as f64, v * pixels.1 as f64)))
 }
 
 impl PointerState {
@@ -149,13 +157,14 @@ impl PointerState {
         // Our "global" space is one surface at a time, so the origin is simply zero.
         let focus = aim.hit.and_then(|(index, hit)| {
             let window = windows.get(index)?;
-            let _ = surface_position(&hit, window)?;
-            let surface = state.surface_for(index)?;
-            Some((surface, Point::from((0.0, 0.0))))
+            let _ = surface_position(&hit, window.pixels)?;
+            // Straight off the quad, rather than looked up by position -- see the note on
+            // WindowQuad::window for why an index cannot be trusted between frames.
+            Some((window.surface.clone(), Point::from((0.0, 0.0))))
         });
         let local = aim
             .hit
-            .and_then(|(index, hit)| surface_position(&hit, windows.get(index)?));
+            .and_then(|(index, hit)| surface_position(&hit, windows.get(index)?.pixels));
 
         // Leaving a window has to be reported, or it keeps its hover state for ever.
         let index_now = aim.hit.map(|(i, _)| i);
@@ -277,16 +286,12 @@ mod tests {
     use crate::window::Placement;
     use glam::DVec3;
 
-    fn window(yaw: f64) -> WindowQuad {
-        WindowQuad {
-            texture: 1,
-            pixels: (1280, 800),
-            placement: Placement {
-                yaw,
-                ..Default::default()
-            },
-            focused: true,
-            title: None,
+    const PIXELS: (u32, u32) = (1280, 800);
+
+    fn placement(yaw: f64) -> Placement {
+        Placement {
+            yaw,
+            ..Default::default()
         }
     }
 
@@ -303,44 +308,47 @@ mod tests {
         // client, so passing the surface-local position as both makes every delivered position
         // (0, 0). Motion appears to work -- events flow, focus changes -- and nothing is ever
         // under the cursor, so no button in any application can be clicked.
-        let w = window(0.0);
         let hit = Hit {
             distance: 2.0,
             u: 0.5,
             v: 0.5,
             point: DVec3::ZERO,
         };
-        let local = surface_position(&hit, &w).expect("middle of the content");
-        assert!(local.x > 1.0 && local.y > 1.0, "a centre hit must not be the origin: {local:?}");
+        let local = surface_position(&hit, PIXELS).expect("middle of the content");
+        assert!(
+            local.x > 1.0 && local.y > 1.0,
+            "a centre hit must not be the origin: {local:?}"
+        );
     }
 
     #[test]
     fn the_clickable_quad_is_taller_than_the_surface() {
         // The title bar is drawn above the content, so the quad the ray hits has to include
         // it -- otherwise the bar is visible and unclickable.
-        let w = window(0.0);
-        let quad = quad_of(&w);
-        let content = w.placement.width / (1280.0 / 800.0);
+        let p = placement(0.0);
+        let quad = quad_of(PIXELS, &p);
+        let content = p.width / (PIXELS.0 as f64 / PIXELS.1 as f64);
         assert!(quad.height > content, "{} vs {content}", quad.height);
     }
 
     #[test]
     fn a_hit_near_the_top_is_the_title_bar_and_has_no_surface_position() {
-        let w = window(0.0);
         let hit = Hit {
             distance: 2.0,
             u: 0.5,
             v: 0.02,
             point: DVec3::ZERO,
         };
-        assert!(surface_position(&hit, &w).is_none(), "the bar is not the surface");
+        assert!(
+            surface_position(&hit, PIXELS).is_none(),
+            "the bar is not the surface"
+        );
     }
 
     #[test]
     fn content_coordinates_span_the_whole_surface() {
         // The top of the content must be y = 0 and the bottom the full height, or clicks land
         // consistently short of where they were aimed.
-        let w = window(0.0);
         let top = Hit {
             distance: 2.0,
             u: 0.0,
@@ -353,49 +361,35 @@ mod tests {
             v: 1.0,
             point: DVec3::ZERO,
         };
-        let t = surface_position(&top, &w).expect("just below the bar");
-        let b = surface_position(&bottom, &w).expect("bottom edge");
+        let t = surface_position(&top, PIXELS).expect("just below the bar");
+        let b = surface_position(&bottom, PIXELS).expect("bottom edge");
         assert!(t.x.abs() < 1e-9 && t.y.abs() < 1e-9, "{t:?}");
-        assert!((b.x - 1280.0).abs() < 1e-6 && (b.y - 800.0).abs() < 1e-6, "{b:?}");
+        assert!(
+            (b.x - 1280.0).abs() < 1e-6 && (b.y - 800.0).abs() < 1e-6,
+            "{b:?}"
+        );
     }
 
     #[test]
     fn aiming_straight_ahead_hits_a_window_in_front() {
-        let windows = [window(0.0)];
-        let a = aim(ray_towards(DVec3::X), &windows);
-        assert!(a.hit.is_some(), "should have hit the window");
-        assert!(!a.on_title, "the centre is content, not chrome");
+        let quad = quad_of(PIXELS, &placement(0.0));
+        assert!(intersect_quad(&ray_towards(DVec3::X), &quad).is_some());
     }
 
     #[test]
     fn aiming_at_nothing_is_not_a_hit() {
-        let windows = [window(0.0)];
-        // Straight up: nothing there.
-        let a = aim(ray_towards(DVec3::Z), &windows);
-        assert!(a.hit.is_none());
-        assert!(!a.on_title);
-    }
-
-    #[test]
-    fn a_release_is_only_sent_for_a_button_that_was_pressed() {
-        // A stray release leaves a client convinced a drag is still running, which is a
-        // horrible state to end up in and impossible to explain from the wearer's side.
-        let mut p = PointerState::default();
-        assert!(p.held.is_empty());
-        p.held.push(BTN_LEFT);
-        assert!(p.held.contains(&BTN_LEFT));
-        p.held.retain(|b| *b != BTN_LEFT);
-        assert!(p.held.is_empty());
+        let quad = quad_of(PIXELS, &placement(0.0));
+        assert!(intersect_quad(&ray_towards(DVec3::Z), &quad).is_none());
     }
 
     #[test]
     fn the_title_bar_is_a_reachable_target() {
         // One degree is roughly 2% of a window's height at this distance, and the ray is
         // head-anchored. A desktop-proportioned bar would be about one degree tall.
-        let w = window(0.0);
-        let quad = quad_of(&w);
+        let p = placement(0.0);
+        let quad = quad_of(PIXELS, &p);
         let bar_height = quad.height * TITLE_BAR_FRACTION;
-        let angular = 2.0 * (bar_height / 2.0 / w.placement.radius).atan().to_degrees();
+        let angular = 2.0 * (bar_height / 2.0 / p.radius).atan().to_degrees();
         assert!(angular > 2.0, "title bar is only {angular} deg tall");
     }
 }

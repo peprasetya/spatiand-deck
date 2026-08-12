@@ -221,12 +221,12 @@ pub fn run(
     }
     {
         let ppd_now = TextRenderer::px_per_degree(width, 40.0);
-        for (index, w) in windows.iter_mut().enumerate() {
+        for quad in windows.iter_mut() {
             let title = runtime
                 .state
-                .title_for(index)
+                .title_of(&quad.window)
                 .unwrap_or_else(|| "Untitled".to_string());
-            w.title = scene.title_texture(&mut renderer, &mut text, &title, ppd_now);
+            quad.title = scene.title_texture(&mut renderer, &mut text, &title, ppd_now);
         }
     }
     for w in &windows {
@@ -300,6 +300,7 @@ pub fn run(
         &mut renderer,
         &mut text,
         &crate::backend_drm::menu_text(&shell),
+        "",
         ppd,
         stereo.per_eye.0.saturating_sub(160).max(64),
     )?;

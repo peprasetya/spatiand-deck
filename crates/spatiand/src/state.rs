@@ -138,22 +138,8 @@ impl Spatiand {
         name
     }
 
-    /// The toplevel surface of the nth window, in the same order `collect_windows` uses.
-    ///
-    /// Indices rather than handles because the pointer works against the drawn quads, and
-    /// those are gathered per frame; carrying a `Window` through would mean cloning it into
-    /// every hit test.
-    pub fn surface_for(&self, index: usize) -> Option<WlSurface> {
-        self.space
-            .elements()
-            .nth(index)
-            .and_then(|w| w.toplevel())
-            .map(|t| t.wl_surface().clone())
-    }
-
-    /// The window title a client has set, for the title bar.
-    pub fn title_for(&self, index: usize) -> Option<String> {
-        let window = self.space.elements().nth(index)?;
+    /// The title a client has set, for the title bar.
+    pub fn title_of(&self, window: &smithay::desktop::Window) -> Option<String> {
         let surface = window.toplevel()?.wl_surface().clone();
         smithay::wayland::compositor::with_states(&surface, |states| {
             states
@@ -164,22 +150,21 @@ impl Spatiand {
         })
     }
 
-    /// Give a window keyboard focus.
-    pub fn focus_window(&mut self, index: usize) {
-        let Some(surface) = self.surface_for(index) else {
-            return;
-        };
-        // Resolve to an owned Window first: `elements()` holds an immutable borrow of the
-        // space for as long as the iterator chain lives, and raising needs it mutably.
-        let window = self.space.elements().nth(index).cloned();
-        if let Some(window) = window {
-            self.layout.focus(&window);
-            // Raise it too, so clicking a window behind another brings it forward -- otherwise
-            // focus and what you can see disagree.
-            self.space.raise_element(&window, true);
-        }
-        if let Some(keyboard) = self.seat.get_keyboard() {
-            keyboard.set_focus(self, Some(surface), smithay::utils::SERIAL_COUNTER.next_serial());
+    /// Give a window focus, and bring it to the front.
+    ///
+    /// Takes the window rather than a position, because raising reorders `Space::elements()`
+    /// and any index taken before the raise refers to something else afterwards.
+    pub fn focus_window(&mut self, window: &smithay::desktop::Window) {
+        self.layout.focus(window);
+        self.space.raise_element(window, true);
+        if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
+            if let Some(keyboard) = self.seat.get_keyboard() {
+                keyboard.set_focus(
+                    self,
+                    Some(surface),
+                    smithay::utils::SERIAL_COUNTER.next_serial(),
+                );
+            }
         }
     }
 

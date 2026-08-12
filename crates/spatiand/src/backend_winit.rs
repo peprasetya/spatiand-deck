@@ -377,6 +377,7 @@ pub fn run(
             renderer,
             &mut text,
             &crate::backend_drm::menu_text(&shell),
+            "",
             ppd,
             (eye_w as u32).saturating_sub(120).max(64),
         )?;

@@ -551,17 +551,17 @@ pub fn run(
                                 _ => 0,
                             };
                             if step != 0 {
-                                let count = runtime.state.space.elements().count() as i32;
-                                if count > 0 {
-                                    let current = runtime
-                                        .state
-                                        .space
-                                        .elements()
+                                let all: Vec<smithay::desktop::Window> =
+                                    runtime.state.space.elements().cloned().collect();
+                                if !all.is_empty() {
+                                    let current = all
+                                        .iter()
                                         .position(|w| runtime.state.layout.is_focused(w))
-                                        .unwrap_or(0)
-                                        as i32;
-                                    let next = (current + step).rem_euclid(count) as usize;
-                                    runtime.state.focus_window(next);
+                                        .unwrap_or(0) as i32;
+                                    let next =
+                                        (current + step).rem_euclid(all.len() as i32) as usize;
+                                    let window = all[next].clone();
+                                    runtime.state.focus_window(&window);
                                 }
                                 continue;
                             }
@@ -825,18 +825,19 @@ pub fn run(
                 &mut renderer,
                 &mut text,
                 &menu_text_with(&shell, Some(tracker.axes())),
+                &menu_detail(&shell, Some(tracker.axes())),
                 ppd,
                 stereo.per_eye.0.saturating_sub(160).max(64),
             )?;
 
             // Import client buffers before the draw closure takes the context.
             let mut windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
-            for (index, window) in windows.iter_mut().enumerate() {
+            for quad in windows.iter_mut() {
                 let title = runtime
                     .state
-                    .title_for(index)
+                    .title_of(&quad.window)
                     .unwrap_or_else(|| "Untitled".to_string());
-                window.title = scene.title_texture(&mut renderer, &mut text, &title, ppd);
+                quad.title = scene.title_texture(&mut renderer, &mut text, &title, ppd);
             }
 
             // --- pointing and clicking ---
@@ -864,15 +865,14 @@ pub fn run(
                 // A drag in progress owns the window and ignores everything else.
                 match pointers.drag {
                     Some(Drag::Move {
-                        index,
+                        ref window,
                         yaw_offset,
                         pitch_offset,
                     }) => {
                         if let Some(a) = right_aim.as_ref() {
                             let d = a.ray.direction;
-                            let window = runtime.state.space.elements().nth(index).cloned();
-                            if let Some(window) = window {
-                                if let Some(mut placement) = runtime.state.layout.get(&window) {
+                            {
+                                if let Some(mut placement) = runtime.state.layout.get(window) {
                                     // Relative to where it was grabbed, so the window hangs
                                     // from the point you took hold of rather than snapping its
                                     // centre to the ray.
@@ -895,21 +895,24 @@ pub fn run(
                                             drag_left_y = None;
                                         }
                                     }
-                                    runtime.state.layout.set(&window, placement);
+                                    runtime.state.layout.set(window, placement);
                                 }
                             }
                         }
                     }
-                    Some(Drag::Depth { index, start_radius, start_y }) => {
+                    Some(Drag::Depth {
+                        ref window,
+                        start_radius,
+                        start_y,
+                    }) => {
                         if let Some(p) = pads.as_ref() {
-                            let window = runtime.state.space.elements().nth(index).cloned();
-                            if let Some(window) = window {
-                                if let Some(mut placement) = runtime.state.layout.get(&window) {
+                            {
+                                if let Some(mut placement) = runtime.state.layout.get(window) {
                                     // Thumb up pushes it away. Clamped so a window can never
                                     // end up inside your head or so far off it is unreadable.
                                     let delta = (p.left_pad.y - start_y) as f64;
                                     placement.radius = (start_radius + delta * 2.0).clamp(0.8, 8.0);
-                                    runtime.state.layout.set(&window, placement);
+                                    runtime.state.layout.set(window, placement);
                                 }
                             }
                         }
@@ -1028,31 +1031,31 @@ pub fn run(
                         match right_aim.as_ref() {
                             Some(a) if a.on_title => {
                                 if let Some((index, _)) = a.hit {
-                                    runtime.state.focus_window(index);
-                                    let d = a.ray.direction;
-                                    let (ray_yaw, ray_pitch) =
-                                        (d.y.atan2(d.x), d.z.clamp(-1.0, 1.0).asin());
-                                    let here = runtime
-                                        .state
-                                        .space
-                                        .elements()
-                                        .nth(index)
-                                        .cloned()
-                                        .and_then(|w| runtime.state.layout.get(&w));
-                                    let (yaw_offset, pitch_offset) = here
-                                        .map(|p| (p.yaw - ray_yaw, p.pitch - ray_pitch))
-                                        .unwrap_or((0.0, 0.0));
-                                    drag_left_y = None;
-                                    pointers.drag = Some(Drag::Move {
-                                        index,
-                                        yaw_offset,
-                                        pitch_offset,
-                                    });
+                                    if let Some(quad) = windows.get(index) {
+                                        runtime.state.focus_window(&quad.window);
+                                        let d = a.ray.direction;
+                                        let (ray_yaw, ray_pitch) =
+                                            (d.y.atan2(d.x), d.z.clamp(-1.0, 1.0).asin());
+                                        let (yaw_offset, pitch_offset) = runtime
+                                            .state
+                                            .layout
+                                            .get(&quad.window)
+                                            .map(|p| (p.yaw - ray_yaw, p.pitch - ray_pitch))
+                                            .unwrap_or((0.0, 0.0));
+                                        drag_left_y = None;
+                                        pointers.drag = Some(Drag::Move {
+                                            window: quad.window.clone(),
+                                            yaw_offset,
+                                            pitch_offset,
+                                        });
+                                    }
                                 }
                             }
                             Some(a) => {
                                 if let Some((index, _)) = a.hit {
-                                    runtime.state.focus_window(index);
+                                    if let Some(quad) = windows.get(index) {
+                                        runtime.state.focus_window(&quad.window);
+                                    }
                                 }
                                 pointers.button(&mut runtime.state, BTN_LEFT, true, time_ms);
                             }
@@ -1071,18 +1074,15 @@ pub fn run(
                             // The left pad changes distance while the right one is holding a
                             // window's bar, which is the two-handed way to place something.
                             Some(a) if a.on_title => {
-                                if let Some((index, _)) = a.hit {
+                                if let Some(quad) = a.hit.and_then(|(i, _)| windows.get(i)) {
                                     let radius = runtime
                                         .state
-                                        .space
-                                        .elements()
-                                        .nth(index)
-                                        .cloned()
-                                        .and_then(|w| runtime.state.layout.get(&w))
+                                        .layout
+                                        .get(&quad.window)
                                         .map(|pl| pl.radius)
                                         .unwrap_or(2.2);
                                     pointers.drag = Some(Drag::Depth {
-                                        index,
+                                        window: quad.window.clone(),
                                         start_radius: radius,
                                         start_y: p.left_pad.y,
                                     });
@@ -1470,6 +1470,23 @@ pub fn menu_text(shell: &Shell) -> String {
     menu_text_with(shell, None)
 }
 
+/// The explanation under the menu, laid out separately so it cannot widen the panel.
+fn menu_detail(shell: &Shell, axes: Option<spatiand_track::AxisMap>) -> String {
+    match shell.mode() {
+        Mode::Hud => {
+            let hud = shell.hud();
+            let mut out = hud.focused().detail.to_string();
+            if let Some(map) = axes {
+                if matches!(hud.focused().action, HudAction::CyclePitchRoll) {
+                    out.push_str(&format!("\n\nNow using option {} of 4.", map.variant_index() + 1));
+                }
+            }
+            out
+        }
+        _ => String::new(),
+    }
+}
+
 /// As [`menu_text`], but able to show live state the shell itself does not hold.
 fn menu_text_with(shell: &Shell, axes: Option<spatiand_track::AxisMap>) -> String {
     match shell.mode() {
@@ -1484,16 +1501,7 @@ fn menu_text_with(shell: &Shell, axes: Option<spatiand_track::AxisMap>) -> Strin
                 out.push_str(item.label);
                 out.push('\n');
             }
-            out.push_str(&format!("\n{}", hud.focused().detail));
-            if let Some(map) = axes {
-                if matches!(hud.focused().action, HudAction::CyclePitchRoll) {
-                    out.push_str(&format!(
-                        "\n\nnow using option {} of 4",
-                        map.variant_index() + 1
-                    ));
-                }
-            }
-            out.push_str("\n\nA select    B back");
+            out.push_str("\nA select    B back");
             out
         }
         Mode::Launcher if shell.launcher().is_empty() => {

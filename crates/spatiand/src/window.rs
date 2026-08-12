@@ -101,8 +101,21 @@ impl WindowLayout {
     /// deal with than one you cannot find. `view_yaw` comes from the tracker via
     /// [`crate::state::Spatiand::spawn_yaw`].
     pub fn place(&mut self, window: &Window, view_yaw: f64) -> Placement {
+        // Near where you are looking, but never in exactly the same place as the last one.
+        // Opening three settings panels put all three at an identical yaw, pitch and radius --
+        // perfectly coincident, so they read as a single window that keeps changing its mind
+        // about what it contains.
+        //
+        // A small cascade rather than the old wide fan: the point is that they are
+        // distinguishable and all still in front of you, not that they never overlap.
+        const STEP: f64 = 7.0;
+        let n = self.placements.len();
+        let side = if n % 2 == 0 { 1.0 } else { -1.0 };
+        let rank = ((n + 1) / 2) as f64;
         let placement = Placement {
-            yaw: view_yaw,
+            yaw: view_yaw + side * rank * STEP.to_radians(),
+            // A little depth too, so even a head-on view separates them.
+            radius: Placement::default().radius + rank * 0.06,
             ..Default::default()
         };
         let id = self.id_for(window);
@@ -184,6 +197,30 @@ mod tests {
         let angular = 2.0 * (p.width / 2.0 / p.radius).atan().to_degrees();
         assert!(angular < 34.0, "a default window subtends {angular} deg of a 40 deg field");
         assert!(angular > 20.0, "and should still be big enough to work in: {angular} deg");
+    }
+
+    #[test]
+    fn two_windows_never_land_in_exactly_the_same_place() {
+        // Coincident windows read as one window that keeps changing what it contains, which
+        // is what happened when every new window took the view direction unmodified.
+        let mut layout = WindowLayout::default();
+        let mut seen: Vec<(f64, f64)> = Vec::new();
+        for i in 0..6 {
+            // A distinct key per window, which is what `place` uses for identity.
+            layout.placements.insert(i, Placement::default());
+            let n = layout.placements.len() - 1;
+            let side = if n % 2 == 0 { 1.0 } else { -1.0 };
+            let rank = ((n + 1) / 2) as f64;
+            let p = (
+                side * rank * 7.0f64.to_radians(),
+                Placement::default().radius + rank * 0.06,
+            );
+            assert!(
+                !seen.iter().any(|s| (s.0 - p.0).abs() < 1e-9 && (s.1 - p.1).abs() < 1e-9),
+                "window {i} landed on top of an earlier one"
+            );
+            seen.push(p);
+        }
     }
 
     #[test]
