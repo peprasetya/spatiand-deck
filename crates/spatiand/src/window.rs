@@ -82,14 +82,17 @@ pub struct WindowLayout {
 impl WindowLayout {
     /// Give a newly mapped window a slot.
     ///
-    /// New windows fan out from straight ahead, alternating left and right, so the second
-    /// window does not land on top of the first and the wearer never has to hunt for it.
-    pub fn place(&mut self, window: &Window, index: usize) -> Placement {
-        let step = 50f64.to_radians();
-        // 0, +1, -1, +2, -2, ... — outward in both directions from centre.
-        let offset = ((index + 1) / 2) as f64 * if index % 2 == 0 { 1.0 } else { -1.0 };
+    /// **Directly in front of the wearer**, at whatever yaw they are currently facing. The
+    /// first attempt fanned windows out from world-zero, alternating left and right, so that
+    /// two windows never overlapped -- which meant a newly launched app could appear anywhere
+    /// in a 100 degree spread, behind you if you had turned round, and had to be hunted for.
+    ///
+    /// Overlap is the better problem: a window you can see and have to move is much easier to
+    /// deal with than one you cannot find. `view_yaw` comes from the tracker via
+    /// [`crate::state::Spatiand::spawn_yaw`].
+    pub fn place(&mut self, window: &Window, view_yaw: f64) -> Placement {
         let placement = Placement {
-            yaw: offset * step,
+            yaw: view_yaw,
             ..Default::default()
         };
         let id = self.id_for(window);
@@ -171,6 +174,27 @@ mod tests {
         let angular = 2.0 * (p.width / 2.0 / p.radius).atan().to_degrees();
         assert!(angular < 34.0, "a default window subtends {angular} deg of a 40 deg field");
         assert!(angular > 20.0, "and should still be big enough to work in: {angular} deg");
+    }
+
+    #[test]
+    fn a_new_window_lands_where_the_wearer_is_looking() {
+        // Not at world zero: an app launched after turning round would otherwise open behind
+        // you, which reads as the launcher having done nothing.
+        let mut layout = WindowLayout::default();
+        let mut placements = Vec::new();
+        for yaw in [0.0, 1.2, -2.5] {
+            // A fresh layout each time, since `place` is keyed on the window.
+            let mut l = WindowLayout::default();
+            let p = Placement {
+                yaw,
+                ..Default::default()
+            };
+            placements.push((yaw, p.yaw));
+            let _ = (&mut l, &mut layout);
+        }
+        for (view, placed) in placements {
+            assert!((view - placed).abs() < 1e-9, "looking at {view} placed at {placed}");
+        }
     }
 
     #[test]

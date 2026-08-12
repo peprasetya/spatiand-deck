@@ -56,6 +56,15 @@ pub struct WindowQuad {
     pub pixels: (u32, u32),
     pub placement: crate::window::Placement,
     pub focused: bool,
+    /// Rasterised title, if one has been built for this window.
+    pub title: Option<TitleTexture>,
+}
+
+/// A window title, already on the GPU.
+#[derive(Clone, Copy)]
+pub struct TitleTexture {
+    pub id: u32,
+    pub aspect: f32,
 }
 
 /// A texture and the aspect ratio of the image in it.
@@ -75,6 +84,9 @@ pub struct Scene {
     sky_source: SkySource,
     white: u32,
     reticle: u32,
+    /// A second cursor shape for the left pad. Different in outline as well as colour, so the
+    /// two are distinguishable to someone who cannot rely on hue.
+    reticle_left: u32,
 
     /// One per app in the launcher, in the same order.
     app_labels: Vec<Texture>,
@@ -83,6 +95,13 @@ pub struct Scene {
     /// Rebuilt only when the app list changes; rasterising twenty labels a frame would cost
     /// more than everything else here put together.
     labels_built_for: usize,
+
+    /// Rasterised window titles, keyed by the text itself.
+    ///
+    /// Keyed on the string rather than on a window handle because titles change while a window
+    /// lives (a browser tab, a file being edited) and two windows often share one. Bounded
+    /// below so a client that rewrites its title every frame cannot grow this without limit.
+    titles: std::collections::HashMap<String, Texture>,
 
     /// The menu text, rebuilt when it changes.
     menu: Option<Texture>,
@@ -107,7 +126,7 @@ impl Scene {
         let sky_pipeline = SkyPipeline::new(renderer, &quads)?;
         let bubbles = BubblePipeline::new(renderer, &quads)?;
 
-        let (sky, white, reticle) = renderer
+        let (sky, white, reticle, reticle_left) = renderer
             .with_context(|gl| unsafe {
                 (
                     // Wrapping horizontally: an equirectangular image joins itself, and
@@ -116,6 +135,10 @@ impl Scene {
                     crate::gl::white_texture(gl),
                     {
                         let r = reticle_image(64);
+                        upload_raw(gl, 64, 64, &r, false)
+                    },
+                    {
+                        let r = reticle_image_left(64);
                         upload_raw(gl, 64, 64, &r, false)
                     },
                 )
@@ -130,9 +153,11 @@ impl Scene {
             sky_source: sky_image.source,
             white,
             reticle,
+            reticle_left,
             app_labels: Vec::new(),
             app_glyphs: Vec::new(),
             labels_built_for: usize::MAX,
+            titles: std::collections::HashMap::new(),
             menu: None,
             menu_text: String::new(),
             anchor_yaw: 0.0,
@@ -276,6 +301,45 @@ impl Scene {
         Ok(())
     }
 
+    /// A texture for a window title, rasterising it on first sight.
+    pub fn title_texture(
+        &mut self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        text: &mut TextRenderer,
+        title: &str,
+        px_per_degree: f32,
+    ) -> Option<TitleTexture> {
+        if title.is_empty() {
+            return None;
+        }
+        if let Some(existing) = self.titles.get(title) {
+            return Some(TitleTexture {
+                id: existing.id,
+                aspect: existing.aspect,
+            });
+        }
+        // A title that rewrites itself constantly -- a clock, a progress percentage -- would
+        // otherwise add a texture per frame. Dropping the cache is cheaper than tracking ages,
+        // and the visible cost is one rebuild of each title still on screen.
+        if self.titles.len() > 64 {
+            let ids: Vec<u32> = self.titles.values().map(|t| t.id).collect();
+            let _ = renderer.with_context(|gl| unsafe {
+                for id in ids {
+                    gl.DeleteTextures(1, &id);
+                }
+            });
+            self.titles.clear();
+        }
+
+        let image = text.render(title, px_per_degree * 0.8, 1024, [226, 234, 250, 255]);
+        let aspect = image.width as f32 / image.height.max(1) as f32;
+        let id = renderer
+            .with_context(|gl| unsafe { upload_rgba(gl, &image) })
+            .ok()?;
+        self.titles.insert(title.to_string(), Texture { id, aspect });
+        Some(TitleTexture { id, aspect })
+    }
+
     /// Rebuild the menu panel if its text changed.
     pub fn sync_menu(
         &mut self,
@@ -320,6 +384,7 @@ impl Scene {
     /// # Safety
     /// Context must be current.
     pub unsafe fn draw_windows(&self, gl: &ffi::Gles2, eye: &Eye, windows: &[WindowQuad]) {
+        let bar_fraction = crate::pointer::TITLE_BAR_FRACTION as f32;
         let mut order: Vec<&WindowQuad> = windows.iter().collect();
         // Furthest first. Everything here is a flat quad at a known distance, so a plain sort
         // is exact and costs nothing -- see the note at the top about there being no depth
@@ -351,6 +416,31 @@ impl Scene {
             };
             self.quads
                 .draw(gl, self.white, &(eye.view_projection() * frame), frame_tint, (0.0, 1.0));
+
+            // The title bar sits above the content and is what you grab to move the window.
+            // Drawn as part of the same column so it cannot drift away from its window.
+            let bar_height = height * bar_fraction / (1.0 - bar_fraction);
+            let bar_centre = centre + (orientation * Vec3::Z) * (height + bar_height) * 0.5;
+            let bar = self.panel_model(bar_centre, orientation, width, bar_height);
+            let bar_tint = if window.focused {
+                [0.16, 0.22, 0.34, 0.95]
+            } else {
+                [0.10, 0.12, 0.17, 0.85]
+            };
+            self.quads
+                .draw(gl, self.white, &(eye.view_projection() * bar), bar_tint, (0.0, 1.0));
+            if let Some(title) = window.title {
+                let label_height = bar_height * 0.62;
+                let label_width = label_height * title.aspect.max(0.01);
+                let label = self.panel_model(bar_centre, orientation, label_width, label_height);
+                self.quads.draw(
+                    gl,
+                    title.id,
+                    &(eye.view_projection() * label),
+                    [1.0, 1.0, 1.0, if window.focused { 1.0 } else { 0.7 }],
+                    (0.0, 1.0),
+                );
+            }
 
             // Client textures arrive with GL's *default* sampler state, which is
             // NEAREST_MIPMAP_LINEAR. A texture with no mipmaps and a mipmap filter is
@@ -487,7 +577,14 @@ impl Scene {
     ///
     /// # Safety
     /// Context must be current.
-    pub unsafe fn draw_pointer(&self, gl: &ffi::Gles2, eye: &Eye, ray: &Ray, hit: Option<Hit>) {
+    pub unsafe fn draw_pointer(
+        &self,
+        gl: &ffi::Gles2,
+        eye: &Eye,
+        ray: &Ray,
+        hit: Option<Hit>,
+        right_hand: bool,
+    ) {
         // With nothing under the pointer, park the reticle at a fixed distance so it is still
         // visible. A cursor that vanishes whenever it leaves a window is impossible to aim.
         let distance = hit.map(|h| h.distance as f32).unwrap_or(2.5);
@@ -510,14 +607,19 @@ impl Scene {
             point.extend(1.0),
         );
 
-        let tint = if hit.is_some() {
-            [0.65, 0.85, 1.0, 0.95]
+        // Two pads means two cursors, and they have to be told apart at a glance -- otherwise
+        // a two-handed gesture is impossible to aim. Warm for the right hand, cool for the
+        // left, which is easier to read peripherally than two shapes would be.
+        let hue = if right_hand {
+            [1.0, 0.78, 0.42]
         } else {
-            [0.85, 0.88, 0.95, 0.55]
+            [0.52, 0.82, 1.0]
         };
+        let alpha = if hit.is_some() { 0.95 } else { 0.5 };
+        let tint = [hue[0], hue[1], hue[2], alpha];
         self.quads.draw(
             gl,
-            self.reticle,
+            if right_hand { self.reticle } else { self.reticle_left },
             &(eye.view_projection() * model),
             tint,
             (0.0, 1.0),
@@ -574,6 +676,41 @@ fn fit_to_fov(aspect: f32, h_fov_deg: f64, v_fov_deg: f64, distance: f32) -> (f3
     let aspect = aspect.max(0.01);
     let width = extent(h_fov_deg).min(extent(v_fov_deg) * aspect);
     (width, width / aspect)
+}
+
+/// The left pad's cursor: a ring with a cross rather than a dot.
+///
+/// Deliberately a different *shape* as well as a different colour. Two cursors that differ
+/// only in hue are hard to tell apart at the edge of vision, which is exactly where the
+/// non-dominant one usually is.
+fn reticle_image_left(size: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (size * size * 4) as usize];
+    let centre = (size as f32 - 1.0) * 0.5;
+    let radius = centre;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = (x as f32 - centre) / radius;
+            let dy = (y as f32 - centre) / radius;
+            let r = (dx * dx + dy * dy).sqrt();
+            let ring = 1.0 - ((r - 0.78).abs() / 0.12).min(1.0);
+            // A cross through the middle, stopping short of the ring so the centre stays open.
+            let arm = |along: f32, across: f32| {
+                if along.abs() > 0.52 || across.abs() > 0.06 {
+                    0.0
+                } else {
+                    1.0 - (across.abs() / 0.06)
+                }
+            };
+            let cross = arm(dx, dy).max(arm(dy, dx));
+            let a = ring.max(cross).clamp(0.0, 1.0).powf(0.8);
+            let i = ((y * size + x) * 4) as usize;
+            out[i] = 255;
+            out[i + 1] = 255;
+            out[i + 2] = 255;
+            out[i + 3] = (a * 255.0) as u8;
+        }
+    }
+    out
 }
 
 /// Build the pointer reticle: a bright dot inside a thin ring.
@@ -655,6 +792,7 @@ pub fn collect_windows(
             pixels: (width, height),
             placement,
             focused: state.layout.is_focused(&window),
+            title: None,
         });
     }
     out

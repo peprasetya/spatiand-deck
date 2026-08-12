@@ -55,6 +55,7 @@ use crate::calib::Calibration;
 use crate::environment::Environments;
 use crate::gl::upload_rgba;
 use crate::input_map::intent_for;
+use crate::pointer::{self, Aim, Drag, PointerState, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
 use crate::scene::{eye_centre, Scene};
 use crate::{Runtime, Spatiand};
 
@@ -139,6 +140,13 @@ pub fn run(
     }
     let mut gesture = spatiand_input::TwoPadGesture::new();
     let pointer_config = PointerConfig::default();
+    let mut pointers = PointerState::default();
+    let started = std::time::Instant::now();
+    // Click edges. Held here rather than in PointerState because they are about the physical
+    // pad, not about what the pointer is doing with it.
+    let mut right_was_down = false;
+    let mut left_was_down = false;
+    let mut face_down: Vec<u32> = Vec::new();
 
     // The shell — what is on screen and what a button means. Deliberately built once, outside
     // the output loop: unplugging the glasses must not close your launcher.
@@ -478,7 +486,7 @@ pub fn run(
             // two-thumb gesture all see the same instant. Reading the device separately for
             // each would let them disagree about whether a thumb is down.
             let mut shell_events: Vec<ShellEvent> = Vec::new();
-            let mut pointer: Option<(f32, f32, bool)> = None;
+            let mut pads: Option<spatiand_input::ControllerState> = None;
             let mut leaving = false;
             let mut screenshot = false;
             if let Some(c) = controller.as_mut() {
@@ -492,7 +500,21 @@ pub fn run(
                         leaving = true;
                     }
                 } else {
+                    let pointing = c.state().right_pad.touched && !shell.menu_is_open();
                     for control in c.pressed() {
+                        // While a thumb is on the pad, A/B/X are mouse buttons rather than
+                        // menu keys. Letting them be both means every click also opens or
+                        // closes something.
+                        if pointing
+                            && matches!(
+                                control,
+                                spatiand_input::Control::A
+                                    | spatiand_input::Control::B
+                                    | spatiand_input::Control::X
+                            )
+                        {
+                            continue;
+                        }
                         // Calibration owns B while it runs. It takes over the whole view and
                         // drives itself on timers, so the shell's menus are unreachable
                         // anyway - and without this there is no way to abandon a run.
@@ -514,13 +536,12 @@ pub fn run(
                     // Two thumbs down is a window gesture and takes the pads away from the
                     // pointer. Running both at once sends the laser racing across the world
                     // while you are resizing something.
-                    let two_handed = gesture.update(&input.left_pad, &input.right_pad);
-                    if two_handed.is_none() && !shell.menu_is_open() && input.right_pad.touched {
-                        pointer = Some((
-                            input.right_pad.x,
-                            input.right_pad.y,
-                            input.right_pad.clicked,
-                        ));
+                    // The two-thumb gesture still takes precedence for *scaling*, but the
+                    // cursors stay visible through it: hiding them mid-gesture makes it
+                    // impossible to see what is being resized.
+                    let _two_handed = gesture.update(&input.left_pad, &input.right_pad);
+                    if !shell.menu_is_open() {
+                        pads = Some(input);
                     }
                 }
             }
@@ -656,6 +677,10 @@ pub fn run(
                 }
             }
 
+            // Where new windows will open. Refreshed every frame so an app launched after a
+            // head turn appears in front of the wearer rather than at world zero.
+            runtime.state.spawn_yaw = tracker.euler_degrees().yaw.to_radians();
+
             let orientation = tracker.predicted_orientation(
                 spatiand_track::DEFAULT_PREDICTION_SECONDS,
                 spatiand_track::DEFAULT_PREDICTION_MAX_DEGREES,
@@ -753,13 +778,162 @@ pub fn run(
             )?;
 
             // Import client buffers before the draw closure takes the context.
-            let windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+            let mut windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+            for (index, window) in windows.iter_mut().enumerate() {
+                let title = runtime
+                    .state
+                    .title_for(index)
+                    .unwrap_or_else(|| "Untitled".to_string());
+                window.title = scene.title_texture(&mut renderer, &mut text, &title, ppd);
+            }
 
-            // Where the pointer is aiming. Built from the head pose latched this frame, so it
-            // tracks with the world rather than lagging a frame behind it.
-            let pointer_ray = pointer.map(|(px, py, _clicked)| {
-                ray_from_pad(px, py, orientation, eye_centre(orientation, &stereo), &pointer_config)
-            });
+            // --- pointing and clicking ---
+            //
+            // Built from the head pose latched this frame, so the cursors track with the world
+            // rather than lagging a frame behind it.
+            let time_ms = started.elapsed().as_millis() as u32;
+            let origin = eye_centre(orientation, &stereo);
+            let aim_of = |pad: &spatiand_input::Pad| -> Option<Aim> {
+                pad.touched.then(|| {
+                    pointer::aim(
+                        ray_from_pad(pad.x, pad.y, orientation, origin, &pointer_config),
+                        &windows,
+                    )
+                })
+            };
+            let right_aim = pads.as_ref().and_then(|p| aim_of(&p.right_pad));
+            let left_aim = pads.as_ref().and_then(|p| aim_of(&p.left_pad));
+
+            if shell.menu_is_open() {
+                // A menu takes the pointer away. Anything held has to be let go, or the client
+                // underneath is left believing a drag is still running.
+                pointers.release_all(&mut runtime.state, time_ms);
+            } else {
+                // A drag in progress owns the window and ignores everything else.
+                match pointers.drag {
+                    Some(Drag::Move { index }) => {
+                        if let Some(a) = right_aim.as_ref() {
+                            let d = a.ray.direction;
+                            let window = runtime.state.space.elements().nth(index).cloned();
+                            if let Some(window) = window {
+                                if let Some(mut placement) = runtime.state.layout.get(&window) {
+                                    // Straight onto the ray: the window goes where you point,
+                                    // keeping its distance. Anything cleverer -- offsets from
+                                    // the grab point, inertia -- reads as lag at this range.
+                                    placement.yaw = d.y.atan2(d.x);
+                                    placement.pitch = d.z.clamp(-1.0, 1.0).asin();
+                                    runtime.state.layout.set(&window, placement);
+                                }
+                            }
+                        }
+                    }
+                    Some(Drag::Depth { index, start_radius, start_y }) => {
+                        if let Some(p) = pads.as_ref() {
+                            let window = runtime.state.space.elements().nth(index).cloned();
+                            if let Some(window) = window {
+                                if let Some(mut placement) = runtime.state.layout.get(&window) {
+                                    // Thumb up pushes it away. Clamped so a window can never
+                                    // end up inside your head or so far off it is unreadable.
+                                    let delta = (p.left_pad.y - start_y) as f64;
+                                    placement.radius = (start_radius + delta * 2.0).clamp(0.8, 8.0);
+                                    runtime.state.layout.set(&window, placement);
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        if let Some(a) = right_aim.as_ref() {
+                            pointers.motion(&mut runtime.state, a, &windows, time_ms);
+                        }
+                    }
+                }
+
+                // Buttons. The pads and the face buttons both click, because pressing a pad
+                // moves the thumb slightly as it goes down -- fine for a button, bad for a
+                // precise click on something small.
+                if let Some(p) = pads.as_ref() {
+                    let right_click = p.right_pad.clicked;
+                    let left_click = p.left_pad.clicked;
+
+                    if right_click && pointers.drag.is_none() && !right_was_down {
+                        match right_aim.as_ref() {
+                            Some(a) if a.on_title => {
+                                if let Some((index, _)) = a.hit {
+                                    runtime.state.focus_window(index);
+                                    pointers.drag = Some(Drag::Move { index });
+                                }
+                            }
+                            Some(a) => {
+                                if let Some((index, _)) = a.hit {
+                                    runtime.state.focus_window(index);
+                                }
+                                pointers.button(&mut runtime.state, BTN_LEFT, true, time_ms);
+                            }
+                            None => {}
+                        }
+                    } else if !right_click && right_was_down {
+                        if matches!(pointers.drag, Some(Drag::Move { .. })) {
+                            pointers.drag = None;
+                        } else {
+                            pointers.button(&mut runtime.state, BTN_LEFT, false, time_ms);
+                        }
+                    }
+
+                    if left_click && !left_was_down {
+                        match right_aim.as_ref() {
+                            // The left pad changes distance while the right one is holding a
+                            // window's bar, which is the two-handed way to place something.
+                            Some(a) if a.on_title => {
+                                if let Some((index, _)) = a.hit {
+                                    let radius = runtime
+                                        .state
+                                        .space
+                                        .elements()
+                                        .nth(index)
+                                        .cloned()
+                                        .and_then(|w| runtime.state.layout.get(&w))
+                                        .map(|pl| pl.radius)
+                                        .unwrap_or(2.2);
+                                    pointers.drag = Some(Drag::Depth {
+                                        index,
+                                        start_radius: radius,
+                                        start_y: p.left_pad.y,
+                                    });
+                                }
+                            }
+                            _ => pointers.button(&mut runtime.state, BTN_RIGHT, true, time_ms),
+                        }
+                    } else if !left_click && left_was_down {
+                        if matches!(pointers.drag, Some(Drag::Depth { .. })) {
+                            pointers.drag = None;
+                        } else {
+                            pointers.button(&mut runtime.state, BTN_RIGHT, false, time_ms);
+                        }
+                    }
+                    right_was_down = right_click;
+                    left_was_down = left_click;
+
+                    // Face buttons, only while a thumb is on a pad -- otherwise A would click
+                    // whatever the stale cursor was over, and A is also the menus' select.
+                    if right_aim.is_some() {
+                        for (control, button) in [
+                            (spatiand_input::Control::A, BTN_LEFT),
+                            (spatiand_input::Control::B, BTN_RIGHT),
+                            (spatiand_input::Control::X, BTN_MIDDLE),
+                        ] {
+                            let down = p.buttons.is_down(control);
+                            let was = face_down.contains(&button);
+                            if down && !was {
+                                face_down.push(button);
+                                pointers.button(&mut runtime.state, button, true, time_ms);
+                            } else if !down && was {
+                                face_down.retain(|b| *b != button);
+                                pointers.button(&mut runtime.state, button, false, time_ms);
+                            }
+                        }
+                    }
+                }
+            }
 
             // --- draw the scene into the offscreen texture ---
             {
@@ -767,6 +941,8 @@ pub fn run(
                 let scene = &scene;
                 let shell = &shell;
                 let windows = &windows;
+                let right_aim = &right_aim;
+                let left_aim = &left_aim;
                 renderer.with_context(|gl| unsafe {
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
                     gl.Disable(ffi::SCISSOR_TEST);
@@ -835,8 +1011,11 @@ pub fn run(
                             scene.draw_windows(gl, &eye, &windows);
                         }
                         scene.draw_menu(gl, &eye, &shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
-                        if let Some(ray) = pointer_ray {
-                            scene.draw_pointer(gl, &eye, &ray, None);
+                        if let Some(a) = right_aim.as_ref() {
+                            scene.draw_pointer(gl, &eye, &a.ray, a.hit.map(|(_, h)| h), true);
+                        }
+                        if let Some(a) = left_aim.as_ref() {
+                            scene.draw_pointer(gl, &eye, &a.ray, a.hit.map(|(_, h)| h), false);
                         }
 
                         // The head-locked panel: the waiting prompt, the calibration flow, or

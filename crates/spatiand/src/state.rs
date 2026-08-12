@@ -71,6 +71,11 @@ pub struct Spatiand {
     pub space: Space<smithay::desktop::Window>,
     /// Where each window sits on the sphere, keyed alongside `space`.
     pub layout: WindowLayout,
+    /// Yaw the wearer is currently facing, radians, refreshed once a frame by the backend.
+    ///
+    /// Lives here because `new_toplevel` needs it and has no access to the tracker: a window
+    /// has to be placed the moment it is mapped, which is deep inside a protocol callback.
+    pub spawn_yaw: f64,
 }
 
 impl Spatiand {
@@ -109,6 +114,7 @@ impl Spatiand {
             seat,
             space: Space::default(),
             layout: WindowLayout::default(),
+            spawn_yaw: 0.0,
         }
     }
 
@@ -130,6 +136,51 @@ impl Spatiand {
             .expect("could not register the wayland socket");
         log::info!("listening on WAYLAND_DISPLAY={name}");
         name
+    }
+
+    /// The toplevel surface of the nth window, in the same order `collect_windows` uses.
+    ///
+    /// Indices rather than handles because the pointer works against the drawn quads, and
+    /// those are gathered per frame; carrying a `Window` through would mean cloning it into
+    /// every hit test.
+    pub fn surface_for(&self, index: usize) -> Option<WlSurface> {
+        self.space
+            .elements()
+            .nth(index)
+            .and_then(|w| w.toplevel())
+            .map(|t| t.wl_surface().clone())
+    }
+
+    /// The window title a client has set, for the title bar.
+    pub fn title_for(&self, index: usize) -> Option<String> {
+        let window = self.space.elements().nth(index)?;
+        let surface = window.toplevel()?.wl_surface().clone();
+        smithay::wayland::compositor::with_states(&surface, |states| {
+            states
+                .data_map
+                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                .and_then(|d| d.lock().ok())
+                .and_then(|d| d.title.clone())
+        })
+    }
+
+    /// Give a window keyboard focus.
+    pub fn focus_window(&mut self, index: usize) {
+        let Some(surface) = self.surface_for(index) else {
+            return;
+        };
+        // Resolve to an owned Window first: `elements()` holds an immutable borrow of the
+        // space for as long as the iterator chain lives, and raising needs it mutably.
+        let window = self.space.elements().nth(index).cloned();
+        if let Some(window) = window {
+            self.layout.focus(&window);
+            // Raise it too, so clicking a window behind another brings it forward -- otherwise
+            // focus and what you can see disagree.
+            self.space.raise_element(&window, true);
+        }
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, Some(surface), smithay::utils::SERIAL_COUNTER.next_serial());
+        }
     }
 
     /// The surface under a point, for pointer focus.
@@ -215,8 +266,15 @@ impl XdgShellHandler for Spatiand {
         let index = self.space.elements().count() as i32;
         self.space
             .map_element(window.clone(), (index * 32, index * 32), false);
-        self.layout.place(&window, index as usize);
-        log::info!("new toplevel ({} windows)", self.space.elements().count());
+        self.layout.place(&window, self.spawn_yaw);
+        // Newly opened windows take focus, so the thing you just launched is the thing the
+        // pointer and keyboard talk to.
+        self.layout.focus(&window);
+        log::info!(
+            "new toplevel at yaw {:.0} deg ({} windows)",
+            self.spawn_yaw.to_degrees(),
+            self.space.elements().count()
+        );
     }
 
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {

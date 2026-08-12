@@ -432,7 +432,7 @@ pub fn run(
                 scene.draw_sky(gl, &eye);
                 scene.draw_menu(gl, &eye, shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
                 if let Some(ray) = pointer_ray {
-                    scene.draw_pointer(gl, &eye, &ray, None);
+                    scene.draw_pointer(gl, &eye, &ray, None, true);
                 }
                 if let Some((tex, aspect)) = panel_snapshot {
                     let model = head_locked_panel(orientation, aspect);

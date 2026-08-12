@@ -211,6 +211,16 @@ pub fn run(
             Err(e) => log::warn!("could not launch {command:?}: {e}"),
         }
     }
+    {
+        let ppd_now = TextRenderer::px_per_degree(width, 40.0);
+        for (index, w) in windows.iter_mut().enumerate() {
+            let title = runtime
+                .state
+                .title_for(index)
+                .unwrap_or_else(|| "Untitled".to_string());
+            w.title = scene.title_texture(&mut renderer, &mut text, &title, ppd_now);
+        }
+    }
     for w in &windows {
         log::info!(
             "window {}x{} px at yaw {:.0} deg",
