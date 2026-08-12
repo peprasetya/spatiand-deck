@@ -846,6 +846,19 @@ pub fn run(
                     let right_click = p.right_pad.clicked;
                     let left_click = p.left_pad.clicked;
 
+                    // Confirm the press under the thumb that made it. Without this the pads
+                    // feel dead: the click registers, the world responds, and the hand is
+                    // told nothing -- which reads as the pad being broken rather than as
+                    // missing feedback.
+                    if let Some(c) = controller.as_ref() {
+                        if right_click && !right_was_down {
+                            c.pulse(spatiand_input::HapticPad::Right, spatiand_input::Feel::Click);
+                        }
+                        if left_click && !left_was_down {
+                            c.pulse(spatiand_input::HapticPad::Left, spatiand_input::Feel::Click);
+                        }
+                    }
+
                     if right_click && pointers.drag.is_none() && !right_was_down {
                         match right_aim.as_ref() {
                             Some(a) if a.on_title => {

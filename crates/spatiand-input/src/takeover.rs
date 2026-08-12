@@ -43,7 +43,7 @@ fn hidiocsfeature(len: usize) -> u64 {
     (DIR_WRITE_READ << 30) | ((len as u64) << 16) | ((b'H' as u64) << 8) | 0x06
 }
 
-fn send_feature(fd: RawFd, payload: &[u8]) -> Result<()> {
+pub(crate) fn send_feature(fd: RawFd, payload: &[u8]) -> Result<()> {
     if payload.len() + 1 > FEATURE_BUF_LEN {
         return Err(HmdError::Protocol(format!(
             "feature report of {} bytes does not fit a {FEATURE_BUF_LEN}-byte buffer",

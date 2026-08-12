@@ -20,11 +20,13 @@ use std::time::Duration;
 use spatiand_hmd::hid::{self, HidDevice};
 
 pub mod gesture;
+pub mod haptics;
 pub mod layout;
 pub mod report;
 pub mod takeover;
 
 pub use gesture::{GestureDelta, TwoPadGesture};
+pub use haptics::{Feel, Pad as HapticPad};
 pub use layout::{Confidence, Control};
 pub use report::{Buttons, ControllerState, Pad};
 
@@ -149,6 +151,16 @@ impl DeckController {
     /// offering all of them.
     pub fn any_pressed(&self) -> bool {
         !self.pressed_this_frame.is_empty()
+    }
+
+    /// Buzz one of the pads.
+    ///
+    /// Best-effort. Haptics stopping is a degraded session, not a broken one, so a failure
+    /// here is a debug line rather than something a caller has to handle.
+    pub fn pulse(&self, pad: haptics::Pad, feel: haptics::Feel) {
+        if let Err(e) = haptics::pulse(&self.device, pad, feel) {
+            log::debug!("haptic pulse failed: {e}");
+        }
     }
 }
 
