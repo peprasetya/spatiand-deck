@@ -241,29 +241,47 @@ impl Scene {
         shell: &Shell,
         px_per_degree: f32,
     ) -> Result<(), String> {
-        let apps = shell.launcher().apps();
-        // Identity by length and first name is enough: the list only changes on a rescan.
-        let fingerprint = apps.len();
+        // Whatever the launcher is currently showing: groups at the top level, applications
+        // inside one. Both are bubbles with a name and an icon, so the rest is identical.
+        let launcher = shell.launcher();
+        let entries: Vec<(String, Option<String>)> = match launcher.level() {
+            spatiand_shell::Level::Groups => launcher
+                .groups()
+                .iter()
+                .map(|g| (g.label.to_string(), Some(g.icon.to_string())))
+                .collect(),
+            spatiand_shell::Level::Apps(_) => launcher
+                .apps_in_level()
+                .iter()
+                .map(|a| (a.name.clone(), a.icon.clone()))
+                .collect(),
+        };
+        // Level and count together: entering a group of the same size as the group list would
+        // otherwise reuse the wrong textures.
+        let fingerprint = entries.len()
+            + match launcher.level() {
+                spatiand_shell::Level::Groups => 0,
+                spatiand_shell::Level::Apps(_) => 10_000,
+            };
         if fingerprint == self.labels_built_for {
             return Ok(());
         }
 
-        let labels: Vec<TextImage> = apps
+        let labels: Vec<TextImage> = entries
             .iter()
-            .map(|a| text.render(&a.name, px_per_degree * 0.75, 512, [232, 238, 255, 255]))
+            .map(|(name, _)| text.render(name, px_per_degree * 0.75, 512, [232, 238, 255, 255]))
             .collect();
         // The icon inside the glass: the system's own, so an app looks the same here as it
         // does on the desktop. Falling back to the initial rather than to a blank or a
         // question mark — plenty of entries name an icon that is not installed, and a letter
         // is at least identifiable.
         let mut resolved = 0usize;
-        let glyphs: Vec<TextImage> = apps
+        let glyphs: Vec<TextImage> = entries
             .iter()
-            .map(|a| {
-                let from_theme = a
-                    .icon
+            .map(|(name, icon)| {
+                let from_theme = icon
                     .as_deref()
-                    .and_then(|name| spatiand_platform::resolve_icon(name))
+                    .and_then(spatiand_platform::resolve_icon)
                     .and_then(|path| crate::icon::load(&path, ICON_TEXTURE_PX));
                 match from_theme {
                     Some(image) => {
@@ -271,14 +289,13 @@ impl Scene {
                         image
                     }
                     None => {
-                        let initial =
-                            a.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                        let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
                         text.render(&initial, px_per_degree * 4.0, 256, [255, 255, 255, 235])
                     }
                 }
             })
             .collect();
-        log::info!("launcher icons: {resolved} of {} from the icon theme", apps.len());
+        log::info!("launcher icons: {resolved} of {} from the icon theme", entries.len());
 
         let old: Vec<u32> = self
             .app_labels

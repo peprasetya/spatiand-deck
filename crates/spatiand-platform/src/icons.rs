@@ -26,7 +26,15 @@ const THEMES: &[&str] = &["breeze", "Breeze_Light", "Adwaita", "hicolor"];
 /// Largest wins because the icon is going onto a texture and being scaled down: a 48 px icon
 /// blown up to 220 px inside a bubble looks like a mistake, whereas 256 px scaled down does
 /// not. `scalable` beats all of them.
-const SIZES: &[&str] = &["scalable", "512x512", "256x256", "128x128", "96x96", "64x64", "48x48", "32x32"];
+///
+/// **Both naming conventions.** hicolor writes `48x48`; Breeze writes plain `32`. Searching
+/// only for `NxN` finds every application icon on this machine and none of the *category*
+/// icons, because those live exclusively in Breeze — which presented as the launcher's group
+/// bubbles all falling back to a letter while the app bubbles were fine.
+const SIZES: &[&str] = &[
+    "scalable", "512x512", "512", "256x256", "256", "128x128", "128", "96x96", "96", "64x64",
+    "64", "48x48", "48", "32x32", "32", "24", "22",
+];
 
 fn icon_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
@@ -160,12 +168,21 @@ mod tests {
         // A 32 px icon scaled up to fill a bubble looks broken; 256 px scaled down does not.
         let numeric: Vec<u32> = SIZES
             .iter()
-            .filter_map(|s| s.split_once('x').and_then(|(w, _)| w.parse().ok()))
+            .filter(|s| **s != "scalable")
+            .filter_map(|s| s.split_once('x').map_or_else(|| s.parse().ok(), |(w, _)| w.parse().ok()))
             .collect();
         assert!(
-            numeric.windows(2).all(|w| w[0] > w[1]),
-            "sizes must descend: {numeric:?}"
+            numeric.windows(2).all(|w| w[0] >= w[1]),
+            "sizes must not ascend: {numeric:?}"
         );
+    }
+
+    #[test]
+    fn both_size_naming_conventions_are_searched() {
+        // hicolor writes 48x48, Breeze writes 32. Knowing only one finds every application
+        // icon and no category icon at all, since those live only in Breeze.
+        assert!(SIZES.contains(&"48x48"), "hicolor convention missing");
+        assert!(SIZES.contains(&"32"), "breeze convention missing");
     }
 
     #[test]

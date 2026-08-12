@@ -20,6 +20,8 @@ pub struct DesktopEntry {
     pub exec: String,
     /// The raw `Icon` value: either a name to look up in a theme, or an absolute path.
     pub icon: Option<String>,
+    /// The freedesktop `Categories` list, semicolon-separated in the file.
+    pub categories: Vec<String>,
     /// Where it came from, for logs.
     pub path: PathBuf,
 }
@@ -92,6 +94,7 @@ pub fn parse(text: &str, path: &Path) -> Option<DesktopEntry> {
     let mut icon = None;
     let mut hidden = false;
     let mut kind = None;
+    let mut categories = Vec::new();
 
     for raw in text.lines() {
         let line = raw.trim();
@@ -119,6 +122,13 @@ pub fn parse(text: &str, path: &Path) -> Option<DesktopEntry> {
             "Exec" => exec = Some(value.to_string()),
             "Icon" => icon = Some(value.to_string()),
             "Type" => kind = Some(value.to_string()),
+            "Categories" => {
+                categories = value
+                    .split(';')
+                    .filter(|c| !c.is_empty())
+                    .map(|c| c.to_string())
+                    .collect()
+            }
             "NoDisplay" | "Hidden" => hidden |= value.eq_ignore_ascii_case("true"),
             // An entry that only makes sense inside a terminal has nowhere to run here: there
             // is no terminal in the spatial session, so launching it would appear to do
@@ -139,6 +149,7 @@ pub fn parse(text: &str, path: &Path) -> Option<DesktopEntry> {
         name: name?,
         exec,
         icon,
+        categories,
         path: path.to_path_buf(),
     })
 }
@@ -185,6 +196,22 @@ mod tests {
         assert_eq!(e.name, "Firefox");
         assert_eq!(e.exec, "/usr/lib/firefox/firefox");
         assert_eq!(e.icon.as_deref(), Some("firefox"));
+    }
+
+    #[test]
+    fn categories_are_split_on_semicolons() {
+        // The trailing semicolon is idiomatic in these files and must not become an empty
+        // category, which would show up in a launcher as a nameless group.
+        let text = "[Desktop Entry]\nType=Application\nName=A\nExec=a\n\
+                    Categories=Network;WebBrowser;\n";
+        let e = parse(text, &p()).unwrap();
+        assert_eq!(e.categories, vec!["Network", "WebBrowser"]);
+    }
+
+    #[test]
+    fn an_entry_with_no_categories_is_still_valid() {
+        let text = "[Desktop Entry]\nType=Application\nName=A\nExec=a\n";
+        assert!(parse(text, &p()).unwrap().categories.is_empty());
     }
 
     #[test]

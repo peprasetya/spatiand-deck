@@ -10,6 +10,7 @@
 //! outer icons are further away and smaller, and the eyes have to re-converge as the cursor
 //! travels. That is tiring in a way that is hard to attribute to layout.
 
+use crate::category::{group_for, Group, GROUPS, OTHER};
 use crate::grid::{Direction, Grid};
 
 /// One launchable application.
@@ -21,6 +22,8 @@ pub struct AppEntry {
     /// Absolute path to an icon, if one was found. Absent is normal and not an error: the
     /// bubble falls back to the app's initial, which is legible at bubble size anyway.
     pub icon: Option<String>,
+    /// Freedesktop categories, used to file it under a group.
+    pub categories: Vec<String>,
 }
 
 /// Angular spacing between adjacent bubbles, degrees.
@@ -61,21 +64,118 @@ pub struct BubblePlacement {
     pub scale: f32,
 }
 
+/// What the launcher is currently showing.
+///
+/// Two levels, deliberately. Forty bubbles across four pages is a directory listing you have
+/// to read; "Internet, then Chrome" is two decisions of about five options each. Any deeper
+/// and it becomes a filesystem browser, which is worse than either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Level {
+    /// The groups themselves.
+    Groups,
+    /// The applications inside one group.
+    Apps(Group),
+}
+
 /// The launcher's state.
 #[derive(Debug, Clone)]
 pub struct Launcher {
     apps: Vec<AppEntry>,
     grid: Grid,
+    level: Level,
+    /// Groups that actually contain something, in [`GROUPS`] order.
+    groups: Vec<Group>,
+    /// Where the cursor was in the group list, so backing out returns to it rather than to the
+    /// top -- opening the wrong app and coming back should not cost you your place.
+    group_cursor: usize,
 }
 
 impl Launcher {
     pub fn new(apps: Vec<AppEntry>) -> Self {
-        let grid = Grid::new(COLUMNS, apps.len());
-        Self { apps, grid }
+        let groups = occupied_groups(&apps);
+        Self {
+            grid: Grid::new(COLUMNS, groups.len()),
+            apps,
+            level: Level::Groups,
+            groups,
+            group_cursor: 0,
+        }
+    }
+
+    pub fn level(&self) -> &Level {
+        &self.level
+    }
+
+    pub fn groups(&self) -> &[Group] {
+        &self.groups
+    }
+
+    /// The applications in the group currently open, in display order.
+    pub fn apps_in_level(&self) -> Vec<&AppEntry> {
+        match &self.level {
+            Level::Groups => Vec::new(),
+            Level::Apps(group) => self
+                .apps
+                .iter()
+                .filter(|a| group_for(&a.categories) == *group)
+                .collect(),
+        }
+    }
+
+    /// How many bubbles the current level shows.
+    pub fn len(&self) -> usize {
+        match &self.level {
+            Level::Groups => self.groups.len(),
+            Level::Apps(_) => self.apps_in_level().len(),
+        }
+    }
+
+    /// Enter the focused group, or return the focused application to launch.
+    ///
+    /// `Ok(Some(app))` means launch it; `Ok(None)` means the level changed and there is
+    /// nothing else to do.
+    pub fn activate(&mut self) -> Option<AppEntry> {
+        match self.level.clone() {
+            Level::Groups => {
+                let group = *self.groups.get(self.grid.cursor())?;
+                self.group_cursor = self.grid.cursor();
+                self.level = Level::Apps(group);
+                self.grid = Grid::new(COLUMNS, self.len());
+                None
+            }
+            Level::Apps(_) => self.apps_in_level().get(self.grid.cursor()).map(|a| (*a).clone()),
+        }
+    }
+
+    /// Back out one level. `true` if there was somewhere to go.
+    ///
+    /// `false` at the top means the caller should close the launcher entirely — B has to keep
+    /// working rather than becoming inert once you are already at the root.
+    pub fn back(&mut self) -> bool {
+        match self.level {
+            Level::Groups => false,
+            Level::Apps(_) => {
+                self.level = Level::Groups;
+                self.grid = Grid::new(COLUMNS, self.groups.len());
+                self.grid.set_cursor(self.group_cursor);
+                true
+            }
+        }
+    }
+
+    /// Label for whatever is focused, for the caption under the grid.
+    pub fn focused_label(&self) -> Option<String> {
+        match &self.level {
+            Level::Groups => self.groups.get(self.grid.cursor()).map(|g| g.label.to_string()),
+            Level::Apps(_) => self
+                .apps_in_level()
+                .get(self.grid.cursor())
+                .map(|a| a.name.clone()),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.apps.is_empty()
+        self.len() == 0
     }
 
     pub fn apps(&self) -> &[AppEntry] {
@@ -86,14 +186,24 @@ impl Launcher {
         self.grid.cursor()
     }
 
-    pub fn focused(&self) -> Option<&AppEntry> {
-        self.apps.get(self.grid.cursor())
+    /// The focused application, or `None` at the group level.
+    pub fn focused(&self) -> Option<AppEntry> {
+        match self.level {
+            Level::Groups => None,
+            Level::Apps(_) => self.apps_in_level().get(self.grid.cursor()).map(|a| (*a).clone()),
+        }
     }
 
-    /// Replace the app list, keeping the cursor valid.
+    /// Replace the app list, returning to the group level.
+    ///
+    /// Not merely a resize: a rescan can empty the group that is currently open, and staying
+    /// inside a group that no longer exists shows an empty grid with no way to tell why.
     pub fn set_apps(&mut self, apps: Vec<AppEntry>) {
-        self.grid.resize(apps.len());
         self.apps = apps;
+        self.groups = occupied_groups(&self.apps);
+        self.level = Level::Groups;
+        self.group_cursor = 0;
+        self.grid = Grid::new(COLUMNS, self.groups.len());
     }
 
     pub fn step(&mut self, direction: Direction) -> bool {
@@ -107,13 +217,13 @@ impl Launcher {
     }
 
     pub fn pages(&self) -> usize {
-        self.apps.len().div_ceil(PAGE_SIZE).max(1)
+        self.len().div_ceil(PAGE_SIZE).max(1)
     }
 
     /// Indices visible on the current page.
     pub fn visible(&self) -> std::ops::Range<usize> {
         let start = self.page() * PAGE_SIZE;
-        start..(start + PAGE_SIZE).min(self.apps.len())
+        start..(start + PAGE_SIZE).min(self.len())
     }
 
     /// Where a bubble sits.
@@ -125,7 +235,7 @@ impl Launcher {
         let local = index % PAGE_SIZE;
         let row = local / COLUMNS;
         let page_start = (index / PAGE_SIZE) * PAGE_SIZE;
-        let on_this_page = (self.apps.len() - page_start).min(PAGE_SIZE);
+        let on_this_page = (self.len().saturating_sub(page_start)).min(PAGE_SIZE);
         let rows_here = on_this_page.div_ceil(COLUMNS).max(1);
         let in_this_row = if row + 1 < rows_here {
             COLUMNS
@@ -158,6 +268,22 @@ impl Launcher {
     }
 }
 
+/// Groups that contain at least one application, in [`GROUPS`] order.
+///
+/// Empty groups are omitted rather than shown greyed out: a bubble you cannot enter is worse
+/// than an absent one, and on any given machine most of the nine are empty.
+fn occupied_groups(apps: &[AppEntry]) -> Vec<Group> {
+    let mut out: Vec<Group> = GROUPS
+        .iter()
+        .copied()
+        .filter(|g| apps.iter().any(|a| group_for(&a.categories) == *g))
+        .collect();
+    if apps.iter().any(|a| group_for(&a.categories) == OTHER) {
+        out.push(OTHER);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,11 +293,18 @@ mod tests {
             name: name.into(),
             exec: format!("/usr/bin/{}", name.to_lowercase()),
             icon: None,
+            categories: vec!["Utility".into()],
         }
     }
 
+    /// A launcher already inside a group, since every app here shares one. Most of these
+    /// tests are about grid geometry, which only exists at the application level.
     fn launcher_of(n: usize) -> Launcher {
-        Launcher::new((0..n).map(|i| app(&format!("App{i}"))).collect())
+        let mut l = Launcher::new((0..n).map(|i| app(&format!("App{i}"))).collect());
+        if n > 0 {
+            l.activate();
+        }
+        l
     }
 
     #[test]
@@ -185,7 +318,7 @@ mod tests {
     #[test]
     fn the_cursor_starts_on_the_first_app() {
         let l = launcher_of(8);
-        assert_eq!(l.focused().map(|a| a.name.as_str()), Some("App0"));
+        assert_eq!(l.focused().map(|a| a.name.clone()).as_deref(), Some("App0"));
     }
 
     #[test]
@@ -259,7 +392,11 @@ mod tests {
         }
         l.set_apps(vec![app("Only")]);
         assert_eq!(l.cursor(), 0);
-        assert_eq!(l.focused().map(|a| a.name.as_str()), Some("Only"));
+        // A rescan returns to the group level -- staying inside a group that the rescan may
+        // have emptied shows a blank grid with no way to tell why.
+        assert_eq!(l.level(), &Level::Groups);
+        l.activate();
+        assert_eq!(l.focused().map(|a| a.name.clone()).as_deref(), Some("Only"));
     }
 
     #[test]
@@ -300,6 +437,7 @@ mod tests {
         // A ragged final page must still be centred rather than clinging to the top row.
         let l = launcher_of(PAGE_SIZE + 2);
         let mut cursor = Launcher::new(l.apps().to_vec());
+        cursor.activate();
         while cursor.page() == 0 {
             if !cursor.step(Direction::Down) && !cursor.step(Direction::Right) {
                 break;

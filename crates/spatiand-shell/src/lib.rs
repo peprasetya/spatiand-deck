@@ -14,13 +14,15 @@
 
 use crate::grid::Direction;
 
+pub mod category;
 pub mod grid;
 pub mod hud;
 pub mod launcher;
 
 pub use grid::{Direction as NavDirection, Grid};
 pub use hud::{Hud, HudAction, HudItem};
-pub use launcher::{AppEntry, BubblePlacement, Launcher};
+pub use category::{Group, GROUPS};
+pub use launcher::{AppEntry, BubblePlacement, Launcher, Level};
 
 /// What the wearer meant, independent of which button they pressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +132,9 @@ impl Shell {
                 // row in the HUD, because a stray press of B closing the whole session — with
                 // every open window — would be unrecoverable and easy to do by accident.
                 Mode::World => None,
+                // Inside the launcher, B climbs out of a group first and only closes the
+                // launcher once already at the top.
+                Mode::Launcher if self.launcher.back() => None,
                 _ => self.enter(Mode::World),
             },
             Intent::Navigate(direction) => {
@@ -154,7 +159,8 @@ impl Shell {
                     Some(ShellEvent::Hud(action))
                 }
                 Mode::Launcher => {
-                    let app = self.launcher.focused().cloned()?;
+                    // A group opens; an application launches and gets out of the way.
+                    let app = self.launcher.activate()?;
                     self.mode = Mode::World;
                     Some(ShellEvent::Launch(app))
                 }
@@ -173,6 +179,7 @@ mod tests {
             name: name.into(),
             exec: format!("/usr/bin/{name}"),
             icon: None,
+            categories: vec!["Utility".into()],
         }
     }
 
@@ -244,13 +251,33 @@ mod tests {
     }
 
     #[test]
-    fn a_launches_the_focused_app_and_closes_the_launcher() {
+    fn a_enters_a_group_first_and_then_launches() {
         let mut s = shell();
         s.handle(Intent::ToggleLauncher);
+        // The first A opens the group and must NOT launch anything.
+        assert_eq!(s.handle(Intent::Accept), None, "entering a group is not a launch");
+        assert_eq!(s.mode(), Mode::Launcher, "and must leave the launcher open");
+
         s.handle(Intent::Navigate(Direction::Right));
         let event = s.handle(Intent::Accept);
         assert_eq!(event, Some(ShellEvent::Launch(app("beta"))));
         assert_eq!(s.mode(), Mode::World, "launching should get out of the way");
+    }
+
+    #[test]
+    fn b_climbs_out_of_a_group_before_closing_the_launcher() {
+        // Two levels means B has two jobs, and getting this wrong makes one press throw you
+        // all the way out of the launcher from inside a group.
+        let mut s = shell();
+        s.handle(Intent::ToggleLauncher);
+        s.handle(Intent::Accept);
+        assert_eq!(s.handle(Intent::Back), None, "should climb out, not close");
+        assert_eq!(s.mode(), Mode::Launcher);
+        assert_eq!(
+            s.handle(Intent::Back),
+            Some(ShellEvent::ModeChanged(Mode::World)),
+            "a second B closes it"
+        );
     }
 
     #[test]
@@ -284,6 +311,7 @@ mod tests {
     fn navigation_only_reaches_the_surface_that_is_open() {
         let mut s = shell();
         s.handle(Intent::ToggleLauncher);
+        s.handle(Intent::Accept); // into the group, where there is more than one item
         s.handle(Intent::Navigate(Direction::Right));
         assert_eq!(s.launcher().cursor(), 1);
         assert_eq!(s.hud().cursor(), 0, "the HUD should not have moved");

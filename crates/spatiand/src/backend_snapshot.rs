@@ -117,6 +117,7 @@ pub fn run(
             name: e.name,
             exec: e.exec,
             icon: e.icon,
+            categories: e.categories,
         })
         .collect();
     log::info!("launcher: {} application(s)", apps.len());
@@ -363,7 +364,9 @@ pub fn run(
         let eye = spatiand_render::eye_for(EyeSide::Left, orientation, DVec3::ZERO, &stereo);
         scene_ref.draw_sky(gl, &eye);
         scene_ref.draw_windows(gl, &eye, &windows);
-        scene_ref.draw_status(gl, &eye, orientation);
+        if !shell_ref.menu_is_open() {
+            scene_ref.draw_status(gl, &eye, orientation);
+        }
         scene_ref.draw_menu(gl, &eye, shell_ref, (stereo.h_fov_deg, stereo.v_fov_deg()));
         if let Some((tex, aspect)) = panel {
             let (pw, ph) = crate::backend_drm::fit_panel(

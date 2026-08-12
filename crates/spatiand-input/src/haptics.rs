@@ -36,8 +36,9 @@ pub enum Feel {
     /// registered, and it has to be short enough not to blur into the next.
     Click,
     /// A lighter tick for crossing a boundary — the cursor entering a window, or reaching the
-    /// edge of one. Deliberately near the threshold of perception, because this fires often
-    /// and anything stronger becomes irritating within a minute.
+    /// edge of one. Lighter than a click, but not *near threshold*: the first attempt aimed
+    /// for barely-perceptible and landed on imperceptible, which on hardware read as the
+    /// effect simply not firing.
     Tick,
     /// A longer buzz for something that needs noticing without a screen — a launch failing.
     Alert,
@@ -47,9 +48,12 @@ impl Feel {
     /// `(duration_us, interval_us, count)`.
     fn shape(self) -> (u16, u16, u16) {
         match self {
-            // ~6 ms of pulsing: enough to feel as one event rather than a sequence.
+            // ~7 ms of pulsing: enough to feel as one event rather than a sequence. Confirmed
+            // by feel against firmer and lighter alternatives.
             Feel::Click => (1200, 1200, 3),
-            Feel::Tick => (700, 700, 1),
+            // A single 700 us pulse was tested on hardware and could not be felt at all. Two
+            // pulses of 1 ms can, while still reading as clearly lighter than a click.
+            Feel::Tick => (1000, 1000, 2),
             Feel::Alert => (4000, 4000, 20),
         }
     }
@@ -127,6 +131,17 @@ mod tests {
         };
         assert!(total(Feel::Tick) < total(Feel::Click));
         assert!(total(Feel::Click) < total(Feel::Alert));
+    }
+
+    #[test]
+    fn a_tick_is_still_strong_enough_to_be_felt() {
+        // Measured the hard way: a single 700 us pulse -- 1400 us of total activity -- was
+        // reported as nothing at all. Staying comfortably above that is the whole point of a
+        // feedback effect, and "subtle" is one step from "absent".
+        let (duration, interval, count) = Feel::Tick.shape();
+        let total_us = count as u32 * (duration as u32 + interval as u32);
+        assert!(total_us >= 3_000, "tick is {total_us} us, near the threshold that failed");
+        assert!(count >= 2, "a single pulse was not perceptible");
     }
 
     #[test]

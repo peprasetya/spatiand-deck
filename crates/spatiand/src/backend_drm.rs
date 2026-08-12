@@ -156,6 +156,7 @@ pub fn run(
             name: e.name,
             exec: e.exec,
             icon: e.icon,
+            categories: e.categories,
         })
         .collect();
     log::info!("launcher: {} application(s)", apps.len());
