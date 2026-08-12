@@ -68,7 +68,7 @@ fn main() {
         // Renders one frame to a PNG with no display, no session and no headset. The only
         // way to see a layout bug without putting the glasses on and describing it.
         "snapshot" => {
-            if let Err(e) = backend_snapshot::run() {
+            if let Err(e) = backend_snapshot::run(&mut event_loop, &mut display, &mut runtime) {
                 log::error!("snapshot backend failed: {e}");
                 std::process::exit(1);
             }

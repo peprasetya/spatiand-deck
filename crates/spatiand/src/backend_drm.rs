@@ -55,7 +55,7 @@ use crate::calib::Calibration;
 use crate::environment::Environments;
 use crate::gl::upload_rgba;
 use crate::input_map::intent_for;
-use crate::scene::Scene;
+use crate::scene::{eye_centre, Scene};
 use crate::{Runtime, Spatiand};
 
 const PANEL_DISTANCE: f32 = 1.4;
@@ -730,10 +730,13 @@ pub fn run(
                 stereo.per_eye.0.saturating_sub(160).max(64),
             )?;
 
+            // Import client buffers before the draw closure takes the context.
+            let windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+
             // Where the pointer is aiming. Built from the head pose latched this frame, so it
             // tracks with the world rather than lagging a frame behind it.
             let pointer_ray = pointer.map(|(px, py, _clicked)| {
-                ray_from_pad(px, py, orientation, DVec3::ZERO, &pointer_config)
+                ray_from_pad(px, py, orientation, eye_centre(orientation, &stereo), &pointer_config)
             });
 
             // --- draw the scene into the offscreen texture ---
@@ -741,6 +744,7 @@ pub fn run(
                 let snapshot = panel;
                 let scene = &scene;
                 let shell = &shell;
+                let windows = &windows;
                 renderer.with_context(|gl| unsafe {
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
                     gl.Disable(ffi::SCISSOR_TEST);
@@ -806,6 +810,7 @@ pub fn run(
                         // waiting screen is not a place, so it keeps its plain dark backdrop.
                         if !waiting {
                             scene.draw_sky(gl, &eye);
+                            scene.draw_windows(gl, &eye, &windows);
                         }
                         scene.draw_menu(gl, &eye, &shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
                         if let Some(ray) = pointer_ray {

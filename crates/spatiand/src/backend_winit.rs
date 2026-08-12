@@ -29,7 +29,7 @@ use crate::calib::Calibration;
 use crate::environment::Environments;
 use crate::gl::upload_rgba;
 use crate::input_map::intent_for;
-use crate::scene::Scene;
+use crate::scene::{eye_centre, Scene};
 use crate::{Runtime, Spatiand};
 
 /// Half-height, so the side-by-side pair fits an ordinary screen while keeping its shape.
@@ -406,7 +406,7 @@ pub fn run(
         let panel_snapshot = panel.as_ref().map(|p| (p.id, p.aspect));
         // Where the pointer is aiming, latched with the pose this frame.
         let pointer_ray = pointer
-            .map(|(px, py, _)| ray_from_pad(px, py, orientation, DVec3::ZERO, &pointer_config));
+            .map(|(px, py, _)| ray_from_pad(px, py, orientation, eye_centre(orientation, &stereo), &pointer_config));
         let scene = &scene;
         let shell = &shell;
         renderer.with_context(|gl| unsafe {

@@ -17,6 +17,15 @@
 //! `SPATIAND_VIEW` is `world`, `hud`, `launcher` or `calibrate`; `SPATIAND_SNAPSHOT_SIZE` is
 //! `WIDTHxHEIGHT` and defaults to one eye of the glasses (1920x1080). `SPATIAND_SNAPSHOT_YAW`
 //! turns the head, in degrees, which is how the arc's edges get checked.
+//!
+//! `SPATIAND_CLIENT` goes further and launches a real Wayland application into the snapshot:
+//! a full compositor runs, the client connects, commits a buffer, and the frame is rendered
+//! with that window in it. That is the only way to answer "what does an app actually look like
+//! in there" without wearing the glasses.
+//!
+//! ```text
+//! SPATIAND_BACKEND=snapshot SPATIAND_CLIENT=foot SPATIAND_SNAPSHOT=/tmp/win.png spatiand
+//! ```
 
 use std::path::PathBuf;
 
@@ -28,12 +37,16 @@ use smithay::backend::renderer::gles::{ffi, GlesRenderer, GlesTexture};
 use smithay::backend::renderer::Offscreen;
 use smithay::utils::DeviceFd;
 
+use smithay::reexports::calloop::EventLoop;
+use smithay::reexports::wayland_server::Display;
+
 use spatiand_render::{EyeSide, StereoConfig, TextRenderer};
 use spatiand_shell::{Intent, Shell};
 
 use crate::calib::Calibration;
 use crate::environment::Environments;
 use crate::scene::Scene;
+use crate::{Runtime, Spatiand};
 
 /// Which state to draw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +82,11 @@ fn size_from_env() -> (u32, u32) {
     }
 }
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    event_loop: &mut EventLoop<'static, Runtime>,
+    display: &mut Display<Spatiand>,
+    runtime: &mut Runtime,
+) -> Result<(), Box<dyn std::error::Error>> {
     let out: PathBuf = std::env::var("SPATIAND_SNAPSHOT")
         .unwrap_or_else(|_| "/tmp/spatiand-frame.png".into())
         .into();
@@ -104,6 +121,25 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     log::info!("launcher: {} application(s)", apps.len());
     let mut shell = Shell::new(apps, true);
+
+    // Clients need an output to be told about, and frame callbacks need one to reference.
+    let output = smithay::output::Output::new(
+        "spatiand-snapshot".into(),
+        smithay::output::PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: smithay::output::Subpixel::Unknown,
+            make: "Spatiand".into(),
+            model: "Snapshot".into(),
+        },
+    );
+    let output_mode = smithay::output::Mode {
+        size: (width as i32, height as i32).into(),
+        refresh: 72_000,
+    };
+    let _global = output.create_global::<Spatiand>(&runtime.display_handle);
+    output.change_current_state(Some(output_mode), None, None, Some((0, 0).into()));
+    output.set_preferred(output_mode);
+    runtime.state.space.map_output(&output, (0, 0));
     let environments = Environments::discover();
     let sky_image = environments.current();
     let mut scene = Scene::new(&mut renderer, &sky_image)?;
@@ -117,6 +153,114 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             shell.handle(Intent::ToggleLauncher);
         }
         _ => {}
+    }
+
+    // --- optionally host a real application ---
+    let mut windows = Vec::new();
+    if let Ok(command) = std::env::var("SPATIAND_CLIENT") {
+        let seconds: f32 = std::env::var("SPATIAND_CLIENT_WAIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8.0);
+        log::info!("launching {command:?} into the snapshot, waiting up to {seconds}s");
+        match spatiand_platform::launch(&command, &runtime.state.socket_name) {
+            Ok(pid) => {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f32(seconds);
+                while std::time::Instant::now() < deadline {
+                    // Pumping the display is what lets the client bind globals, get its
+                    // configure, and commit. Without this it blocks on the first roundtrip and
+                    // never draws anything.
+                    display.dispatch_clients(&mut runtime.state)?;
+                    display.flush_clients()?;
+                    event_loop.dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
+
+                    windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+                    if !windows.is_empty() {
+                        // The first buffer a toolkit commits is usually blank -- it has the
+                        // right size but the UI has not been painted into it. Snapshotting
+                        // there gives a black rectangle that looks like a broken import.
+                        // Keep pumping so the client gets to draw itself.
+                        log::info!("client mapped; letting it paint");
+                        let settle = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                        while std::time::Instant::now() < settle {
+                            for window in runtime.state.space.elements() {
+                                // Frame callbacks are what tell a client it may draw the next
+                                // frame. Without them most toolkits paint once and stop.
+                                window.send_frame(
+                                    &output,
+                                    std::time::Duration::ZERO,
+                                    Some(std::time::Duration::ZERO),
+                                    |_, _| Some(output.clone()),
+                                );
+                            }
+                            runtime.state.space.refresh();
+                            display.dispatch_clients(&mut runtime.state)?;
+                            display.flush_clients()?;
+                            event_loop
+                                .dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
+                        }
+                        windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+                        break;
+                    }
+                }
+                if windows.is_empty() {
+                    log::warn!("{command:?} (pid {pid}) never committed a buffer");
+                    log::warn!("  it may need a wayland flag, or it may have exited immediately");
+                }
+            }
+            Err(e) => log::warn!("could not launch {command:?}: {e}"),
+        }
+    }
+    for w in &windows {
+        log::info!(
+            "window {}x{} px at yaw {:.0} deg",
+            w.pixels.0,
+            w.pixels.1,
+            w.placement.yaw.to_degrees()
+        );
+    }
+
+    // Decisive diagnostic: read the imported client texture straight back, with no scene
+    // geometry involved. A black window in the world could be a bad import or a bad draw, and
+    // these two look identical from outside.
+    if let (Ok(path), Some(first)) = (std::env::var("SPATIAND_DUMP_WINDOW"), windows.first()) {
+        let (tw, th) = first.pixels;
+        let mut raw = vec![0u8; (tw * th * 4) as usize];
+        let tex = first.texture;
+        let status = renderer.with_context(|gl| unsafe {
+            let mut fbo = 0;
+            gl.GenFramebuffers(1, &mut fbo);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+            gl.FramebufferTexture2D(
+                ffi::FRAMEBUFFER,
+                ffi::COLOR_ATTACHMENT0,
+                ffi::TEXTURE_2D,
+                tex,
+                0,
+            );
+            let st = gl.CheckFramebufferStatus(ffi::FRAMEBUFFER);
+            if st == ffi::FRAMEBUFFER_COMPLETE {
+                gl.ReadPixels(
+                    0,
+                    0,
+                    tw as i32,
+                    th as i32,
+                    ffi::RGBA,
+                    ffi::UNSIGNED_BYTE,
+                    raw.as_mut_ptr() as *mut _,
+                );
+            }
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            gl.DeleteFramebuffers(1, &fbo);
+            st
+        })?;
+        let ink = raw.chunks_exact(4).filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8).count();
+        log::info!(
+            "window texture {tex}: fbo status {status:#x}, {tw}x{th}, {:.1}% non-black",
+            ink as f32 / (tw * th) as f32 * 100.0
+        );
+        image::save_buffer(&path, &raw, tw, th, image::ColorType::Rgba8)?;
+        log::info!("dumped the raw client texture to {path}");
     }
 
     let stereo = StereoConfig {
@@ -200,6 +344,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         // the geometry stays in GL's own convention.
         let eye = spatiand_render::eye_for(EyeSide::Left, orientation, DVec3::ZERO, &stereo);
         scene_ref.draw_sky(gl, &eye);
+        scene_ref.draw_windows(gl, &eye, &windows);
         scene_ref.draw_menu(gl, &eye, shell_ref, (stereo.h_fov_deg, stereo.v_fov_deg()));
         if let Some((tex, aspect)) = panel {
             let (pw, ph) = crate::backend_drm::fit_panel(

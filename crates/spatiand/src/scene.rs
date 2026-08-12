@@ -49,6 +49,15 @@ const LIGHT_DIR: Vec3 = Vec3::new(0.55, 0.6, 0.58);
 /// headset with better optics, without being wasteful across forty apps.
 const ICON_TEXTURE_PX: u32 = 256;
 
+/// One window, ready to draw: its imported texture and where it sits.
+pub struct WindowQuad {
+    pub texture: u32,
+    /// Surface size in pixels, for the aspect ratio.
+    pub pixels: (u32, u32),
+    pub placement: crate::window::Placement,
+    pub focused: bool,
+}
+
 /// A texture and the aspect ratio of the image in it.
 #[derive(Clone, Copy)]
 struct Texture {
@@ -301,6 +310,68 @@ impl Scene {
         Ok(())
     }
 
+    /// Draw the application windows.
+    ///
+    /// Windows are quads on a cylinder around the wearer, drawn back to front so the nearest
+    /// is on top. Each carries a thin frame: without one a window with a dark background has
+    /// no visible edge against a dark environment, and a window you cannot see the extent of
+    /// is very hard to aim a pointer at.
+    ///
+    /// # Safety
+    /// Context must be current.
+    pub unsafe fn draw_windows(&self, gl: &ffi::Gles2, eye: &Eye, windows: &[WindowQuad]) {
+        let mut order: Vec<&WindowQuad> = windows.iter().collect();
+        // Furthest first. Everything here is a flat quad at a known distance, so a plain sort
+        // is exact and costs nothing -- see the note at the top about there being no depth
+        // buffer.
+        order.sort_by(|a, b| b.placement.radius.total_cmp(&a.placement.radius));
+
+        for window in order {
+            let aspect = window.pixels.0 as f32 / window.pixels.1.max(1) as f32;
+            let width = window.placement.width as f32;
+            let height = width / aspect.max(0.01);
+            let centre = window.placement.position().as_vec3();
+            let orientation = Quat::from_rotation_z(window.placement.yaw as f32);
+            let model = self.panel_model(centre, orientation, width, height);
+            let mvp = eye.view_projection() * model;
+
+            // The frame is drawn first and slightly larger, so it reads as a border rather
+            // than as something overlapping the content.
+            let border = 0.012f32;
+            let frame = self.panel_model(
+                centre,
+                orientation,
+                width + border * 2.0,
+                height + border * 2.0,
+            );
+            let frame_tint = if window.focused {
+                [0.55, 0.72, 1.0, 0.85]
+            } else {
+                [0.30, 0.34, 0.45, 0.55]
+            };
+            self.quads
+                .draw(gl, self.white, &(eye.view_projection() * frame), frame_tint, (0.0, 1.0));
+
+            // Client textures arrive with GL's *default* sampler state, which is
+            // NEAREST_MIPMAP_LINEAR. A texture with no mipmaps and a mipmap filter is
+            // incomplete, and an incomplete texture samples as opaque black -- so the window
+            // draws as a perfect black rectangle while the import is entirely correct. That is
+            // a genuinely nasty failure: nothing errors, and reading the texture back shows
+            // full content.
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, window.texture);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
+
+            // The surface itself. Fully opaque: a client's own transparency would otherwise
+            // let the environment through, and a half-transparent terminal floating in a room
+            // is unreadable.
+            self.quads.draw(gl, window.texture, &mvp, [1.0, 1.0, 1.0, 1.0], (0.0, 1.0));
+        }
+    }
+
     /// Draw whichever menu is open.
     ///
     /// # Safety
@@ -530,6 +601,61 @@ fn reticle_image(size: u32) -> Vec<u8> {
             out[i + 2] = 255;
             out[i + 3] = (a * 255.0) as u8;
         }
+    }
+    out
+}
+
+/// Where the eyes sit for a given head pose.
+///
+/// The neck model puts them ~10 cm forward and ~7.5 cm above the pivot. Anything cast *from*
+/// the head -- the pointer ray above all -- has to start here, or its whole reachable area is
+/// offset a couple of degrees and the top of the view becomes unreachable.
+pub fn eye_centre(orientation: glam::DQuat, cfg: &spatiand_render::StereoConfig) -> glam::DVec3 {
+    orientation * glam::DVec3::new(cfg.neck_forward_m, 0.0, cfg.neck_up_m)
+}
+
+/// Import every mapped window's buffer and collect what is needed to draw it.
+///
+/// Import has to happen outside the draw closure: it needs `&mut renderer`, while drawing
+/// holds the GL context. Splitting it this way also means a client that has not committed a
+/// buffer yet is simply absent from the list rather than drawn as a black rectangle.
+pub fn collect_windows(
+    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    state: &crate::state::Spatiand,
+) -> Vec<WindowQuad> {
+    use smithay::backend::renderer::utils::{import_surface_tree, with_renderer_surface_state};
+    use smithay::backend::renderer::{Renderer, Texture};
+
+    let mut out = Vec::new();
+    let windows: Vec<smithay::desktop::Window> = state.space.elements().cloned().collect();
+    for window in windows {
+        let Some(toplevel) = window.toplevel() else {
+            continue;
+        };
+        let surface = toplevel.wl_surface().clone();
+        if let Err(e) = import_surface_tree(renderer, &surface) {
+            log::debug!("could not import a surface: {e}");
+            continue;
+        }
+        let context = renderer.context_id();
+        let imported = with_renderer_surface_state(&surface, |st| {
+            st.texture::<smithay::backend::renderer::gles::GlesTexture>(context)
+                .map(|t| (t.tex_id(), t.width(), t.height()))
+        })
+        .flatten();
+        let Some((texture, width, height)) = imported else {
+            // Mapped but nothing committed yet. Normal for the first frames after a launch.
+            continue;
+        };
+        let Some(placement) = state.layout.get(&window) else {
+            continue;
+        };
+        out.push(WindowQuad {
+            texture,
+            pixels: (width, height),
+            placement,
+            focused: state.layout.is_focused(&window),
+        });
     }
     out
 }

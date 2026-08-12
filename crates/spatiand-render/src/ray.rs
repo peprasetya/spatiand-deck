@@ -28,9 +28,12 @@ pub struct PointerConfig {
 impl Default for PointerConfig {
     fn default() -> Self {
         Self {
-            // Against a 40° horizontal field, ±16° covers four fifths of the width.
-            half_fov_x_deg: 16.0,
-            half_fov_y_deg: 9.0,
+            // Very nearly the whole field. The first attempt reserved a wide margin -- ±16°
+            // and ±9° against a 40°x23° field -- on the theory that the edges are where the
+            // optics are worst. That is true and it made the corners unreachable, which is
+            // worse: a pointer that cannot reach a window's close button is not a pointer.
+            half_fov_x_deg: 19.0,
+            half_fov_y_deg: 11.0,
         }
     }
 }
@@ -185,6 +188,17 @@ mod tests {
         // +Y is left, so pointing right means a negative Y component.
         assert!(right.direction.y < -0.2, "thumb right gave {:?}", right.direction);
         assert!(up.direction.z > 0.1, "thumb up gave {:?}", up.direction);
+    }
+
+    #[test]
+    fn the_pointer_can_reach_every_corner_of_the_field() {
+        // The bug this guards: the pointer reached the bottom of the view but not the top
+        // corners, because its range was narrower than the display's and the ray started at
+        // the pivot rather than at the eye -- so the whole reachable area sat low.
+        let cfg = PointerConfig::default();
+        // One eye of the glasses: 40 deg across, 23.14 deg tall.
+        assert!(cfg.half_fov_x_deg >= 40.0 / 2.0 * 0.9, "cannot reach the sides");
+        assert!(cfg.half_fov_y_deg >= 23.14 / 2.0 * 0.9, "cannot reach the top or bottom");
     }
 
     #[test]

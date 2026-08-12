@@ -38,10 +38,13 @@ impl Default for Placement {
             // the vergence/accommodation conflict starts to be felt on a fixed-focus display
             // like this one; much further and the window subtends too little of a 40 degree
             // field to read.
-            radius: 2.0,
-            // 1.6 m wide at 2 m is roughly 44 degrees — a little wider than one eye's field,
-            // so a focused window fills the view without the edges being unreachable.
-            width: 1.6,
+            radius: 2.2,
+            // 1.1 m at 2.2 m is about 28 degrees, against one eye's 40. The first attempt used
+            // 1.6 m at 2 m -- 44 degrees -- on the theory that a focused window should fill the
+            // view. It does: it fills it completely, edges past the field on both sides, and a
+            // window whose extent you cannot see is one you cannot aim a pointer at or judge
+            // the size of. It also hid the entire world behind it.
+            width: 1.1,
         }
     }
 }
@@ -159,6 +162,15 @@ mod tests {
 
     fn approx(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn a_default_window_fits_inside_one_eye() {
+        // The constraint that was missed: a window wider than the field has no visible edges.
+        let p = Placement::default();
+        let angular = 2.0 * (p.width / 2.0 / p.radius).atan().to_degrees();
+        assert!(angular < 34.0, "a default window subtends {angular} deg of a 40 deg field");
+        assert!(angular > 20.0, "and should still be big enough to work in: {angular} deg");
     }
 
     #[test]

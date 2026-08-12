@@ -33,6 +33,12 @@ use smithay::{
 
 use crate::window::WindowLayout;
 
+/// Pixel size proposed to a new toplevel.
+///
+/// 1280x800 across a window that fills a third of a 40 degree field works out at roughly one
+/// surface pixel per display pixel, so text is neither soft nor pointlessly oversampled.
+const DEFAULT_WINDOW_SIZE: (i32, i32) = (1280, 800);
+
 /// Per-client data. Smithay requires the compositor's per-client state to live here.
 #[derive(Default)]
 pub struct ClientState {
@@ -191,6 +197,17 @@ impl XdgShellHandler for Spatiand {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        // Propose a size before anything else. A toplevel configured with 0x0 is telling the
+        // client "pick your own", and while most do, several toolkits wait for a real size and
+        // never commit a buffer -- which presents as an app that launches, appears in the
+        // window count, and draws nothing.
+        //
+        // The number is the surface's pixel resolution, not its size in the world: a window is
+        // a quad of whatever width the layout gives it, and this is how many pixels get
+        // stretched across that quad.
+        surface.with_pending_state(|state| {
+            state.size = Some(DEFAULT_WINDOW_SIZE.into());
+        });
         let window = smithay::desktop::Window::new_wayland_window(surface);
         // Smithay's Space is 2D, so every window is given a slot on a notional plane. The
         // spatial layer never reads these coordinates as pixels — it reads the *ordering* and
