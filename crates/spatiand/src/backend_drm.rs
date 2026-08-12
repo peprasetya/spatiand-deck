@@ -155,6 +155,8 @@ pub fn run(
     // than jumping the moment it lands.
     let mut last_left_pad: Option<(f32, f32)> = None;
     let mut keyboard = spatiand_shell::Keyboard::default();
+    // Left thumb position while a window is being dragged, for the depth adjustment.
+    let mut drag_left_y: Option<f32> = None;
 
     // The shell — what is on screen and what a button means. Deliberately built once, outside
     // the output loop: unplugging the glasses must not close your launcher.
@@ -861,17 +863,38 @@ pub fn run(
             } else {
                 // A drag in progress owns the window and ignores everything else.
                 match pointers.drag {
-                    Some(Drag::Move { index }) => {
+                    Some(Drag::Move {
+                        index,
+                        yaw_offset,
+                        pitch_offset,
+                    }) => {
                         if let Some(a) = right_aim.as_ref() {
                             let d = a.ray.direction;
                             let window = runtime.state.space.elements().nth(index).cloned();
                             if let Some(window) = window {
                                 if let Some(mut placement) = runtime.state.layout.get(&window) {
-                                    // Straight onto the ray: the window goes where you point,
-                                    // keeping its distance. Anything cleverer -- offsets from
-                                    // the grab point, inertia -- reads as lag at this range.
-                                    placement.yaw = d.y.atan2(d.x);
-                                    placement.pitch = d.z.clamp(-1.0, 1.0).asin();
+                                    // Relative to where it was grabbed, so the window hangs
+                                    // from the point you took hold of rather than snapping its
+                                    // centre to the ray.
+                                    placement.yaw = d.y.atan2(d.x) + yaw_offset;
+                                    placement.pitch = (d.z.clamp(-1.0, 1.0).asin() + pitch_offset)
+                                        .clamp(-1.2, 1.2);
+                                    // The left thumb sets the distance while the right holds
+                                    // the window. No click needed: reaching for a second
+                                    // button while already holding something is awkward, and
+                                    // the thumb is on the pad anyway.
+                                    if let Some(p) = pads.as_ref() {
+                                        if p.left_pad.touched {
+                                            if let Some(previous) = drag_left_y {
+                                                let delta = (p.left_pad.y - previous) as f64;
+                                                placement.radius =
+                                                    (placement.radius + delta * 2.5).clamp(0.8, 8.0);
+                                            }
+                                            drag_left_y = Some(p.left_pad.y);
+                                        } else {
+                                            drag_left_y = None;
+                                        }
+                                    }
                                     runtime.state.layout.set(&window, placement);
                                 }
                             }
@@ -1006,7 +1029,25 @@ pub fn run(
                             Some(a) if a.on_title => {
                                 if let Some((index, _)) = a.hit {
                                     runtime.state.focus_window(index);
-                                    pointers.drag = Some(Drag::Move { index });
+                                    let d = a.ray.direction;
+                                    let (ray_yaw, ray_pitch) =
+                                        (d.y.atan2(d.x), d.z.clamp(-1.0, 1.0).asin());
+                                    let here = runtime
+                                        .state
+                                        .space
+                                        .elements()
+                                        .nth(index)
+                                        .cloned()
+                                        .and_then(|w| runtime.state.layout.get(&w));
+                                    let (yaw_offset, pitch_offset) = here
+                                        .map(|p| (p.yaw - ray_yaw, p.pitch - ray_pitch))
+                                        .unwrap_or((0.0, 0.0));
+                                    drag_left_y = None;
+                                    pointers.drag = Some(Drag::Move {
+                                        index,
+                                        yaw_offset,
+                                        pitch_offset,
+                                    });
                                 }
                             }
                             Some(a) => {

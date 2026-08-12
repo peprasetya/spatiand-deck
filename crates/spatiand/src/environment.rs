@@ -64,7 +64,18 @@ impl Environments {
         } else {
             log::info!("{} environment image(s) available", files.len());
         }
-        Self { files, index: None }
+        // Start on a named one if asked. Useful for a snapshot of a particular background, and
+        // for anyone who wants the same world every time rather than whatever they left it on.
+        let index = std::env::var("SPATIAND_ENVIRONMENT").ok().and_then(|wanted| {
+            let wanted = wanted.to_lowercase();
+            files
+                .iter()
+                .position(|p| p.to_string_lossy().to_lowercase().contains(&wanted))
+        });
+        if let Some(i) = index {
+            log::info!("starting on {}", files[i].display());
+        }
+        Self { files, index }
     }
 
     /// Load whatever is currently selected.

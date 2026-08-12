@@ -154,11 +154,17 @@ pub fn parse(text: &str, path: &Path) -> Option<DesktopEntry> {
     })
 }
 
-/// Remove the `%f`, `%U`, `%i`, `%c`, `%k` placeholders from an `Exec` line.
+/// Remove the `%f`, `%U`, `%i`, `%c`, `%k` placeholders from an `Exec` line, and Flatpak's
+/// file-forwarding markers.
 ///
-/// They expand to files and URLs being opened; with nothing to pass, the spec says to drop
-/// them. Leaving them in means the app is launched with a literal `%U` as its first argument,
-/// which some handle and others refuse to start over.
+/// Field codes expand to files and URLs being opened; with nothing to pass, the spec says to
+/// drop them. Leaving them in means the app is launched with a literal `%U` as its first
+/// argument, which some handle and others refuse to start over.
+///
+/// Flatpak wraps its forwarded arguments in `@@u … @@` — Google Chrome's entry on this machine
+/// reads `… com.google.Chrome @@u %U @@`. Removing only the `%U` leaves `@@u` and `@@` behind
+/// as literal arguments, which is not a syntax `flatpak run` accepts. The app never starts and
+/// the launcher shows no error, because the failure is inside the child.
 pub fn strip_field_codes(exec: &str) -> String {
     let mut out = String::with_capacity(exec.len());
     let mut chars = exec.chars().peekable();
@@ -174,7 +180,11 @@ pub fn strip_field_codes(exec: &str) -> String {
             None => {}
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    out.split_whitespace()
+        // `@@`, `@@u`, `@@f` and friends only ever delimit forwarded files, and there are none.
+        .filter(|token| !(token.starts_with("@@") && token.len() <= 3))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -222,6 +232,24 @@ mod tests {
         assert_eq!(strip_field_codes("app %i %c %k"), "app");
         // A trailing bare % must not panic or swallow the command.
         assert_eq!(strip_field_codes("app %"), "app");
+    }
+
+    #[test]
+    fn flatpak_file_forwarding_markers_are_removed() {
+        // Verbatim from this machine's Google Chrome entry. Dropping only the %U leaves `@@u`
+        // and `@@` as arguments, which `flatpak run` rejects -- and the launcher cannot see
+        // that, because the failure happens inside the child after a successful spawn.
+        let exec = "/usr/bin/flatpak run --branch=stable --arch=x86_64 \
+--command=/app/bin/chrome --file-forwarding com.google.Chrome @@u %U @@";
+        let cleaned = strip_field_codes(exec);
+        assert!(!cleaned.contains("@@"), "markers survived: {cleaned}");
+        assert!(cleaned.ends_with("com.google.Chrome"), "got {cleaned}");
+    }
+
+    #[test]
+    fn an_argument_that_merely_starts_with_at_signs_is_kept() {
+        // The markers are short and standalone; a real argument is not.
+        assert_eq!(strip_field_codes("app @@userdata"), "app @@userdata");
     }
 
     #[test]

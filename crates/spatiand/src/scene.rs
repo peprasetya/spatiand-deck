@@ -106,6 +106,8 @@ pub struct Scene {
     /// A second cursor shape for the left pad. Different in outline as well as colour, so the
     /// two are distinguishable to someone who cannot rely on hue.
     reticle_left: u32,
+    /// Rounded glass, for window frames and title bars.
+    glass: u32,
 
     /// One per app in the launcher, in the same order.
     app_labels: Vec<Texture>,
@@ -172,7 +174,7 @@ impl Scene {
         let sky_pipeline = SkyPipeline::new(renderer, &quads)?;
         let bubbles = BubblePipeline::new(renderer, &quads)?;
 
-        let (sky, white, reticle, reticle_left) = renderer
+        let (sky, white, reticle, reticle_left, glass) = renderer
             .with_context(|gl| unsafe {
                 (
                     // Wrapping horizontally: an equirectangular image joins itself, and
@@ -187,6 +189,12 @@ impl Scene {
                         let r = reticle_image_left(64);
                         upload_raw(gl, 64, 64, &r, false)
                     },
+                    {
+                        // Wide and short: it is stretched across frames of every proportion,
+                        // and the corner radius is what has to survive that, not the pixels.
+                        let g = glass_panel_image(256, 96, 14.0);
+                        upload_raw(gl, 256, 96, &g, false)
+                    },
                 )
             })
             .map_err(|e| format!("no GL context: {e}"))?;
@@ -200,6 +208,7 @@ impl Scene {
             white,
             reticle,
             reticle_left,
+            glass,
             app_labels: Vec::new(),
             app_glyphs: Vec::new(),
             labels_built_for: usize::MAX,
@@ -717,39 +726,43 @@ impl Scene {
             let width = window.placement.width as f32;
             let height = width / aspect.max(0.01);
             let centre = window.placement.position().as_vec3();
-            let orientation = Quat::from_rotation_z(window.placement.yaw as f32);
+            // The placement's own orientation, so the window tips to face the viewer when it
+            // is above or below the horizon. Rebuilding it from yaw alone here would quietly
+            // undo that for the drawing while leaving the hit-test spherical.
+            let o = window.placement.orientation();
+            let orientation =
+                Quat::from_xyzw(o.x as f32, o.y as f32, o.z as f32, o.w as f32);
             let model = self.panel_model(centre, orientation, width, height);
             let mvp = eye.view_projection() * model;
 
-            // The frame is drawn first and slightly larger, so it reads as a border rather
-            // than as something overlapping the content.
+            // Frame and title bar are ONE pane of glass behind everything, not a border with
+            // a bar resting on it. Two rectangles with different fills read as two objects
+            // stuck together; a single rounded sheet reads as the window's chrome.
             let border = 0.012f32;
-            let frame = self.panel_model(
-                centre,
+            let bar_height = height * bar_fraction / (1.0 - bar_fraction);
+            let chrome_height = height + bar_height + border * 2.0;
+            // The sheet covers the content and the bar, so its centre sits above the content's.
+            let chrome_centre = centre + (orientation * Vec3::Z) * (bar_height * 0.5);
+            let chrome = self.panel_model(
+                chrome_centre,
                 orientation,
                 width + border * 2.0,
-                height + border * 2.0,
+                chrome_height,
             );
-            let frame_tint = if window.focused {
-                [0.55, 0.72, 1.0, 0.85]
+            let chrome_tint = if window.focused {
+                [0.62, 0.76, 1.0, 0.92]
             } else {
-                [0.30, 0.34, 0.45, 0.55]
+                [0.42, 0.47, 0.60, 0.60]
             };
-            self.quads
-                .draw(gl, self.white, &(eye.view_projection() * frame), frame_tint, (0.0, 1.0));
+            self.quads.draw(
+                gl,
+                self.glass,
+                &(eye.view_projection() * chrome),
+                chrome_tint,
+                (0.0, 1.0),
+            );
 
-            // The title bar sits above the content and is what you grab to move the window.
-            // Drawn as part of the same column so it cannot drift away from its window.
-            let bar_height = height * bar_fraction / (1.0 - bar_fraction);
             let bar_centre = centre + (orientation * Vec3::Z) * (height + bar_height) * 0.5;
-            let bar = self.panel_model(bar_centre, orientation, width, bar_height);
-            let bar_tint = if window.focused {
-                [0.16, 0.22, 0.34, 0.95]
-            } else {
-                [0.10, 0.12, 0.17, 0.85]
-            };
-            self.quads
-                .draw(gl, self.white, &(eye.view_projection() * bar), bar_tint, (0.0, 1.0));
             if let Some(title) = window.title {
                 let label_height = bar_height * 0.62;
                 let label_width = label_height * title.aspect.max(0.01);
@@ -1127,6 +1140,52 @@ fn fit_to_fov(aspect: f32, h_fov_deg: f64, v_fov_deg: f64, distance: f32) -> (f3
     let aspect = aspect.max(0.01);
     let width = extent(h_fov_deg).min(extent(v_fov_deg) * aspect);
     (width, width / aspect)
+}
+
+/// A pane of glass: rounded, with a lit top edge and a soft rim.
+///
+/// Used for the window frame and title bar, drawn as one piece so they read as a single object
+/// rather than a bar sitting on a border. A flat quad cannot do that -- it has hard corners
+/// and a uniform fill, and next to the refracting bubbles it looks like a different program.
+///
+/// Generated rather than shipped, like everything else here: it is a gradient and a rounded
+/// rectangle, and an asset would be one more thing to install and license.
+fn glass_panel_image(width: u32, height: u32, corner: f32) -> Vec<u8> {
+    let mut out = vec![0u8; (width * height * 4) as usize];
+    let (w, h) = (width as f32, height as f32);
+    for y in 0..height {
+        for x in 0..width {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            // Distance outside a rounded rectangle, in pixels. Negative inside.
+            let dx = (corner - fx).max(fx - (w - corner)).max(0.0);
+            let dy = (corner - fy).max(fy - (h - corner)).max(0.0);
+            let outside = (dx * dx + dy * dy).sqrt() - corner;
+            // One pixel of feathering: enough to kill the jaggies, little enough that the edge
+            // still reads as an edge at this angular size.
+            let coverage = (1.0 - (outside + corner.min(1.5))).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
+                continue;
+            }
+
+            // Vertical gradient, lighter at the top, the way a sheet of glass catches a room.
+            let t = fy / h;
+            let body = 0.24 - 0.14 * t;
+            // A bright line just inside the top edge, and a dimmer one at the bottom.
+            let from_top = fy / h.max(1.0);
+            let lip = (1.0 - (from_top * 26.0).min(1.0)).powf(1.6) * 0.55;
+            let base = (1.0 - ((1.0 - from_top) * 34.0).min(1.0)).powf(2.0) * 0.16;
+            // Rim: brighter within a couple of pixels of the outline, all the way round.
+            let rim = (1.0 - ((-outside) / 2.5).clamp(0.0, 1.0)).powf(1.5) * 0.45;
+
+            let light = (body + lip + base + rim).clamp(0.0, 1.0);
+            let i = ((y * width + x) * 4) as usize;
+            out[i] = (light * 255.0) as u8;
+            out[i + 1] = (light * 255.0) as u8;
+            out[i + 2] = (light * 255.0) as u8;
+            out[i + 3] = ((0.30 + light * 0.72).min(1.0) * coverage * 255.0) as u8;
+        }
+    }
+    out
 }
 
 /// The left pad's cursor: a ring with a cross rather than a dot.

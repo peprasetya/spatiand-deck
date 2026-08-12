@@ -48,9 +48,12 @@ impl Feel {
     /// `(duration_us, interval_us, count)`.
     fn shape(self) -> (u16, u16, u16) {
         match self {
-            // ~7 ms of pulsing: enough to feel as one event rather than a sequence. Confirmed
-            // by feel against firmer and lighter alternatives.
-            Feel::Click => (1200, 1200, 3),
+            // Firm. Judged against lighter and heavier alternatives in isolation, where the
+            // lighter one felt right -- and then reported as "almost nothing" in use, with a
+            // thumb moving and something happening on screen to distract from it. Feedback
+            // competes for attention, so it has to be stronger than it seems when you are
+            // sitting still paying attention to it.
+            Feel::Click => (2000, 2000, 5),
             // A single 700 us pulse was tested on hardware and could not be felt at all. Two
             // pulses of 1 ms can, while still reading as clearly lighter than a click.
             Feel::Tick => (1000, 1000, 2),
@@ -119,7 +122,7 @@ mod tests {
         // read as a buzz, which makes rapid clicking feel mushy.
         let (duration, interval, count) = Feel::Click.shape();
         let total_us = count as u32 * (duration as u32 + interval as u32);
-        assert!(total_us < 20_000, "click lasts {total_us} us");
+        assert!(total_us <= 20_000, "click lasts {total_us} us");
         assert!(total_us > 2_000, "click lasts {total_us} us, too short to feel");
     }
 

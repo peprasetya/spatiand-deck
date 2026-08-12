@@ -54,8 +54,17 @@ pub const TITLE_BAR_FRACTION: f64 = 0.11;
 /// What the wearer is doing with a window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Drag {
-    /// Moving it around the sphere. The window follows the ray.
-    Move { index: usize },
+    /// Moving it around the sphere.
+    ///
+    /// The offsets are the angle between where the window was and where the ray was pointing
+    /// at the moment it was grabbed. Without them the window snaps its *centre* to the ray,
+    /// so grabbing the corner of a title bar throws the window sideways before you have moved
+    /// at all — it should hang from the point you took hold of, like anything else.
+    Move {
+        index: usize,
+        yaw_offset: f64,
+        pitch_offset: f64,
+    },
     /// Pushing it away or pulling it closer.
     Depth { index: usize, start_radius: f64, start_y: f32 },
 }
@@ -131,12 +140,22 @@ impl PointerState {
         let Some(pointer) = state.seat.get_pointer() else {
             return;
         };
+        // The second element of `focus` is the surface's ORIGIN in the same space as
+        // `event.location`, not the position within it -- smithay delivers `location - origin`
+        // to the client. Passing the surface-local position for both made every one of those
+        // subtractions zero, so every client saw the pointer pinned to its top-left corner
+        // for ever. Motion looked like it was working; nothing was ever under the cursor.
+        //
+        // Our "global" space is one surface at a time, so the origin is simply zero.
         let focus = aim.hit.and_then(|(index, hit)| {
             let window = windows.get(index)?;
-            let position = surface_position(&hit, window)?;
+            let _ = surface_position(&hit, window)?;
             let surface = state.surface_for(index)?;
-            Some((surface, position))
+            Some((surface, Point::from((0.0, 0.0))))
         });
+        let local = aim
+            .hit
+            .and_then(|(index, hit)| surface_position(&hit, windows.get(index)?));
 
         // Leaving a window has to be reported, or it keeps its hover state for ever.
         let index_now = aim.hit.map(|(i, _)| i);
@@ -144,10 +163,7 @@ impl PointerState {
             self.last_focus = index_now;
         }
 
-        let location = focus
-            .as_ref()
-            .map(|(_, p)| *p)
-            .unwrap_or_else(|| Point::from((0.0, 0.0)));
+        let location = local.unwrap_or_else(|| Point::from((0.0, 0.0)));
         pointer.motion(
             state,
             focus.map(|(s, p)| (s, p)),
@@ -279,6 +295,23 @@ mod tests {
             origin: DVec3::ZERO,
             direction: direction.normalize(),
         }
+    }
+
+    #[test]
+    fn the_pointer_location_is_not_also_the_surface_origin() {
+        // The bug this guards is subtle and total: smithay delivers `location - origin` to the
+        // client, so passing the surface-local position as both makes every delivered position
+        // (0, 0). Motion appears to work -- events flow, focus changes -- and nothing is ever
+        // under the cursor, so no button in any application can be clicked.
+        let w = window(0.0);
+        let hit = Hit {
+            distance: 2.0,
+            u: 0.5,
+            v: 0.5,
+            point: DVec3::ZERO,
+        };
+        let local = surface_position(&hit, &w).expect("middle of the content");
+        assert!(local.x > 1.0 && local.y > 1.0, "a centre hit must not be the origin: {local:?}");
     }
 
     #[test]

@@ -63,10 +63,20 @@ impl Placement {
 
     /// Orientation that makes the window face the viewer.
     ///
-    /// Yaw only: on a cylinder the window turns to face you horizontally but never tilts, so
-    /// its vertical axis stays parallel to the world's. That is what keeps text upright.
+    /// Yaw **and** pitch: a window placed high or low tips to face you, so it is square-on
+    /// wherever it sits. The first version turned only in yaw -- a cylinder rather than a
+    /// sphere -- on the theory that keeping every window's vertical axis parallel to the
+    /// world's keeps text upright. It does, and it also means a window above the horizon is
+    /// viewed at an angle and reads as a trapezoid.
+    ///
+    /// A sphere is the right shape here because tracking is 3DoF: the viewer is always at the
+    /// centre and never moves, so "facing the viewer" is unambiguous. That stops being true
+    /// the moment a window can be pinned to something in the room, which is a different
+    /// feature and a different placement rule.
     pub fn orientation(&self) -> DQuat {
-        DQuat::from_axis_angle(DVec3::Z, self.yaw)
+        // Yaw about up, then pitch about the rotated left axis, so the window's own up stays
+        // as close to world-up as facing the viewer allows.
+        DQuat::from_axis_angle(DVec3::Z, self.yaw) * DQuat::from_axis_angle(DVec3::Y, -self.pitch)
     }
 }
 
@@ -243,19 +253,30 @@ mod tests {
     }
 
     #[test]
-    fn windows_face_the_viewer_without_tilting() {
-        // The cylinder property: whatever the placement, the window's up vector must stay
-        // world-up, or text leans over.
+    fn a_window_above_the_horizon_tips_to_face_you() {
+        // The sphere property. A window placed high must present its face, not its edge --
+        // otherwise it reads as a trapezoid and text along its top runs away from you.
         let p = Placement {
-            yaw: 1.0,
             pitch: 0.5,
             ..Default::default()
         };
-        let up = p.orientation() * DVec3::Z;
+        let normal = p.orientation() * DVec3::X;
+        let towards = p.position().normalize();
         assert!(
-            (up - DVec3::Z).length() < 1e-9,
-            "window up should stay vertical, got {up:?}"
+            normal.dot(towards) > 0.999,
+            "normal {normal:?} should point along {towards:?}"
         );
+    }
+
+    #[test]
+    fn a_window_on_the_horizon_keeps_its_up_vector_vertical() {
+        // Tipping is only for windows off the horizon; one straight ahead must not roll.
+        let p = Placement {
+            yaw: 1.0,
+            ..Default::default()
+        };
+        let up = p.orientation() * DVec3::Z;
+        assert!((up - DVec3::Z).length() < 1e-9, "got {up:?}");
     }
 
     #[test]

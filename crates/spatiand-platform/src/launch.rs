@@ -56,6 +56,48 @@ pub fn split_command(exec: &str) -> Vec<String> {
     parts
 }
 
+/// Programs that default to X11 and need telling otherwise.
+///
+/// Chromium and everything built on it — Chrome, Edge, Brave, Vivaldi, Opera, and every
+/// Electron application — pick X11 unless `--ozone-platform=wayland` says otherwise. With
+/// `DISPLAY` removed, as it is here, that means they try to reach an X server that is not
+/// running and exit immediately. From the launcher it looks exactly like the icon doing
+/// nothing, which is the least debuggable failure available.
+const OZONE_FAMILY: &[&str] = &[
+    "chrome", "chromium", "brave", "vivaldi", "opera", "msedge", "electron", "code", "slack",
+    "discord", "spotify", "signal",
+];
+
+/// Extra arguments a program needs to run under Wayland.
+///
+/// Returned rather than applied so it can be tested without launching anything.
+pub fn wayland_arguments(program: &str, existing: &[String]) -> Vec<String> {
+    // The whole command line, not just the program. Flatpak apps are launched as
+    // `/usr/bin/flatpak run … com.google.Chrome`, so the program name says "flatpak" and the
+    // only place the browser is mentioned is in the arguments. Checking the program alone
+    // meant every Flatpak-packaged browser -- which on this machine is all of them -- silently
+    // missed the flag it needs.
+    let haystack = std::iter::once(program.to_string())
+        .chain(existing.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    if !OZONE_FAMILY.iter().any(|f| haystack.contains(f)) {
+        return Vec::new();
+    }
+    // Never argue with a desktop file that already made a choice: some ship
+    // `--ozone-platform-hint=auto`, and adding a second, contradictory flag is worse than
+    // adding none.
+    if existing.iter().any(|a| a.contains("ozone-platform")) {
+        return Vec::new();
+    }
+    vec![
+        "--ozone-platform=wayland".to_string(),
+        // Older builds need the feature switched on as well as selected.
+        "--enable-features=UseOzonePlatform,WaylandWindowDecorations".to_string(),
+    ]
+}
+
 /// Launch an application into the spatial session.
 ///
 /// `wayland_display` is the socket name Spatiand is listening on; it is set in the child's
@@ -65,9 +107,11 @@ pub fn launch(exec: &str, wayland_display: &str) -> Result<u32, String> {
     let (program, args) = parts
         .split_first()
         .ok_or_else(|| format!("empty command: {exec:?}"))?;
+    let mut args = args.to_vec();
+    args.extend(wayland_arguments(program, &args));
 
     let child = Command::new(program)
-        .args(args)
+        .args(&args)
         .env("WAYLAND_DISPLAY", wayland_display)
         // Some toolkits prefer X11 when DISPLAY is set, and would then try to reach an X
         // server that is not running. Removing it makes the Wayland path the only option.
@@ -136,6 +180,54 @@ mod tests {
         assert!(split_command("").is_empty());
         assert!(split_command("   ").is_empty());
         assert!(launch("", "wayland-1").is_err());
+    }
+
+    #[test]
+    fn chromium_family_programs_are_told_to_use_wayland() {
+        // Without this they try X11, find no server because DISPLAY is removed, and exit --
+        // which from the launcher is indistinguishable from the icon doing nothing.
+        for program in [
+            "/usr/bin/google-chrome-stable",
+            "/opt/brave/brave",
+            "chromium",
+            "/usr/share/code/code",
+        ] {
+            let extra = wayland_arguments(program, &[]);
+            assert!(
+                extra.iter().any(|a| a == "--ozone-platform=wayland"),
+                "{program} was not given the wayland flag"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flatpak_packaged_browser_is_recognised_from_its_app_id() {
+        // The program is /usr/bin/flatpak; the only mention of Chrome is an argument.
+        let args: Vec<String> = "run --branch=stable --command=/app/bin/chrome com.google.Chrome"
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        let extra = wayland_arguments("/usr/bin/flatpak", &args);
+        assert!(extra.iter().any(|a| a == "--ozone-platform=wayland"), "got {extra:?}");
+    }
+
+    #[test]
+    fn ordinary_programs_are_left_alone() {
+        // A flag Chromium understands is a fatal unknown-argument error to most other things.
+        for program in ["/usr/bin/kate", "dolphin", "/usr/bin/firefox"] {
+            assert!(wayland_arguments(program, &[]).is_empty(), "{program} was modified");
+        }
+        // And a Flatpak of something that is not Chromium-based must stay untouched too.
+        let args = vec!["run".to_string(), "org.videolan.VLC".to_string()];
+        assert!(wayland_arguments("/usr/bin/flatpak", &args).is_empty());
+    }
+
+    #[test]
+    fn a_desktop_file_that_already_chose_is_not_overridden() {
+        // Some ship --ozone-platform-hint=auto. Adding a second, contradictory flag is worse
+        // than adding none.
+        let existing = vec!["--ozone-platform-hint=auto".to_string()];
+        assert!(wayland_arguments("google-chrome", &existing).is_empty());
     }
 
     #[test]
