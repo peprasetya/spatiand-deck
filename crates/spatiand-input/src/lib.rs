@@ -1,17 +1,32 @@
-//! Physical input.
-//!
-//! Only what the shell needs today: knowing that *a* button was pressed. The full router —
-//! touchpads as a 3D pointer, gestures, a synthesized gamepad for games — comes later, and
-//! this is deliberately shaped so it can grow into that rather than being thrown away.
+//! Physical input for the spatial shell.
 //!
 //! Reading raw hidraw rather than evdev is not a preference. The kernel's `hid-steam` driver
-//! disables the touchpads' pointer input and exposes neither absolute pad coordinates,
-//! pad pressure, nor the gyro — all three of which a 3D pointer needs. The vendor reports
-//! carry everything. See `docs/steam-deck-controller.md`.
+//! disables the touchpads' pointer input and exposes neither absolute pad coordinates, pad
+//! pressure, nor the gyro — all three of which a 3D pointer needs. The vendor reports carry
+//! everything. See `docs/steam-deck-controller.md`.
+//!
+//! The crate is layered so that almost none of it needs hardware to test:
+//!
+//! * [`layout`] — which bit is which, as data.
+//! * [`report`] — bytes to [`ControllerState`], a pure function.
+//! * [`gesture`] — two-thumb pan and scale, a pure state machine.
+//! * [`takeover`] — the feature reports that claim the device. The only part that must talk
+//!   to a real controller.
+//!
+//! [`DeckController`] is the thin layer that joins them to a file descriptor.
 
 use std::time::Duration;
 
 use spatiand_hmd::hid::{self, HidDevice};
+
+pub mod gesture;
+pub mod layout;
+pub mod report;
+pub mod takeover;
+
+pub use gesture::{GestureDelta, TwoPadGesture};
+pub use layout::{Confidence, Control};
+pub use report::{Buttons, ControllerState, Pad};
 
 /// Valve's vendor/product for the Deck's built-in controls.
 const VALVE_VID: u16 = 0x28DE;
@@ -20,20 +35,21 @@ const DECK_PID: u16 = 0x1205;
 /// is not stable across boots or across which USB devices enumerate first.
 const VENDOR_INTERFACE: u8 = 2;
 
-/// Header of a Deck input report: version `0x0001`, type `0x09`, length `0x40`.
-const REPORT_HEADER: [u8; 4] = [0x01, 0x00, 0x09, 0x40];
-/// Buttons occupy a bitfield here. Which bit is which is still unverified, so nothing below
-/// depends on the mapping — only on "any of them is set".
-const BUTTON_OFFSET: usize = 8;
-const BUTTON_BYTES: usize = 8;
+/// Reports arrive at ~250 Hz. A slow frame leaves a backlog, and an unbounded drain would let
+/// that backlog stall the render loop, so each poll takes at most this many.
+const MAX_REPORTS_PER_POLL: usize = 64;
 
 /// The Deck's own controls.
 pub struct DeckController {
     device: HidDevice,
-    buf: [u8; 64],
-    /// Buttons held as of the last report, so a press is an edge rather than a level. Without
-    /// this, holding a button reads as thousands of presses at 250 Hz.
-    held: bool,
+    buf: [u8; report::REPORT_LEN],
+    state: ControllerState,
+    /// Button field as of the last report *seen*, not the last frame. Edges are computed
+    /// against this incrementally so that a button pressed and released inside a single
+    /// polling batch is still reported — at 250 Hz a firm tap easily fits in one frame.
+    last_buttons: Buttons,
+    pressed_this_frame: Vec<Control>,
+    warned_about_steam: bool,
 }
 
 impl DeckController {
@@ -43,48 +59,53 @@ impl DeckController {
     /// session, so outside one this needs the udev rule from `tools/install-udev-rules.sh`.
     pub fn open() -> Option<Self> {
         let node = hid::find(VALVE_VID, DECK_PID, VENDOR_INTERFACE)?;
-        match HidDevice::open(&node) {
-            Ok(device) => {
-                log::info!("controller: {}", node.path.display());
-                Some(Self {
-                    device,
-                    buf: [0u8; 64],
-                    held: false,
-                })
-            }
+        let device = match HidDevice::open(&node) {
+            Ok(d) => d,
             Err(e) => {
                 log::warn!(
                     "found the controller at {} but could not open it: {e}",
                     node.path.display()
                 );
                 log::warn!("  if this is permissions, run: sudo tools/install-udev-rules.sh");
-                None
+                return None;
             }
+        };
+        log::info!("controller: {}", node.path.display());
+
+        // Claim it before reading. Left alone the pads emulate a mouse and report nothing
+        // absolute, so the pointer would have no input and the cause would not be obvious.
+        if let Err(e) = takeover::take(&device) {
+            log::warn!("could not reconfigure the controller ({e}); pads may be unusable");
         }
+
+        Some(Self {
+            device,
+            buf: [0u8; report::REPORT_LEN],
+            state: ControllerState::default(),
+            last_buttons: Buttons::default(),
+            pressed_this_frame: Vec::new(),
+            warned_about_steam: false,
+        })
     }
 
-    /// Drain pending reports and return true if a button went from released to pressed.
-    ///
-    /// Reports arrive at ~250 Hz, so this must be drained every frame or it backs up.
-    pub fn poll_button_press(&mut self) -> bool {
-        let mut pressed = false;
-        // Bounded rather than "until empty": at 250 Hz a slow frame leaves a backlog, and an
-        // unbounded drain would let it stall the render loop.
-        for _ in 0..64 {
+    /// Drain pending reports into the current state. Call once per frame.
+    pub fn poll(&mut self) {
+        self.pressed_this_frame.clear();
+        for _ in 0..MAX_REPORTS_PER_POLL {
             match self.device.read_report(&mut self.buf, Duration::ZERO) {
-                Ok(Some(n)) if n >= BUTTON_OFFSET + BUTTON_BYTES => {
-                    if self.buf[..4] != REPORT_HEADER {
+                Ok(Some(n)) => {
+                    let Some(state) = ControllerState::parse(&self.buf[..n]) else {
+                        // Not an input report — a reply to one of our feature writes, most
+                        // likely. Decoding it as input would produce a burst of phantom
+                        // presses at exactly the moment the shell starts.
                         continue;
+                    };
+                    for control in state.buttons.pressed_since(self.last_buttons) {
+                        self.pressed_this_frame.push(control);
                     }
-                    let any = self.buf[BUTTON_OFFSET..BUTTON_OFFSET + BUTTON_BYTES]
-                        .iter()
-                        .any(|&b| b != 0);
-                    if any && !self.held {
-                        pressed = true;
-                    }
-                    self.held = any;
+                    self.last_buttons = state.buttons;
+                    self.state = state;
                 }
-                Ok(Some(_)) => continue,
                 Ok(None) => break,
                 Err(e) => {
                     log::debug!("controller read failed: {e}");
@@ -92,7 +113,45 @@ impl DeckController {
                 }
             }
         }
-        pressed
+
+        if self.state.looks_silenced() && !self.warned_about_steam {
+            self.warned_about_steam = true;
+            log::warn!("the controller is reporting all-zero input with a live sequence counter");
+            log::warn!("  Steam is probably still running and holding the device; stop it");
+        }
+    }
+
+    /// Everything the controller currently reads.
+    pub fn state(&self) -> &ControllerState {
+        &self.state
+    }
+
+    /// Controls that went down since the last [`DeckController::poll`].
+    pub fn pressed(&self) -> &[Control] {
+        &self.pressed_this_frame
+    }
+
+    pub fn just_pressed(&self, control: Control) -> bool {
+        self.pressed_this_frame.contains(&control)
+    }
+
+    /// Did *any* button go down this frame?
+    ///
+    /// Used by the waiting screen, where offering one specific button would be worse than
+    /// offering all of them.
+    pub fn any_pressed(&self) -> bool {
+        !self.pressed_this_frame.is_empty()
+    }
+}
+
+impl Drop for DeckController {
+    /// Hand the controller back.
+    ///
+    /// These settings outlive the process. Leaving the pads in absolute mode means the
+    /// desktop's mouse stops working after Spatiand exits, which presents as Spatiand having
+    /// broken the machine rather than as a missing teardown.
+    fn drop(&mut self) {
+        takeover::release(&self.device);
     }
 }
 
@@ -101,15 +160,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_matches_the_captured_report() {
-        // Observed on hardware: 64-byte reports at 250 Hz beginning 01 00 09 40.
-        assert_eq!(REPORT_HEADER, [0x01, 0x00, 0x09, 0x40]);
+    fn the_vendor_interface_is_the_one_the_docs_name() {
+        // Interface 2 is the vendor one; 0 and 1 are the emulated keyboard and mouse, which
+        // carry none of the fields a 3D pointer needs.
+        assert_eq!(VENDOR_INTERFACE, 2);
     }
 
     #[test]
-    fn button_window_stays_inside_the_report() {
-        // const_assert in spirit: the window must fit, and a future edit widening it should
-        // fail here rather than silently reading past the report.
-        const _: () = assert!(BUTTON_OFFSET + BUTTON_BYTES <= 64);
+    fn the_poll_bound_covers_a_full_frame_at_report_rate() {
+        // 250 Hz into a 72 Hz render loop is ~3.5 reports a frame; the bound has to leave
+        // enough headroom that a slow frame catches up rather than falling permanently behind.
+        assert!(MAX_REPORTS_PER_POLL >= 250 / 72 * 4);
     }
 }

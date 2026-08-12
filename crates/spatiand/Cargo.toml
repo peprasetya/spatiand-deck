@@ -10,11 +10,17 @@ spatiand-hmd = { path = "../spatiand-hmd" }
 spatiand-track = { path = "../spatiand-track" }
 spatiand-render = { path = "../spatiand-render" }
 spatiand-input = { path = "../spatiand-input" }
+spatiand-shell = { path = "../spatiand-shell" }
+spatiand-platform = { path = "../spatiand-platform" }
 
 glam.workspace = true
 log.workspace = true
 env_logger.workspace = true
 thiserror.workspace = true
+
+# Only the two codecs panoramas and app icons actually come in. The default feature set drags
+# in a dozen more decoders that would never be reached and are not free to build on the Deck.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 [dependencies.smithay]
 version = "0.7"

@@ -84,12 +84,16 @@ impl TextRenderer {
             used_width = used_width.max(run.line_w);
             lines += 1;
         }
-        let width = (used_width.ceil() as u32).clamp(1, max_width);
+        // Draw at full width, then crop to the ink.
+        //
+        // Cropping to a *measured* width and shifting by half the slack is almost right and
+        // visibly wrong: `line_w` excludes side bearings, so the shift is a pixel or two
+        // short and every line drifts the same way. Finding the actual painted extent
+        // afterwards is exact, and costs one pass over an image we have already built.
+        let width = max_width;
         let height = ((lines.max(1) as f32) * metrics.line_height).ceil() as u32;
-        // Centring lays every line out around max_width/2, so cropping to the widest line
-        // means shifting left by half the slack. Without this the image is the right size
-        // but its contents sit off to one side.
-        let x_offset = ((max_width as f32 - width as f32) / 2.0).round() as i32;
+        let _ = used_width;
+        let x_offset = 0i32;
 
         let mut rgba = vec![0u8; (width * height * 4) as usize];
         let text_color = cosmic_text::Color::rgba(color[0], color[1], color[2], color[3]);
@@ -129,10 +133,39 @@ impl TextRenderer {
             },
         );
 
+        // Crop to the painted area.
+        let mut min_x = width;
+        let mut max_x = 0u32;
+        for y in 0..height {
+            for x in 0..width {
+                if rgba[((y * width + x) * 4 + 3) as usize] > 8 {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                }
+            }
+        }
+        if min_x > max_x {
+            // Nothing was drawn - an empty string, or glyphs the font could not supply.
+            // Return a valid 1x1 rather than a zero-sized texture, which GL rejects.
+            return TextImage {
+                width: 1,
+                height: 1,
+                rgba: vec![0; 4],
+            };
+        }
+        let cropped_w = max_x - min_x + 1;
+        let mut out = vec![0u8; (cropped_w * height * 4) as usize];
+        for y in 0..height {
+            let src = ((y * width + min_x) * 4) as usize;
+            let dst = (y * cropped_w * 4) as usize;
+            out[dst..dst + (cropped_w * 4) as usize]
+                .copy_from_slice(&rgba[src..src + (cropped_w * 4) as usize]);
+        }
+
         TextImage {
-            width,
+            width: cropped_w,
             height,
-            rgba,
+            rgba: out,
         }
     }
 }

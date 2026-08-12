@@ -17,7 +17,10 @@ use smithay::reexports::wayland_server::{Display, DisplayHandle};
 mod backend_drm;
 mod backend_winit;
 mod calib;
+mod environment;
 mod gl;
+mod input_map;
+mod scene;
 mod state;
 mod window;
 

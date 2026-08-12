@@ -46,11 +46,16 @@ use smithay::reexports::wayland_server::Display;
 use smithay::utils::{DeviceFd, Transform};
 
 use spatiand_hmd::{DisplayMode, HmdEvent};
+use spatiand_render::ray::{ray_from_pad, PointerConfig};
 use spatiand_render::{EyeSide, StereoConfig, TextRenderer};
+use spatiand_shell::{HudAction, Mode, Shell, ShellEvent};
 use spatiand_track::{AxisMap, HeadTracker, TrackerConfig};
 
 use crate::calib::Calibration;
-use crate::gl::{upload_rgba, QuadPipeline};
+use crate::environment::Environments;
+use crate::gl::upload_rgba;
+use crate::input_map::intent_for;
+use crate::scene::Scene;
 use crate::{Runtime, Spatiand};
 
 const PANEL_DISTANCE: f32 = 1.4;
@@ -119,7 +124,6 @@ pub fn run(
     if test_pattern {
         log::info!("SPATIAND_TEST_PATTERN set: drawing flat colour per eye, nothing else");
     }
-    let pipeline = QuadPipeline::new(&mut renderer)?;
     let mut text = TextRenderer::new();
     let mut panel: Option<(u32, f32)> = None;
     let mut last_prompt = String::new();
@@ -133,6 +137,31 @@ pub fn run(
     if controller.is_none() {
         log::warn!("no controller; the return-to-desktop button will not work");
     }
+    let mut gesture = spatiand_input::TwoPadGesture::new();
+    let pointer_config = PointerConfig::default();
+
+    // The shell — what is on screen and what a button means. Deliberately built once, outside
+    // the output loop: unplugging the glasses must not close your launcher.
+    let apps: Vec<spatiand_shell::AppEntry> = spatiand_platform::scan()
+        .into_iter()
+        .map(|e| spatiand_shell::AppEntry {
+            name: e.name,
+            exec: e.exec,
+            icon: e.icon,
+        })
+        .collect();
+    log::info!("launcher: {} application(s)", apps.len());
+    let has_kde = std::path::Path::new("/usr/bin/kcmshell6").exists()
+        || std::path::Path::new("/usr/bin/systemsettings").exists();
+    let mut shell = Shell::new(apps, has_kde);
+    let mut environments = Environments::discover();
+    let mut sky_image = environments.current();
+    let mut sky_dirty = false;
+    // Whether to ask the glasses for side-by-side at all. Toggled from the HUD; consulted by
+    // the negotiation below, which is why it lives outside the rebuild loop.
+    let mut want_stereo = true;
+    // Owns the three pipelines and every texture that outlives one frame.
+    let mut scene = Scene::new(&mut renderer, &sky_image)?;
     let stored = spatiand_track::config::load_axes();
     let mut calibration = if stored.is_none() && spatiand_hmd::is_present() {
         log::info!("no stored axis calibration — starting the in-world flow");
@@ -318,7 +347,7 @@ pub fn run(
         let mut w = w;
         let mut h = h;
         let mut on_glasses = false;
-        if !internal {
+        if !internal && want_stereo {
             if let Some(x) = hmd.as_mut() {
                 // Force a real transition: mono first, then stereo.
                 //
@@ -362,6 +391,16 @@ pub fn run(
                     log::warn!("the glasses never advertised a double-width mode; staying mono");
                 }
             }
+        } else if !internal && !want_stereo {
+            // Stereo turned off from the HUD. The glasses have to be told: left in
+            // side-by-side they go on splitting a signal we are no longer rendering that way,
+            // and each eye gets half a squashed desktop.
+            if let Some(x) = hmd.as_mut() {
+                match x.set_display_mode(DisplayMode::Mono) {
+                    Ok(m) => log::info!("headset display mode -> {m:?}"),
+                    Err(e) => log::warn!("could not return the glasses to mono ({e})"),
+                }
+            }
         }
         log::info!("presenting at {w}x{h}, stereo: {on_glasses}");
 
@@ -388,8 +427,8 @@ pub fn run(
         // therefore land on framebuffer 0, which in a DRM/GBM context has no surface behind it,
         // and every call fails with GL_INVALID_FRAMEBUFFER_OPERATION while the screen stays
         // black. Attaching our own FBO to the same texture is the fix.
-        let scene: GlesTexture = renderer.create_buffer(Fourcc::Abgr8888, (w as i32, h as i32).into())?;
-        let scene_fbo = renderer.with_context(|gl| unsafe {
+        let frame_target: GlesTexture = renderer.create_buffer(Fourcc::Abgr8888, (w as i32, h as i32).into())?;
+        let target_fbo = renderer.with_context(|gl| unsafe {
             let mut fbo = 0;
             gl.GenFramebuffers(1, &mut fbo);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
@@ -397,18 +436,18 @@ pub fn run(
                 ffi::FRAMEBUFFER,
                 ffi::COLOR_ATTACHMENT0,
                 ffi::TEXTURE_2D,
-                scene.tex_id(),
+                frame_target.tex_id(),
                 0,
             );
             let status = gl.CheckFramebufferStatus(ffi::FRAMEBUFFER);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
             (fbo, status)
         })?;
-        if scene_fbo.1 != ffi::FRAMEBUFFER_COMPLETE {
-            return Err(format!("scene framebuffer incomplete: {:#x}", scene_fbo.1).into());
+        if target_fbo.1 != ffi::FRAMEBUFFER_COMPLETE {
+            return Err(format!("scene framebuffer incomplete: {:#x}", target_fbo.1).into());
         }
-        let scene_fbo = scene_fbo.0;
-        log::info!("scene framebuffer {scene_fbo} ready at {w}x{h}");
+        let target_fbo = target_fbo.0;
+        log::info!("scene framebuffer {target_fbo} ready at {w}x{h}");
 
         log::info!(
             "running; clients can connect with WAYLAND_DISPLAY={}",
@@ -428,20 +467,114 @@ pub fn run(
         let mut last_presence_check = std::time::Instant::now();
 
         while runtime.state.running {
-            // Any button returns to the desktop.
+            // --- input ---
             //
-            // Deliberately "any" rather than a specific one: the button bitfield layout is
-            // still unverified (docs/steam-deck-controller.md), and claiming a particular
-            // button works when the mapping is a guess would be worse than offering all of
-            // them. Only shown while waiting, so there is nothing to collide with.
-            if hmd.is_none() {
-                if let Some(c) = controller.as_mut() {
-                    if c.poll_button_press() {
+            // Polled once a frame and read from a snapshot, so the menus, the pointer and the
+            // two-thumb gesture all see the same instant. Reading the device separately for
+            // each would let them disagree about whether a thumb is down.
+            let mut shell_events: Vec<ShellEvent> = Vec::new();
+            let mut pointer: Option<(f32, f32, bool)> = None;
+            let mut leaving = false;
+            let mut rebuild = false;
+            if let Some(c) = controller.as_mut() {
+                c.poll();
+                if hmd.is_none() {
+                    // Any button returns to the desktop. Deliberately "any": the waiting
+                    // screen has nothing to collide with, and there is no headset on to read
+                    // a more specific instruction from.
+                    if c.any_pressed() {
                         log::info!("button pressed while waiting — returning to the desktop");
-                        runtime.state.running = false;
-                        break;
+                        leaving = true;
+                    }
+                } else {
+                    for control in c.pressed() {
+                        if let Some(intent) = intent_for(*control) {
+                            if let Some(event) = shell.handle(intent) {
+                                shell_events.push(event);
+                            }
+                        }
+                    }
+                    let input = *c.state();
+                    // Two thumbs down is a window gesture and takes the pads away from the
+                    // pointer. Running both at once sends the laser racing across the world
+                    // while you are resizing something.
+                    let two_handed = gesture.update(&input.left_pad, &input.right_pad);
+                    if two_handed.is_none() && !shell.menu_is_open() && input.right_pad.touched {
+                        pointer = Some((
+                            input.right_pad.x,
+                            input.right_pad.y,
+                            input.right_pad.clicked,
+                        ));
                     }
                 }
+            }
+
+            for event in shell_events {
+                match event {
+                    ShellEvent::ModeChanged(mode) => {
+                        if mode == Mode::World {
+                            scene.forget_anchor();
+                        } else {
+                            // Pin the menu to where the wearer is facing as it opens.
+                            let yaw = tracker.euler_degrees().yaw.to_radians() as f32;
+                            scene.anchor_menu(mode, yaw);
+                        }
+                    }
+                    ShellEvent::Launch(app) => {
+                        if let Err(e) =
+                            spatiand_platform::launch(&app.exec, &runtime.state.socket_name)
+                        {
+                            log::warn!("could not launch {}: {e}", app.name);
+                        }
+                    }
+                    ShellEvent::Hud(action) => match action {
+                        HudAction::Recentre => {
+                            tracker.recenter();
+                            log::info!("recentred");
+                        }
+                        HudAction::Calibrate => {
+                            log::info!("restarting axis calibration from the HUD");
+                            calibration = Some(Calibration::new());
+                        }
+                        HudAction::NextEnvironment => {
+                            environments.advance();
+                            sky_image = environments.current();
+                            sky_dirty = true;
+                        }
+                        HudAction::ToggleStereo => {
+                            // Handled by rebuilding the output rather than switching in
+                            // place: the mode change swaps the glasses' EDID, so the
+                            // connector, the surface and the swapchain all have to follow.
+                            want_stereo = !want_stereo;
+                            log::info!("stereo -> {want_stereo}; rebuilding the output");
+                            rebuild = true;
+                        }
+                        HudAction::ReturnToDesktop => leaving = true,
+                        HudAction::OpenSystemSettings(module) => {
+                            let command = format!("kcmshell6 {module}");
+                            if let Err(e) =
+                                spatiand_platform::launch(&command, &runtime.state.socket_name)
+                            {
+                                log::warn!("could not open {module}: {e}");
+                            }
+                        }
+                        HudAction::Dismiss => {}
+                    },
+                }
+            }
+            if rebuild {
+                // Leave the frame loop so the output is built again from scratch. Breaking
+                // out of the `for` above would only have ended the event loop, and the
+                // presence check cannot notice this because the glasses have not moved.
+                break;
+            }
+            if leaving {
+                // Exiting is not enough. SDDM restarts whatever the default session is, and
+                // getting here means that is Spatiand - so quitting just relaunches us, which
+                // looks like the button doing nothing. Hand the default back to Plasma first.
+                return_to_desktop();
+                runtime.state.running = false;
+                break;
             }
 
             // Poll for the glasses appearing or disappearing.
@@ -518,13 +651,16 @@ pub fn run(
                     let p = c.prompt();
                     format!("{}\n\n{}\n\n{}", p.heading, p.body, p.status)
                 }
+                // A menu owns the view while it is open; the status readout would sit on top
+                // of it saying nothing anyone needs at that moment.
+                None if shell.menu_is_open() => String::new(),
                 None => {
                     if status_text.is_empty()
                         || last_status_update.elapsed() >= Duration::from_millis(250)
                     {
                         let e = tracker.euler_degrees();
                         status_text = format!(
-                            "Spatiand\n\nyaw {:.0}   pitch {:.0}   roll {:.0}\n\n{} window(s)",
+                            "Spatiand\n\nyaw {:.0}   pitch {:.0}   roll {:.0}\n\n{} window(s)\n\nSTEAM settings    ... apps",
                             e.yaw,
                             e.pitch,
                             e.roll,
@@ -535,10 +671,18 @@ pub fn run(
                     status_text.clone()
                 }
             };
+            let waiting = hmd.is_none();
 
-            if prompt_text != last_prompt {
+            let ppd = TextRenderer::px_per_degree(stereo.per_eye.0, stereo.h_fov_deg);
+            if prompt_text.is_empty() {
+                // Not the same as "unchanged": the panel has to actually go away when a menu
+                // opens, or the status text hangs in front of it.
+                if let Some((id, _)) = panel.take() {
+                    renderer.with_context(|gl| unsafe { gl.DeleteTextures(1, &id) })?;
+                }
+                last_prompt.clear();
+            } else if prompt_text != last_prompt {
                 last_prompt = prompt_text.clone();
-                let ppd = TextRenderer::px_per_degree(stereo.per_eye.0, stereo.h_fov_deg);
                 let image = text.render(
                     &prompt_text,
                     ppd * 1.6,
@@ -565,11 +709,34 @@ pub fn run(
                 })?);
             }
 
+            if sky_dirty {
+                sky_dirty = false;
+                let image = &sky_image;
+                renderer.with_context(|gl| unsafe { scene.set_sky(gl, image) })?;
+                log::info!("environment now {}", environments.describe());
+            }
+            scene.sync_apps(&mut renderer, &mut text, &shell, ppd)?;
+            scene.sync_menu(
+                &mut renderer,
+                &mut text,
+                &menu_text(&shell),
+                ppd,
+                stereo.per_eye.0.saturating_sub(160).max(64),
+            )?;
+
+            // Where the pointer is aiming. Built from the head pose latched this frame, so it
+            // tracks with the world rather than lagging a frame behind it.
+            let pointer_ray = pointer.map(|(px, py, _clicked)| {
+                ray_from_pad(px, py, orientation, DVec3::ZERO, &pointer_config)
+            });
+
             // --- draw the scene into the offscreen texture ---
             {
                 let snapshot = panel;
+                let scene = &scene;
+                let shell = &shell;
                 renderer.with_context(|gl| unsafe {
-                    gl.BindFramebuffer(ffi::FRAMEBUFFER, scene_fbo);
+                    gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
                     gl.Disable(ffi::SCISSOR_TEST);
                     gl.ClearColor(0.02, 0.02, 0.05, 1.0);
                     gl.Viewport(0, 0, w as i32, h as i32);
@@ -597,10 +764,6 @@ pub fn run(
                         return;
                     }
 
-                    let Some((tex, aspect)) = snapshot else {
-                        gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
-                        return;
-                    };
                     let views: &[(EyeSide, i32, i32)] = if on_glasses {
                         &[
                             (EyeSide::Left, 0, w as i32 / 2),
@@ -609,25 +772,54 @@ pub fn run(
                     } else {
                         &[(EyeSide::Left, 0, w as i32)]
                     };
+                    // Flip vertically when drawing into the offscreen texture.
+                    //
+                    // GL renders with the origin at the BOTTOM-left, so rendering into a
+                    // texture stores the image with row 0 holding its bottom. The compositor
+                    // then samples that texture with row 0 as the top, and everything comes
+                    // out mirrored top-to-bottom. It does not read as a clean 180 degree
+                    // rotation - glyphs are individually flipped while the line order
+                    // reverses - which is why it is harder to read than upside-down text.
+                    //
+                    // Folded into the eye's projection rather than applied per draw call, so
+                    // that everything downstream - the skybox's inverse view-projection
+                    // included - stays consistent with it automatically.
+                    //
+                    // Only the offscreen path needs this. The nested winit backend draws
+                    // straight into a GL surface that is presented with GL's own convention,
+                    // so no correction applies there.
+                    let flip_y = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
+
                     for (side, x, vw) in views {
                         gl.Viewport(*x, 0, *vw, h as i32);
-                        let eye = spatiand_render::eye_for(*side, orientation, DVec3::ZERO, &stereo);
-                        let model = head_locked_panel(orientation, aspect, portrait);
-                        // Flip vertically when drawing into the offscreen texture.
-                        //
-                        // GL renders with the origin at the BOTTOM-left, so rendering into a
-                        // texture stores the image with row 0 holding its bottom. The compositor
-                        // then samples that texture with row 0 as the top, and everything comes
-                        // out mirrored top-to-bottom. It does not read as a clean 180 degree
-                        // rotation - glyphs are individually flipped while the line order
-                        // reverses - which is why it is harder to read than upside-down text.
-                        //
-                        // Only the offscreen path needs this. The nested winit backend draws
-                        // straight into a GL surface that is presented with GL's own convention,
-                        // so no correction applies there.
-                        let flip_y = Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0));
-                        let mvp = flip_y * eye.projection * eye.view * model;
-                        pipeline.draw(gl, tex, &mvp, [1.0, 1.0, 1.0, 1.0], (0.0, 1.0));
+                        let mut eye =
+                            spatiand_render::eye_for(*side, orientation, DVec3::ZERO, &stereo);
+                        eye.projection = flip_y * eye.projection;
+
+                        // Behind everything, and only once there is a world to be behind: the
+                        // waiting screen is not a place, so it keeps its plain dark backdrop.
+                        if !waiting {
+                            scene.draw_sky(gl, &eye);
+                        }
+                        scene.draw_menu(gl, &eye, &shell);
+                        if let Some(ray) = pointer_ray {
+                            scene.draw_pointer(gl, &eye, &ray, None);
+                        }
+
+                        // The head-locked panel: the waiting prompt, the calibration flow, or
+                        // the status readout. Drawn last so it is never behind the world.
+                        if let Some((tex, aspect)) = snapshot {
+                            let (pw, ph) =
+                                fit_panel(aspect, stereo.h_fov_deg, stereo.v_fov_deg(), portrait);
+                            let model = head_locked_panel_sized(orientation, pw, ph, portrait);
+                            scene.quads().draw(
+                                gl,
+                                tex,
+                                &(eye.view_projection() * model),
+                                [1.0, 1.0, 1.0, 1.0],
+                                (0.0, 1.0),
+                            );
+                        }
                     }
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
                 })?;
@@ -655,7 +847,7 @@ pub fn run(
                 Id::new(),
                 renderer.context_id(),
                 (0.0, 0.0),
-                scene.clone(),
+                frame_target.clone(),
                 1,
                 Transform::Normal,
                 Some(1.0),
@@ -807,15 +999,86 @@ fn first_free_crtc(drm: &DrmDevice, connector: &connector::Info) -> Option<crtc:
         .find_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()).first().copied())
 }
 
+/// The text of whichever menu is open, or empty in the world.
+///
+/// The HUD is rendered as one text panel rather than as a row of separate textures. At the
+/// resolution one eye actually resolves, a settings list *is* text — giving each row its own
+/// quad would buy nothing and cost a dozen uploads every time the cursor moved.
+fn menu_text(shell: &Shell) -> String {
+    match shell.mode() {
+        Mode::World => String::new(),
+        Mode::Hud => {
+            let hud = shell.hud();
+            let mut out = String::from("Settings\n\n");
+            for (i, item) in hud.items().iter().enumerate() {
+                // A leading marker rather than a highlight rectangle: one texture, and it
+                // survives being read at an angle far better than a background tint.
+                out.push_str(if i == hud.cursor() { "\u{25b8} " } else { "   " });
+                out.push_str(item.label);
+                out.push('\n');
+            }
+            out.push_str(&format!("\n{}\n\nA select    B back", hud.focused().detail));
+            out
+        }
+        Mode::Launcher if shell.launcher().is_empty() => {
+            "No applications\n\nNothing was found in the\nsystem's application folders.\n\nB back".into()
+        }
+        Mode::Launcher => String::new(),
+    }
+}
+
+/// Point SDDM back at the desktop session, so exiting actually leaves spatial mode.
+///
+/// steamosctl owns the autologin drop-in; writing that file directly does not work, because
+/// SteamOS regenerates it and ignores hand edits.
+fn return_to_desktop() {
+    for args in [
+        ["set-default-desktop-session", "plasma.desktop"],
+        ["switch-to-desktop-mode", "plasma.desktop"],
+    ] {
+        match std::process::Command::new("steamosctl").args(args).status() {
+            Ok(s) if s.success() => {}
+            Ok(s) => log::warn!("steamosctl {args:?} exited with {s}"),
+            Err(e) => log::warn!("could not run steamosctl {args:?}: {e}"),
+        }
+    }
+}
+
+/// Largest panel size that fits the field of view, in metres at [`PANEL_DISTANCE`].
+///
+/// A fixed width cannot work across both outputs. 0.9 m suits the glasses, and on the Deck's
+/// portrait panel the same panel is rolled a quarter turn, so the image's *width* now runs
+/// along the screen's short axis and the heading runs off the edge. Fitting to the actual
+/// FOV handles both, and any future headset, without a magic number per device.
+fn fit_panel(aspect: f32, h_fov_deg: f64, v_fov_deg: f64, portrait: bool) -> (f32, f32) {
+    // After a quarter turn the image's width spans the screen's vertical extent and its
+    // height spans the horizontal one.
+    let (fov_for_width, fov_for_height) = if portrait {
+        (v_fov_deg, h_fov_deg)
+    } else {
+        (h_fov_deg, v_fov_deg)
+    };
+    // Leave a margin. Text touching the edge of the field is uncomfortable to read even when
+    // it technically fits, because it sits where the optics are worst.
+    let usable = 0.8;
+    let extent = |fov: f64| 2.0 * PANEL_DISTANCE * ((fov * usable / 2.0).to_radians().tan() as f32);
+    let max_w = extent(fov_for_width);
+    let max_h = extent(fov_for_height);
+    let aspect = aspect.max(0.01);
+    // Fit inside both bounds while keeping the image's proportions.
+    let width = max_w.min(max_h * aspect);
+    (width, width / aspect)
+}
+
 /// Head-locked panel transform. See `backend_winit` for the frame conventions.
 ///
 /// `portrait` rolls the content a quarter turn for the Deck's built-in screen, which is
 /// mounted sideways. The roll is applied about the view axis (+X, forward) *after* the head
 /// orientation, so it rotates the image on the glass rather than tilting the world.
-fn head_locked_panel(orientation: DQuat, aspect: f32, portrait: bool) -> Mat4 {
-    let height = PANEL_WIDTH / aspect.max(0.01);
+fn head_locked_panel_sized(orientation: DQuat, width: f32, height: f32, portrait: bool) -> Mat4 {
+    let _ = PANEL_WIDTH;
     let basis = Mat4::from_cols(
-        (-Vec3::Y * PANEL_WIDTH).extend(0.0),
+        (-Vec3::Y * width).extend(0.0),
         (Vec3::Z * height).extend(0.0),
         Vec3::X.extend(0.0),
         (Vec3::X * PANEL_DISTANCE).extend(1.0),

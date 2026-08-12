@@ -1,0 +1,12 @@
+[package]
+name = "spatiand-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Deliberately dependency-free apart from logging. The shell is a state machine over an
+# abstract input vocabulary; the moment it needs a headset, a renderer or a window it stops
+# being testable on any machine, which is the whole reason it is its own crate.
+[dependencies]
+log.workspace = true
