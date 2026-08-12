@@ -40,6 +40,8 @@ pub enum HudAction {
     Screenshot,
     /// Step to the next of the four valid pitch/roll interpretations.
     CyclePitchRoll,
+    /// Show or hide the on-screen keyboard.
+    ToggleKeyboard,
     /// Cycle the 360 environment.
     NextEnvironment,
     /// Hand the display back and return to the desktop session.
@@ -92,6 +94,11 @@ impl Hud {
                 label: "Environment",
                 detail: "Change the world around you",
                 action: HudAction::NextEnvironment,
+            },
+            HudItem {
+                label: "Keyboard",
+                detail: "Show a keyboard you can point at and click",
+                action: HudAction::ToggleKeyboard,
             },
             HudItem {
                 label: "Fix pitch and roll",

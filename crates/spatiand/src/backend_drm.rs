@@ -155,6 +155,7 @@ pub fn run(
     // Where the left thumb was last frame, so an absolute pad reads as a scroll delta rather
     // than jumping the moment it lands.
     let mut last_left_pad: Option<(f32, f32)> = None;
+    let mut keyboard = spatiand_shell::Keyboard::default();
 
     // The shell — what is on screen and what a button means. Deliberately built once, outside
     // the output loop: unplugging the glasses must not close your launcher.
@@ -614,6 +615,10 @@ pub fn run(
                             sky_dirty = true;
                         }
                         HudAction::Screenshot => screenshot = true,
+                        HudAction::ToggleKeyboard => {
+                            keyboard.open = !keyboard.open;
+                            log::info!("keyboard {}", if keyboard.open { "shown" } else { "hidden" });
+                        }
                         HudAction::CyclePitchRoll => {
                             // Applied live and stored, so the wearer can see which way round
                             // is right rather than having to reason about it. Calibration
@@ -794,6 +799,9 @@ pub fn run(
                 last_status_update = std::time::Instant::now();
             }
             scene.sync_status(&mut renderer, &mut text, &status_text, ppd)?;
+            if keyboard.open {
+                scene.sync_keyboard(&mut renderer, &mut text, &keyboard, ppd)?;
+            }
             scene.sync_apps(&mut renderer, &mut text, &shell, ppd)?;
             scene.sync_menu(
                 &mut renderer,
@@ -946,7 +954,38 @@ pub fn run(
                         }
                     }
 
-                    if right_click && pointers.drag.is_none() && !right_was_down {
+                    // The keyboard is tested before any window. It deliberately hangs in
+                    // front, and a keystroke must never also click through to what is behind.
+                    let mut typed = false;
+                    if keyboard.open && right_click && !right_was_down {
+                        if let Some(a) = right_aim.as_ref() {
+                            let (centre, facing, width, height) =
+                                scene.keyboard_placement(orientation);
+                            let quad = spatiand_render::Quad {
+                                centre: centre.as_dvec3(),
+                                orientation: facing.as_dquat(),
+                                width: width as f64,
+                                height: height as f64,
+                            };
+                            if let Some(hit) = spatiand_render::intersect_quad(&a.ray, &quad) {
+                                if let Some(key) = keyboard.key_at(hit.u, hit.v) {
+                                    typed = true;
+                                    if let Some(c) = controller.as_ref() {
+                                        c.pulse(
+                                            spatiand_input::HapticPad::Right,
+                                            spatiand_input::Feel::Click,
+                                        );
+                                    }
+                                    if let Some(code) = keyboard.press(key) {
+                                        send_key(&mut runtime.state, code, time_ms);
+                                    }
+                                    keyboard.after_press(key);
+                                }
+                            }
+                        }
+                    }
+
+                    if !typed && right_click && pointers.drag.is_none() && !right_was_down {
                         match right_aim.as_ref() {
                             Some(a) if a.on_title => {
                                 if let Some((index, _)) = a.hit {
@@ -1034,6 +1073,7 @@ pub fn run(
                 let windows = &windows;
                 let right_aim = &right_aim;
                 let left_aim = &left_aim;
+                let keyboard_open = keyboard.open;
                 renderer.with_context(|gl| unsafe {
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
                     gl.Disable(ffi::SCISSOR_TEST);
@@ -1333,6 +1373,35 @@ fn first_free_crtc(drm: &DrmDevice, connector: &connector::Info) -> Option<crtc:
         .iter()
         .filter_map(|e| drm.get_encoder(*e).ok())
         .find_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()).first().copied())
+}
+
+/// Send one key press and release to whatever has keyboard focus.
+///
+/// Press and release together: the on-screen keyboard has no notion of holding a key, and a
+/// press with no matching release leaves the client repeating that character for ever -- which
+/// is a spectacular way to discover the bug.
+///
+/// Wayland keycodes are evdev codes offset by 8, a historical debt from X11. The table in
+/// `spatiand_shell::keyboard` stores the evdev numbers so it can be read against the kernel
+/// header, and the offset is applied here, once.
+fn send_key(state: &mut Spatiand, evdev_code: u32, time_ms: u32) {
+    let Some(keyboard) = state.seat.get_keyboard() else {
+        return;
+    };
+    let code = smithay::input::keyboard::Keycode::new(evdev_code + 8);
+    for pressed in [
+        smithay::backend::input::KeyState::Pressed,
+        smithay::backend::input::KeyState::Released,
+    ] {
+        keyboard.input::<(), _>(
+            state,
+            code,
+            pressed,
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+            time_ms,
+            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+        );
+    }
 }
 
 /// The text of whichever menu is open, or empty in the world.

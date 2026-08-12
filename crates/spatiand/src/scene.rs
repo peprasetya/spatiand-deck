@@ -52,6 +52,13 @@ const LIGHT_DIR: Vec3 = Vec3::new(0.55, 0.6, 0.58);
 /// occupies roughly 140 px. 256 leaves room for the focused bubble's scale-up and for a
 /// headset with better optics, without being wasteful across forty apps.
 const ICON_TEXTURE_PX: u32 = 256;
+/// How far below level the keyboard hangs, radians, and how far away.
+///
+/// Down and close, the way a real keyboard sits: you glance down at it and back up at what you
+/// are typing into. Putting it at window distance and window height means it covers whatever
+/// you are working on, which is the one thing it must not do.
+const KEYBOARD_PITCH: f32 = 0.52;
+const KEYBOARD_DISTANCE: f32 = 0.85;
 /// Half the width of a full launcher row, in degrees, for placing the page dots just outside
 /// it. Mirrors `spatiand_shell::launcher::COLUMN_SPACING_DEG` and is kept here so the scene
 /// does not have to reach into the shell's layout arithmetic.
@@ -110,6 +117,11 @@ pub struct Scene {
     /// lives (a browser tab, a file being edited) and two windows often share one. Bounded
     /// below so a client that rewrites its title every frame cannot grow this without limit.
     titles: std::collections::HashMap<String, Texture>,
+
+    /// The keyboard face, rebuilt when shift changes.
+    keys: Option<Texture>,
+    keys_shifted: bool,
+    keys_built: bool,
 
     /// The status bar, rebuilt when its text changes.
     status: Option<Texture>,
@@ -188,6 +200,9 @@ impl Scene {
             app_glyphs: Vec::new(),
             labels_built_for: usize::MAX,
             titles: std::collections::HashMap::new(),
+            keys: None,
+            keys_shifted: false,
+            keys_built: false,
             status: None,
             status_text: String::new(),
             menu: None,
@@ -425,6 +440,103 @@ impl Scene {
             .ok()?;
         self.titles.insert(title.to_string(), Texture { id, aspect });
         Some(TitleTexture { id, aspect })
+    }
+
+    /// Rebuild the keyboard face if the shift state changed.
+    ///
+    /// One texture for the whole keyboard rather than a quad per key. Eighty quads with eighty
+    /// labels would be eighty uploads every time shift is pressed, and at the size a key is
+    /// actually drawn the difference is invisible -- the hit-testing is arithmetic on the
+    /// pointer's UV either way.
+    pub fn sync_keyboard(
+        &mut self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        text: &mut TextRenderer,
+        keyboard: &spatiand_shell::Keyboard,
+        px_per_degree: f32,
+    ) -> Result<(), String> {
+        if self.keys_built && self.keys_shifted == keyboard.shift {
+            return Ok(());
+        }
+        self.keys_shifted = keyboard.shift;
+        self.keys_built = true;
+
+        // Rows padded so the columns line up under a monospaced rendering of the labels.
+        let mut face = String::new();
+        for row in spatiand_shell::keyboard::ROWS {
+            for k in row.iter() {
+                let label = keyboard.label(k);
+                face.push_str(&format!(" {label} "));
+            }
+            face.push('\n');
+        }
+        let image = text.render(&face, px_per_degree * 0.9, 2048, [225, 233, 250, 255]);
+        let old = self.keys.take();
+        self.keys = Some(
+            renderer
+                .with_context(|gl| unsafe {
+                    if let Some(t) = old {
+                        gl.DeleteTextures(1, &t.id);
+                    }
+                    Texture {
+                        id: upload_rgba(gl, &image),
+                        aspect: image.width as f32 / image.height.max(1) as f32,
+                    }
+                })
+                .map_err(|e| format!("no GL context: {e}"))?,
+        );
+        Ok(())
+    }
+
+    /// Where the keyboard sits in the world.
+    ///
+    /// Below the eye line and closer than a window, the way a real keyboard sits: you glance
+    /// down at it and back up at what you are typing into, rather than having it cover the
+    /// thing you are working on.
+    pub fn keyboard_placement(&self, orientation: glam::DQuat) -> (Vec3, Quat, f32, f32) {
+        let head = Quat::from_xyzw(
+            orientation.x as f32,
+            orientation.y as f32,
+            orientation.z as f32,
+            orientation.w as f32,
+        );
+        // Yaw follows the head; pitch is fixed downward so looking up does not drag it away.
+        let (yaw, _, _) = head.to_euler(glam::EulerRot::ZYX);
+        let facing = Quat::from_rotation_z(yaw) * Quat::from_rotation_y(-KEYBOARD_PITCH);
+        let cfg = spatiand_render::StereoConfig::default();
+        let centre = Quat::from_rotation_z(yaw)
+            * Vec3::new(cfg.neck_forward_m as f32, 0.0, cfg.neck_up_m as f32)
+            + facing * Vec3::X * KEYBOARD_DISTANCE;
+        let width = 0.62f32;
+        let height = width * 0.38;
+        (centre, facing, width, height)
+    }
+
+    /// Draw the keyboard.
+    ///
+    /// # Safety
+    /// Context must be current.
+    pub unsafe fn draw_keyboard(&self, gl: &ffi::Gles2, eye: &Eye, orientation: glam::DQuat) {
+        let Some(face) = self.keys else {
+            return;
+        };
+        let (centre, facing, width, height) = self.keyboard_placement(orientation);
+        let plate = self.panel_model(centre, facing, width * 1.05, height * 1.15);
+        self.quads.draw(
+            gl,
+            self.white,
+            &(eye.view_projection() * plate),
+            [0.03, 0.04, 0.08, 0.88],
+            (0.0, 1.0),
+        );
+        let model = self.panel_model(centre, facing, width, height);
+        self.quads.draw(
+            gl,
+            face.id,
+            &(eye.view_projection() * model),
+            [1.0, 1.0, 1.0, 1.0],
+            (0.0, 1.0),
+        );
     }
 
     /// Rebuild the status bar if its text changed.

@@ -300,7 +300,8 @@ pub fn run(
                             let _ = spatiand_track::config::save_axes(&swapped);
                             log::info!("axes now {}", swapped.summary());
                         }
-                        HudAction::ReturnToDesktop | HudAction::Screenshot => {
+                        HudAction::ToggleKeyboard | HudAction::ReturnToDesktop
+                        | HudAction::Screenshot => {
                             log::info!("{action:?} does nothing in the nested backend");
                         }
                         HudAction::Dismiss => {}

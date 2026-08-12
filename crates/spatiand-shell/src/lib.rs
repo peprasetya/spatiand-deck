@@ -17,10 +17,12 @@ use crate::grid::Direction;
 pub mod category;
 pub mod grid;
 pub mod hud;
+pub mod keyboard;
 pub mod launcher;
 
 pub use grid::{Direction as NavDirection, Grid};
 pub use hud::{Hud, HudAction, HudItem};
+pub use keyboard::{Key, Keyboard};
 pub use category::{Group, GROUPS};
 pub use launcher::{AppEntry, BubblePlacement, Launcher, Level};
 
