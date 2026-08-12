@@ -744,3 +744,102 @@ mod tests {
         assert!(s.failures > 0, "and it should say so rather than stay silent");
     }
 }
+
+#[cfg(test)]
+mod path_equivalence_tests {
+    use super::*;
+    use crate::axis::AxisMap;
+
+    /// A stream of samples for a steady rotation about one sensor axis.
+    fn stream(axis: usize, rate_dps: f64, seconds: f64) -> Vec<ImuSample> {
+        let n = (seconds * 1000.0) as u64;
+        (0..n)
+            .map(|i| {
+                let mut gyro = DVec3::ZERO;
+                gyro[axis] = rate_dps;
+                ImuSample {
+                    timestamp_ns: i * 1_000_000,
+                    gyro,
+                    // Resting gravity on sensor +Z, the measured orientation of these glasses.
+                    accel: DVec3::new(0.0, 0.0, 1.0),
+                    mag: DVec3::ZERO,
+                    temperature_c: None,
+                }
+            })
+            .collect()
+    }
+
+    fn run(mut tracker: HeadTracker, samples: &[ImuSample]) -> Euler {
+        for s in samples {
+            tracker.integrate(s);
+        }
+        tracker.euler_degrees()
+    }
+
+    /// The measured map for the XREAL Air: yaw on sensor Z, pitch on X, roll on Y.
+    fn measured() -> AxisMap {
+        AxisMap {
+            version: crate::axis::CURRENT_VERSION,
+            yaw_axis: 2,
+            yaw_sign: 1.0,
+            pitch_axis: 0,
+            pitch_sign: 1.0,
+            roll_axis: 1,
+            roll_sign: 1.0,
+        }
+    }
+
+    #[test]
+    fn adopting_a_map_matches_starting_with_it() {
+        // The reported symptom: head tracking behaves correctly immediately after calibration
+        // and is wrong on the next launch, with the same map in both cases. That can only be
+        // true if these two paths disagree -- calibration reaches the tracker through
+        // set_axes, a restart through new() -- so this pins them together.
+        for axis in 0..3 {
+            let samples = stream(axis, 30.0, 1.0);
+
+            let adopted = {
+                let mut t = HeadTracker::new(AxisMap::IDENTITY, TrackerConfig::default());
+                // Some history first, as there would be during calibration itself.
+                for s in stream(axis, 5.0, 0.2).iter() {
+                    t.integrate(s);
+                }
+                t.set_axes(measured());
+                run(t, &samples)
+            };
+            let fresh = run(
+                HeadTracker::new(measured(), TrackerConfig::default()),
+                &samples,
+            );
+
+            let close = |a: f64, b: f64| (a - b).abs() < 0.5;
+            assert!(
+                close(adopted.yaw, fresh.yaw)
+                    && close(adopted.pitch, fresh.pitch)
+                    && close(adopted.roll, fresh.roll),
+                "sensor axis {axis}: adopted {adopted:?} but fresh {fresh:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_map_survives_being_written_and_read_back() {
+        // The other half of the same question: the map that gets saved has to be the map that
+        // comes back, field for field, or the restart uses something else entirely.
+        let map = measured();
+        let text = toml::to_string_pretty(&map).expect("serialises");
+        let back: AxisMap = toml::from_str(&text).expect("parses");
+        assert_eq!(map, back, "round trip changed the map:\n{text}");
+
+        for axis in 0..3 {
+            let samples = stream(axis, 30.0, 1.0);
+            let before = run(HeadTracker::new(map, TrackerConfig::default()), &samples);
+            let after = run(HeadTracker::new(back, TrackerConfig::default()), &samples);
+            assert_eq!(
+                (before.yaw.round(), before.pitch.round(), before.roll.round()),
+                (after.yaw.round(), after.pitch.round(), after.roll.round()),
+                "sensor axis {axis} behaves differently after a round trip"
+            );
+        }
+    }
+}
