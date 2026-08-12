@@ -168,6 +168,8 @@ pub fn run(
     };
     let mut tracker =
         HeadTracker::new(stored.unwrap_or(AxisMap::IDENTITY), TrackerConfig::default());
+    // What the axes were before the last pitch/roll swap, so the toggle is exact.
+    let mut previous_axes: Option<AxisMap> = None;
 
     // Page-flip completion drives the render loop.
     //
@@ -558,6 +560,34 @@ pub fn run(
                             sky_dirty = true;
                         }
                         HudAction::Screenshot => screenshot = true,
+                        HudAction::SwapPitchRoll => {
+                            // Applied live and stored, so the wearer can see which way round
+                            // is right rather than having to reason about it. Calibration
+                            // cannot tell a nod from a tilt performed in its place -- both
+                            // produce a valid map with determinant +1 -- so nothing in the
+                            // measurement can catch it and this is the only way to settle it.
+                            //
+                            // Toggling restores the *remembered* previous map rather than
+                            // swapping a second time: the swap is not its own inverse, so
+                            // pressing twice would otherwise land on a third map.
+                            let current = tracker.axes();
+                            let swapped = match previous_axes.take() {
+                                Some(previous) => previous,
+                                None => {
+                                    previous_axes = Some(current);
+                                    current.with_pitch_roll_swapped()
+                                }
+                            };
+                            tracker.set_axes(swapped);
+                            match spatiand_track::config::save_axes(&swapped) {
+                                Ok(path) => log::info!(
+                                    "axes now {} (saved to {})",
+                                    swapped.summary(),
+                                    path.display()
+                                ),
+                                Err(e) => log::warn!("swapped the axes but could not save: {e}"),
+                            }
+                        }
                         HudAction::ReturnToDesktop => leaving = true,
                         HudAction::OpenSystemSettings(module) => {
                             let command = format!("kcmshell6 {module}");

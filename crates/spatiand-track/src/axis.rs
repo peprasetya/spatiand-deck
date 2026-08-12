@@ -79,6 +79,27 @@ impl AxisMap {
         )
     }
 
+    /// Exchange the pitch and roll axes, keeping the frame right-handed.
+    ///
+    /// The one calibration mistake that is both easy to make and invisible to the measurement:
+    /// nodding and tilting are adjacent motions, and if the wearer performs one when asked for
+    /// the other, the two axes are recorded swapped. The resulting map is a perfectly valid
+    /// rotation with determinant +1, so nothing downstream can tell it is wrong -- it just
+    /// makes looking down roll the world and leaning pitch it.
+    ///
+    /// Note the sign flip. Exchanging two axes of a right-handed frame mirrors it, so one
+    /// sense must reverse to stay a rotation; without that this returns a map with determinant
+    /// −1, where gyro integration and gravity correction fight each other.
+    pub fn with_pitch_roll_swapped(self) -> Self {
+        Self {
+            pitch_axis: self.roll_axis,
+            pitch_sign: self.roll_sign,
+            roll_axis: self.pitch_axis,
+            roll_sign: -self.pitch_sign,
+            ..self
+        }
+    }
+
     /// +1 for a proper rotation, −1 for a mirrored frame.
     pub fn determinant(&self) -> f64 {
         let mut m = [[0.0f64; 3]; 3];
@@ -120,6 +141,70 @@ impl AxisMap {
             NAMES[self.roll_axis],
             if self.determinant() > 0.0 { "+1" } else { "-1" }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests_swap {
+    use super::*;
+
+    #[test]
+    fn swapping_pitch_and_roll_stays_a_rotation() {
+        // A mirrored map is far worse than a swapped one: the filter fights itself and the
+        // symptoms look like drift rather than like a bad axis.
+        for map in [
+            AxisMap::IDENTITY,
+            AxisMap {
+                version: CURRENT_VERSION,
+                yaw_axis: 2,
+                yaw_sign: 1.0,
+                pitch_axis: 0,
+                pitch_sign: 1.0,
+                roll_axis: 1,
+                roll_sign: 1.0,
+            },
+        ] {
+            let swapped = map.with_pitch_roll_swapped();
+            assert!(
+                (swapped.determinant() - map.determinant()).abs() < 1e-9,
+                "handedness changed: {} -> {}",
+                map.determinant(),
+                swapped.determinant()
+            );
+            assert!(swapped.is_usable(), "{swapped:?} is not usable");
+        }
+    }
+
+    #[test]
+    fn swapping_is_not_an_involution_and_the_caller_must_not_assume_it_is() {
+        // Worth pinning down, because it is surprising. Exchanging two axes of a right-handed
+        // frame mirrors it, so exactly one sign has to flip to stay a rotation -- and an
+        // operation that flips one sign cannot be its own inverse. Pressing the HUD toggle
+        // twice therefore lands on a *third* valid-but-wrong map, which is why the caller
+        // remembers the previous value instead of swapping again.
+        let twice = AxisMap::IDENTITY
+            .with_pitch_roll_swapped()
+            .with_pitch_roll_swapped();
+        assert_ne!(twice, AxisMap::IDENTITY);
+        // It is at least still a usable rotation, so a caller that gets this wrong produces a
+        // world that is oriented oddly rather than one that tears itself apart.
+        assert!(twice.is_usable());
+    }
+
+    #[test]
+    fn the_measured_map_swaps_to_the_device_default() {
+        // The specific case that prompted this: a calibration that recorded the nod and the
+        // tilt the wrong way round produces exactly the default map, swapped.
+        let measured = AxisMap {
+            version: CURRENT_VERSION,
+            yaw_axis: 2,
+            yaw_sign: 1.0,
+            pitch_axis: 0,
+            pitch_sign: 1.0,
+            roll_axis: 1,
+            roll_sign: 1.0,
+        };
+        assert_eq!(measured.with_pitch_roll_swapped(), AxisMap::IDENTITY);
     }
 }
 
