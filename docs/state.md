@@ -120,11 +120,20 @@ Worth keeping, because each was invisible from the outside and none would be gue
 - One degree is about 2% of a window's height at 2.2 m. Anything sized as a fraction of
   something else needs checking in degrees before it is called a target.
 - **Build in the `holo` distrobox, not `spatiand`.** Both were made from `archlinux:latest`,
-  but at different times: `holo` has glibc 2.41 and `spatiand` has 2.44, against SteamOS's
-  2.41. A binary from the newer box builds perfectly and then dies on launch with
-  `GLIBC_2.43 not found`, which reads as a broken build rather than an old host.
-  `tools/setup-buildbox.sh` now checks this instead of printing it. `holo` needs
-  `PATH=$HOME/.cargo/bin:$PATH` and its own `CARGO_TARGET_DIR` — the two boxes cannot share
-  one, the fingerprints collide and the second gets a permission error.
+  but at different times, and that tag moves: `holo` has glibc 2.41, `spatiand` has 2.44, and
+  SteamOS has 2.41. A binary from the newer box builds and links perfectly and then dies at
+  the first instruction with `GLIBC_2.43 not found`. Because spatial mode replaces the
+  session, "dies before printing anything" looks like a black screen that never comes back —
+  not like a build error. `tools/setup-buildbox.sh` now checks the two glibcs instead of
+  printing them, and `go-to-spatiand.sh` runs `ldd` before switching sessions, so the failure
+  arrives as a dialog rather than as a dark room.
+- **The glibc floor is set by the build container, not by anything in this repo.** The only
+  symbols above 2.35 are `pidfd_spawnp` and `pidfd_getpid` at 2.39, which Rust's `std` uses
+  when the glibc it was *built against* offers them and silently does without when it does
+  not. So building in an older box lowers the floor with no code change.
+- **`podman unshare` is needed to clean `target/`.** The other box ran with a different user
+  namespace, so some of `target/` ended up owned by uid 100000 and `deck` could not write to
+  it — cargo reports that as a bare `Permission denied` on a fingerprint file. `rm -rf` will
+  not shift it either; `podman unshare rm -rf target` will.
 - Rotating a basis by reusing the axis you just rotated is not a rotation, it is a skew. Both
   new axes have to come from the old pair.

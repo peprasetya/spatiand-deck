@@ -27,6 +27,21 @@ fail() {
 
 [[ -x "$BIN" ]] || fail "Spatiand is not built yet.\n\nExpected: $BIN\n\nBuild it with:\ndistrobox enter --name holo -- bash -c 'cd ~/spatiand && cargo build --release'"
 
+# A binary that cannot resolve its libraries dies before it prints anything, and since this
+# switches to a session with no desktop underneath, "dies before printing anything" looks
+# exactly like a black screen that never comes back. The usual cause is a build container
+# whose glibc has drifted ahead of the host's: it compiles and links perfectly and then fails
+# at the first instruction.
+#
+# `ldd` resolves the same way the loader does, so this catches it before the screen goes away.
+missing=$(ldd "$BIN" 2>&1 | grep -E 'not found' | head -4)
+if [[ -n "$missing" ]]; then
+    fail "Spatiand cannot run on this system.\n\n$missing\n\nThis usually means it was built \
+against newer libraries than SteamOS has. Rebuild it in a container whose glibc is no newer \
+than this machine's ($(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')):\n\n\
+distrobox enter --name holo -- bash -c 'cd ~/spatiand && cargo build --release'"
+fi
+
 if [[ ! -f "$SESSION" || ! -x "$LAUNCHER" ]]; then
     if command -v kdialog >/dev/null; then
         kdialog --title "Spatiand" --msgbox \
