@@ -66,6 +66,15 @@ const PANEL_DISTANCE: f32 = 1.4;
 /// A pad spans -1..1, so a corner-to-corner drag is 2 units. 260 makes that about two screens
 /// of a text document, which is the same ballpark as a laptop touchpad.
 const SCROLL_SCALE: f64 = 260.0;
+
+/// The largest single-frame pad movement treated as real, in pad units (−1..1).
+///
+/// The pads are absolute, so a scroll is the difference between two samples. That is fine
+/// while a thumb is down and nonsense across the moment it lifts: the contact's last reported
+/// position is not where the thumb was, and the difference can be the entire width of the pad.
+/// A real thumb moves a few hundredths of that in one 14 ms frame, so anything past a quarter
+/// of the pad is a report artefact and is dropped rather than scrolled.
+const MAX_PAD_STEP: f64 = 0.25;
 /// How long the headset may stay silent before it is reopened.
 ///
 /// The glasses stream at about a kilohertz, so a second of nothing is already thousands of
@@ -1005,6 +1014,12 @@ pub fn run(
                             .map(|d| !d.is_negligible())
                             .unwrap_or(false);
                         if gesturing {
+                            // A gesture is not a scroll. Forgetting where the left thumb was
+                            // means the first frame after the gesture ends measures nothing,
+                            // instead of measuring the whole distance the thumb travelled
+                            // while it was busy moving a window -- which arrived as one
+                            // enormous scroll the moment you let go.
+                            last_left_pad = None;
                             if let Some(delta) = two_handed {
                                 let focused = runtime
                                     .state
@@ -1028,17 +1043,44 @@ pub fn run(
                                 }
                             }
                         } else {
-                            if let Some(a) = right_aim.as_ref() {
+                            // One cursor at a time, and the right thumb wins.
+                            //
+                            // Two pointers both claiming to be "the" cursor is why interacting
+                            // with a real application felt arbitrary: whatever the left thumb
+                            // was resting on decided where a scroll landed, while the visible
+                            // thing being aimed was the right one. The right pad owns the
+                            // cursor whenever it is touched; the left pad only inherits it
+                            // when the right thumb is off the pad entirely.
+                            let cursor_aim = match (right_aim.as_ref(), left_aim.as_ref()) {
+                                (Some(right), _) => Some(right),
+                                (None, left) => left,
+                            };
+                            if let Some(a) = cursor_aim {
                                 pointers.motion(&mut runtime.state, a, &windows, time_ms);
                             }
-                            // The left pad scrolls whatever the pointer is over. Absolute pad
-                            // position turned into a delta, so it behaves like a touchpad
-                            // rather than jumping when the thumb lands.
+                            // The left pad is the wheel, and it turns whatever the cursor is
+                            // on -- which is the right pad's target when that thumb is down.
                             if let Some(p) = pads.as_ref() {
                                 if p.left_pad.touched && !p.left_pad.clicked {
                                     if let Some((px, py)) = last_left_pad {
-                                        let dx = (p.left_pad.x - px) as f64 * SCROLL_SCALE;
-                                        let dy = (p.left_pad.y - py) as f64 * SCROLL_SCALE;
+                                        let step = |now: f32, then: f32| {
+                                            let d = (now - then) as f64;
+                                            // A thumb cannot cross the pad inside one frame.
+                                            // The pads report a stray sample as a contact ends,
+                                            // and unguarded that arrives as the full width of
+                                            // the pad in 14 ms -- a scroll of hundreds of
+                                            // lines from a thumb that was merely lifting off.
+                                            // This is the jumpiness that was impossible to
+                                            // describe because it had nothing to do with what
+                                            // the thumb was doing.
+                                            if d.abs() > MAX_PAD_STEP {
+                                                0.0
+                                            } else {
+                                                d * SCROLL_SCALE
+                                            }
+                                        };
+                                        let dx = step(p.left_pad.x, px);
+                                        let dy = step(p.left_pad.y, py);
                                         // Natural direction: dragging the thumb up sends the
                                         // content up, which is what every touchpad does.
                                         pointers.scroll(&mut runtime.state, -dx, dy, time_ms);
@@ -1310,10 +1352,18 @@ pub fn run(
                             Some(Drag::Resize { edge, .. }) => Some(edge),
                             _ => None,
                         };
+                        // Only the thumb that owns the cursor gets a pointer and a beam.
+                        // Two lasers with only one of them meaning anything is worse than one:
+                        // it is not discoverable which is which, and the idle one is drawn
+                        // across whatever you are trying to read.
+                        let right_owns = right_aim.is_some();
                         for (aim, right_hand) in
                             [(right_aim.as_ref(), true), (left_aim.as_ref(), false)]
                         {
                             let Some(a) = aim else { continue };
+                            if !right_hand && right_owns && !pointers.is_dragging() {
+                                continue;
+                            }
                             let cursor = match (right_hand, dragging_edge, a.zone) {
                                 (true, Some(edge), _) => Cursor::for_edge(edge),
                                 (_, _, Some(Zone::Resize(edge))) => Cursor::for_edge(edge),
