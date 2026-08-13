@@ -670,26 +670,28 @@ pub fn run(
                             log::info!("keyboard {}", if keyboard.open { "shown" } else { "hidden" });
                         }
                         HudAction::CyclePitchRoll => {
-                            // Applied live and stored, so the wearer can see which way round
-                            // is right rather than having to reason about it. Calibration
-                            // cannot tell a nod from a tilt performed in its place -- both
-                            // produce a valid map with determinant +1 -- so nothing in the
-                            // measurement can catch it and this is the only way to settle it.
+                            // Applied live, and deliberately **not** saved.
                             //
-                            // Toggling restores the *remembered* previous map rather than
-                            // swapping a second time: the swap is not its own inverse, so
-                            // pressing twice would otherwise land on a third map.
+                            // It used to save on every press, and that turned one stray press
+                            // into a permanent fault. A wrong pitch/roll interpretation is a
+                            // valid rotation with determinant +1, so nothing downstream can
+                            // notice; the only symptom is that nodding rolls the world, and
+                            // the only way to find out is to put the glasses on. Restarting
+                            // did not help either, because the stored map beats the measured
+                            // default -- so the wearer's own report was "it is swapped again",
+                            // three times over, with no way to get back.
+                            //
+                            // Recalibration is the thing that writes the map, and it is the
+                            // only thing that should: it is the one action where the wearer
+                            // has just demonstrated which motion is which. This control is
+                            // for finding out, and a restart undoes it.
                             let swapped = tracker.axes().next_pitch_roll_variant();
                             tracker.set_axes(swapped);
-                            match spatiand_track::config::save_axes(&swapped) {
-                                Ok(path) => log::info!(
-                                    "axes option {} of 4: {} (saved to {})",
-                                    swapped.variant_index() + 1,
-                                    swapped.summary(),
-                                    path.display()
-                                ),
-                                Err(e) => log::warn!("swapped the axes but could not save: {e}"),
-                            }
+                            log::info!(
+                                "axes option {} of 4: {} (this run only; recalibrate to keep it)",
+                                swapped.variant_index() + 1,
+                                swapped.summary(),
+                            );
                         }
                         HudAction::ReturnToDesktop => leaving = true,
                         HudAction::OpenSystemSettings(module) => {

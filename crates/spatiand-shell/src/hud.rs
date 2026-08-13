@@ -101,8 +101,8 @@ impl Hud {
                 action: HudAction::ToggleKeyboard,
             },
             HudItem {
-                label: "Fix pitch and roll",
-                detail: "Try the next of four options until nodding nods and leaning leans",
+                label: "Try pitch and roll",
+                detail: "Next of four, for this run only. Recalibrate to keep one",
                 action: HudAction::CyclePitchRoll,
             },
             HudItem {
