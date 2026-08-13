@@ -80,6 +80,13 @@ const PANEL_WIDTH: f32 = 0.9;
 /// enough to cover a cold link without hanging startup if the glasses never comply.
 const STEREO_MODE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How many consecutive failed presents before the sidecar is abandoned.
+///
+/// Small on purpose. A transient failure recovers within a frame or two; anything that fails
+/// this many times running is a configuration the kernel will not accept, and retrying it at
+/// 72 Hz achieves nothing except filling the disk.
+const SIDECAR_FAILURE_LIMIT: u32 = 30;
+
 pub fn run(
     event_loop: &mut EventLoop<'static, Runtime>,
     display: &mut Display<Spatiand>,
@@ -358,7 +365,7 @@ pub fn run(
         // "plug in your glasses" prompt.
         let mut sidecar_surface: Option<SidecarSurface> = None;
         if !internal {
-            match build_sidecar(&mut drm, &gbm, &mut renderer, connector_info.handle()) {
+            match build_sidecar(&mut drm, &gbm, &mut renderer, connector_info.handle(), crtc) {
                 Ok(Some(side)) => {
                     log::info!(
                         "sidecar on {} at {}x{}",
@@ -1436,7 +1443,7 @@ pub fn run(
                         None,
                         Kind::Unspecified,
                     );
-                    if side
+                    let presented = side
                         .compositor
                         .render_frame(
                             &mut renderer,
@@ -1445,11 +1452,33 @@ pub fn run(
                             FrameFlags::DEFAULT,
                         )
                         .is_ok()
-                        && side.compositor.queue_frame(()).is_ok()
-                    {
+                        && side.compositor.queue_frame(()).is_ok();
+                    if presented {
                         side.pending = true;
+                        side.failures = 0;
+                    } else {
+                        side.failures += 1;
                     }
                 }
+            }
+
+            // A sidecar that cannot present is not worth retrying at frame rate.
+            //
+            // When it shared a CRTC with the main output, every commit failed and every
+            // failure logged the entire atomic state -- 344,113 of them, and a 5.8 GB session
+            // log, for a screen that was simply black. The commit failing is a bug to fix
+            // wherever it comes from, but the compositor's job in the meantime is to give up
+            // on the second screen and carry on driving the first.
+            if sidecar_surface
+                .as_ref()
+                .is_some_and(|s| s.failures >= SIDECAR_FAILURE_LIMIT)
+            {
+                log::error!(
+                    "the sidecar failed to present {SIDECAR_FAILURE_LIMIT} times in a row; \
+                     giving up on it. The glasses are unaffected."
+                );
+                sidecar_surface = None;
+                sidecar_ui = None;
             }
 
             // --- present ---
@@ -1594,7 +1623,7 @@ fn pick_output(
             .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
             .or_else(|| info.modes().first())
             .copied();
-        if let (Some(mode), Some(crtc)) = (native, first_free_crtc(drm, info)) {
+        if let (Some(mode), Some(crtc)) = (native, first_free_crtc(drm, info, &[])) {
             return Some((info.clone(), crtc, mode));
         }
     }
@@ -1637,13 +1666,32 @@ fn wait_for_stereo_mode(
     None
 }
 
-fn first_free_crtc(drm: &DrmDevice, connector: &connector::Info) -> Option<crtc::Handle> {
+/// A CRTC this connector can be driven by, that nothing else is already using.
+///
+/// The `taken` set is the whole point, and it was missing. This used to return the first CRTC
+/// the *encoder* could theoretically use, which on the Deck is `crtc-0` for both the panel and
+/// the DisplayPort output — so the main output took crtc-0 and the sidecar then took crtc-0 as
+/// well. Two `DrmCompositor`s on one scanout engine is not a thing, and the second one's every
+/// atomic commit came back `EINVAL`: "New screen configuration invalid", once per frame, for
+/// ever, with the Deck's screen simply staying black. Nothing failed loudly enough to say why,
+/// because from the main output's point of view everything was fine — it kept presenting at
+/// 72 fps throughout.
+fn first_free_crtc(
+    drm: &DrmDevice,
+    connector: &connector::Info,
+    taken: &[crtc::Handle],
+) -> Option<crtc::Handle> {
     let resources = drm.resource_handles().ok()?;
     connector
         .encoders()
         .iter()
         .filter_map(|e| drm.get_encoder(*e).ok())
-        .find_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()).first().copied())
+        .find_map(|encoder| {
+            resources
+                .filter_crtcs(encoder.possible_crtcs())
+                .into_iter()
+                .find(|c| !taken.contains(c))
+        })
 }
 
 /// Open the first direct-touch panel the kernel is advertising, if there is one.
@@ -1683,6 +1731,8 @@ struct SidecarSurface {
     size: (u32, u32),
     name: String,
     pending: bool,
+    /// Consecutive failed presents. See [`SIDECAR_FAILURE_LIMIT`].
+    failures: u32,
     /// Held so the wayland global lives as long as the surface.
     _output: Output,
     _global: smithay::reexports::wayland_server::backend::GlobalId,
@@ -1698,6 +1748,7 @@ fn build_sidecar(
     gbm: &GbmDevice<DrmDeviceFd>,
     renderer: &mut GlesRenderer,
     used: connector::Handle,
+    used_crtc: crtc::Handle,
 ) -> Result<Option<SidecarSurface>, Box<dyn std::error::Error>> {
     let resources = drm.resource_handles()?;
     let candidates: Vec<connector::Info> = resources
@@ -1721,7 +1772,13 @@ fn build_sidecar(
         else {
             continue;
         };
-        let Some(crtc) = first_free_crtc(drm, &info) else {
+        let Some(crtc) = first_free_crtc(drm, &info, &[used_crtc]) else {
+            log::warn!(
+                "no free CRTC for a sidecar on {}-{}; the main output has the only one it can \
+                 use",
+                info.interface().as_str(),
+                info.interface_id()
+            );
             continue;
         };
         let (w, h) = mode.size();
@@ -1791,6 +1848,7 @@ fn build_sidecar(
             size: (w as u32, h as u32),
             name,
             pending: false,
+            failures: 0,
             _global: output.create_global::<Spatiand>(&GLOBAL_DISPLAY_HANDLE.with(|h| {
                 h.borrow().clone().expect("display handle set before build_sidecar")
             })),
