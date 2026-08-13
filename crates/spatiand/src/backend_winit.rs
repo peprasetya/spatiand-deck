@@ -435,7 +435,7 @@ pub fn run(
                 scene.draw_sky(gl, &eye);
                 scene.draw_menu(gl, &eye, shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
                 if let Some(ray) = pointer_ray {
-                    scene.draw_pointer(gl, &eye, &ray, None, true);
+                    scene.draw_pointer(gl, &eye, &ray, None, true, crate::scene::Cursor::Point);
                 }
                 if let Some((tex, aspect)) = panel_snapshot {
                     let model = head_locked_panel(orientation, aspect);

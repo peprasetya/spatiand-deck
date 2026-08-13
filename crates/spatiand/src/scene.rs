@@ -112,6 +112,8 @@ pub struct Scene {
     sky_source: SkySource,
     white: u32,
     reticle: u32,
+    /// A double-headed arrow, turned in the plane to suit whichever edge is under the pointer.
+    resize_cursor: u32,
     /// A second cursor shape for the left pad. Different in outline as well as colour, so the
     /// two are distinguishable to someone who cannot rely on hue.
     reticle_left: u32,
@@ -192,7 +194,7 @@ impl Scene {
         let sky_pipeline = SkyPipeline::new(renderer, &quads)?;
         let bubbles = BubblePipeline::new(renderer, &quads)?;
 
-        let (sky, white, reticle, reticle_left, glass) = renderer
+        let (sky, white, reticle, reticle_left, resize_cursor, glass) = renderer
             .with_context(|gl| unsafe {
                 (
                     // Wrapping horizontally: an equirectangular image joins itself, and
@@ -205,6 +207,10 @@ impl Scene {
                     },
                     {
                         let r = reticle_image_left(64);
+                        upload_raw(gl, 64, 64, &r, false)
+                    },
+                    {
+                        let r = resize_cursor_image(64);
                         upload_raw(gl, 64, 64, &r, false)
                     },
                     {
@@ -226,6 +232,7 @@ impl Scene {
             white,
             reticle,
             reticle_left,
+            resize_cursor,
             glass,
             app_labels: Vec::new(),
             app_glyphs: Vec::new(),
@@ -794,7 +801,10 @@ impl Scene {
             // Frame and title bar are ONE pane of glass behind everything, not a border with
             // a bar resting on it. Two rectangles with different fills read as two objects
             // stuck together; a single rounded sheet reads as the window's chrome.
-            let border = 0.012f32;
+            // Thick enough to grab. This is the resize target, and it has to be the same
+            // number the hit test uses or the wearer aims at a frame that is not where the
+            // pointer thinks it is -- which reads as a tracking fault, not a layout one.
+            let border = height * crate::pointer::BORDER_FRACTION as f32;
             let bar_height = height * bar_fraction / (1.0 - bar_fraction);
             let chrome_height = height + bar_height + border * 2.0;
             // The sheet covers the content and the bar, so its centre sits above the content's.
@@ -1050,6 +1060,7 @@ impl Scene {
         ray: &Ray,
         hit: Option<Hit>,
         right_hand: bool,
+        cursor: Cursor,
     ) {
         // With nothing under the pointer, park the reticle at a fixed distance so it is still
         // visible. A cursor that vanishes whenever it leaves a window is impossible to aim.
@@ -1066,6 +1077,20 @@ impl Scene {
         // the view will do, and world up is the one that keeps it steady.
         let right = Vec3::Z.cross(to_eye).normalize_or(Vec3::Y);
         let up = to_eye.cross(right).normalize_or(Vec3::Z);
+        // A resize arrow is turned within that basis to lie along the edge it will drag, and
+        // is drawn a little larger -- it has to say which way as well as where, and a shape
+        // the size of the aiming reticle cannot show an angle.
+        let (angle, scale) = match cursor {
+            Cursor::Point => (0.0f32, 1.0f32),
+            Cursor::Resize { angle_deg } => (angle_deg.to_radians(), 1.5),
+        };
+        let (sin, cos) = angle.sin_cos();
+        // Both axes from the *original* basis. Rotating one and then using it to rotate the
+        // other is not a rotation at all -- it skews the quad and the arrow stops being
+        // straight.
+        let (turned_right, turned_up) = (right * cos + up * sin, up * cos - right * sin);
+        let (right, up) = (turned_right, turned_up);
+        let size = size * scale;
         let model = Mat4::from_cols(
             (right * size).extend(0.0),
             (up * size).extend(0.0),
@@ -1085,7 +1110,11 @@ impl Scene {
         let tint = [hue[0], hue[1], hue[2], alpha];
         self.quads.draw(
             gl,
-            if right_hand { self.reticle } else { self.reticle_left },
+            match cursor {
+                Cursor::Resize { .. } => self.resize_cursor,
+                Cursor::Point if right_hand => self.reticle,
+                Cursor::Point => self.reticle_left,
+            },
             &(eye.view_projection() * model),
             tint,
             (0.0, 1.0),
@@ -1104,6 +1133,7 @@ impl Scene {
         ray: &Ray,
         hit: Option<Hit>,
         right_hand: bool,
+        cursor: Cursor,
     ) {
         let distance = hit.map(|h| h.distance as f32).unwrap_or(2.5);
         let point = (ray.origin + ray.direction * distance as f64).as_vec3();
@@ -1120,7 +1150,7 @@ impl Scene {
             point,
             [hue[0], hue[1], hue[2], alpha],
         );
-        self.draw_pointer(gl, eye, ray, hit, right_hand);
+        self.draw_pointer(gl, eye, ray, hit, right_hand, cursor);
     }
 
     /// Draw a beam between two points, turned to face the eye.
@@ -1271,6 +1301,85 @@ fn glass_panel_image(width: u32, height: u32, corner: f32) -> Vec<u8> {
             out[i + 1] = (light * 255.0) as u8;
             out[i + 2] = (light * 255.0) as u8;
             out[i + 3] = ((0.30 + light * 0.72).min(1.0) * coverage * 255.0) as u8;
+        }
+    }
+    out
+}
+
+/// Which cursor to draw, and which way round.
+///
+/// Deliberately not `pointer::Zone`: the scene draws things and should not have to know what a
+/// window frame is. The mapping between the two lives at the one call site that knows both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Cursor {
+    /// The ordinary aiming reticle.
+    Point,
+    /// A double arrow, lying at this angle in the plane facing the eye. 0° is horizontal and
+    /// positive turns anticlockwise, so a bottom-left corner is +45°.
+    Resize { angle_deg: f32 },
+}
+
+impl Cursor {
+    /// The angle an edge's arrow lies at.
+    pub fn for_edge(edge: crate::pointer::Edge) -> Self {
+        use crate::pointer::Edge;
+        Cursor::Resize {
+            angle_deg: match edge {
+                Edge::Left | Edge::Right => 0.0,
+                Edge::Bottom => 90.0,
+                // Along the diagonal the corner sits on: a bottom-left corner is dragged
+                // down-and-left, so its arrow runs from lower-left to upper-right.
+                Edge::BottomLeft => 45.0,
+                Edge::BottomRight => -45.0,
+            },
+        }
+    }
+}
+
+/// The resize cursor: a double-headed arrow, drawn along the texture's horizontal.
+///
+/// One texture for all five edges, turned in the plane of the quad when it is drawn. Four
+/// separate images would be four chances for one of them to be a degree off the axis it
+/// claims — and this way the arrow is guaranteed to line up with the edge it belongs to,
+/// because the same angle places both.
+fn resize_cursor_image(size: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (size * size * 4) as usize];
+    let centre = (size as f32 - 1.0) * 0.5;
+    let radius = centre;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = (x as f32 - centre) / radius;
+            let dy = (y as f32 - centre) / radius;
+            // The shaft: a thin horizontal bar stopping short of the ends.
+            let shaft = if dx.abs() < 0.62 && dy.abs() < 0.07 {
+                1.0 - (dy.abs() / 0.07)
+            } else {
+                0.0
+            };
+            // A head at each end. Written as a triangle that narrows towards the tip, so the
+            // two arrows read as pointing outwards rather than as a barbell.
+            let head = |tip: f32| {
+                let along = (dx - tip).abs();
+                let depth = 0.30;
+                if along > depth {
+                    return 0.0;
+                }
+                let half = 0.26 * (1.0 - along / depth);
+                if dy.abs() > half {
+                    0.0
+                } else {
+                    1.0
+                }
+            };
+            let a = shaft.max(head(-0.70)).max(head(0.70)).clamp(0.0, 1.0);
+            if a <= 0.0 {
+                continue;
+            }
+            let i = ((y * size + x) * 4) as usize;
+            out[i] = 255;
+            out[i + 1] = 255;
+            out[i + 2] = 255;
+            out[i + 3] = (a * 255.0) as u8;
         }
     }
     out

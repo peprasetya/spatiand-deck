@@ -56,8 +56,8 @@ use crate::calib::Calibration;
 use crate::environment::Environments;
 use crate::gl::upload_rgba;
 use crate::input_map::intent_for;
-use crate::pointer::{self, Aim, Drag, PointerState, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
-use crate::scene::{eye_centre, Scene};
+use crate::pointer::{self, Aim, Drag, PointerState, Zone, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
+use crate::scene::{eye_centre, Cursor, Scene};
 use crate::{Runtime, Spatiand};
 
 const PANEL_DISTANCE: f32 = 1.4;
@@ -161,6 +161,13 @@ pub fn run(
     // Left thumb position while a window is being dragged, for the depth adjustment.
     let mut drag_left_y: Option<f32> = None;
     let mut monitors = crate::system::Monitors::new();
+    // The panel is a touchscreen, and in a spatial session nothing else is reading it.
+    //
+    // Opened through the session rather than with `File::open`: the event node is
+    // `root:input` with no ACL for the logged-in user, so only logind can hand it over. It is
+    // attached to seat0, which is what makes that possible — a device on no seat cannot be
+    // taken this way, however permissive its mode bits.
+    let mut touchscreen = open_touchscreen(&mut session.clone());
     let backlight = crate::system::Backlight::find();
     let mut cached_volume = crate::system::volume();
     let mut cached_brightness = backlight.as_ref().and_then(|b| b.level());
@@ -956,6 +963,30 @@ pub fn run(
                             }
                         }
                     }
+                    Some(Drag::Resize { ref window, .. }) => {
+                        if let Some(a) = right_aim.as_ref() {
+                            if let Some(out) =
+                                pointers.drag.as_ref().and_then(|d| d.resized(&a.ray))
+                            {
+                                runtime.state.layout.set(window, out.placement);
+                                // Ask the client for a buffer the new size. It answers in its
+                                // own time -- a configure is a request, not an assignment --
+                                // so the world-space size changes now and the pixels catch up
+                                // over the next frame or two. Waiting for the commit instead
+                                // would make the frame lag the pointer visibly.
+                                if let Some(toplevel) = window.toplevel() {
+                                    let size = smithay::utils::Size::from((
+                                        out.pixels.0 as i32,
+                                        out.pixels.1 as i32,
+                                    ));
+                                    if toplevel.current_state().size != Some(size) {
+                                        toplevel.with_pending_state(|s| s.size = Some(size));
+                                        toplevel.send_pending_configure();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     None => {
                         // Both thumbs moving together manipulates the focused window and takes
                         // the pads away from pointing. Merely *resting* a thumb does not --
@@ -1090,6 +1121,31 @@ pub fn run(
                                     }
                                 }
                             }
+                            Some(a) if matches!(a.zone, Some(Zone::Resize(_))) => {
+                                if let (Some((index, hit)), Some(Zone::Resize(edge))) =
+                                    (a.hit, a.zone)
+                                {
+                                    if let Some(quad) = windows.get(index) {
+                                        runtime.state.focus_window(&quad.window);
+                                        if let Some(placement) =
+                                            runtime.state.layout.get(&quad.window)
+                                        {
+                                            pointers.drag = Some(Drag::Resize {
+                                                window: quad.window.clone(),
+                                                edge,
+                                                start_quad: crate::pointer::quad_of(
+                                                    quad.pixels,
+                                                    &placement,
+                                                ),
+                                                start_u: hit.u,
+                                                start_v: hit.v,
+                                                start_placement: placement,
+                                                start_pixels: quad.pixels,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
                             Some(a) => {
                                 if let Some((index, _)) = a.hit {
                                     if let Some(quad) = windows.get(index) {
@@ -1101,7 +1157,7 @@ pub fn run(
                             None => {}
                         }
                     } else if !right_click && right_was_down {
-                        if matches!(pointers.drag, Some(Drag::Move { .. })) {
+                        if matches!(pointers.drag, Some(Drag::Move { .. } | Drag::Resize { .. })) {
                             pointers.drag = None;
                         } else {
                             pointers.button(&mut runtime.state, BTN_LEFT, false, time_ms);
@@ -1238,24 +1294,30 @@ pub fn run(
                             scene.draw_windows(gl, &eye, &windows);
                         }
                         scene.draw_menu(gl, &eye, &shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
-                        if let Some(a) = right_aim.as_ref() {
+                        // While a resize is running the cursor keeps the edge's shape even
+                        // once the ray has left the window -- which it does immediately, since
+                        // dragging an edge outward means aiming past where the window was.
+                        let dragging_edge = match pointers.drag {
+                            Some(Drag::Resize { edge, .. }) => Some(edge),
+                            _ => None,
+                        };
+                        for (aim, right_hand) in
+                            [(right_aim.as_ref(), true), (left_aim.as_ref(), false)]
+                        {
+                            let Some(a) = aim else { continue };
+                            let cursor = match (right_hand, dragging_edge, a.zone) {
+                                (true, Some(edge), _) => Cursor::for_edge(edge),
+                                (_, _, Some(Zone::Resize(edge))) => Cursor::for_edge(edge),
+                                _ => Cursor::Point,
+                            };
                             scene.draw_pointer_ray(
                                 gl,
                                 &eye,
                                 orientation,
                                 &a.ray,
                                 a.hit.map(|(_, h)| h),
-                                true,
-                            );
-                        }
-                        if let Some(a) = left_aim.as_ref() {
-                            scene.draw_pointer_ray(
-                                gl,
-                                &eye,
-                                orientation,
-                                &a.ray,
-                                a.hit.map(|(_, h)| h),
-                                false,
+                                right_hand,
+                                cursor,
                             );
                         }
 
@@ -1294,6 +1356,38 @@ pub fn run(
                     slow_status = std::time::Instant::now();
                     cached_volume = crate::system::volume();
                     cached_brightness = backlight.as_ref().and_then(|b| b.level());
+                }
+
+                // --- touch ---
+                //
+                // The cached values are updated from the finger rather than waited for on the
+                // next two-second poll. Reading them back instead would leave the bar sitting
+                // where it was for up to two seconds while the thumb is already elsewhere,
+                // which feels like the control has stuck.
+                if let Some(touch) = touchscreen.as_mut() {
+                    let events = touch.poll();
+                    if !events.is_empty() {
+                        for knob in ui.touch(&events, cached_volume, cached_brightness) {
+                            let Some(value) = ui.knob_value(knob, cached_volume, cached_brightness)
+                            else {
+                                continue;
+                            };
+                            match knob {
+                                crate::sidecar::Knob::Volume => {
+                                    cached_volume = Some(value);
+                                    crate::system::set_volume(value);
+                                }
+                                crate::sidecar::Knob::Brightness => {
+                                    cached_brightness = Some(value);
+                                    if let Some(b) = backlight.as_ref() {
+                                        if let Err(e) = b.set(value) {
+                                            log::warn!("could not set brightness: {e}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 let prepared = ui.prepare(
                     &mut renderer,
@@ -1548,6 +1642,29 @@ fn first_free_crtc(drm: &DrmDevice, connector: &connector::Info) -> Option<crtc:
         .iter()
         .filter_map(|e| drm.get_encoder(*e).ok())
         .find_map(|encoder| resources.filter_crtcs(encoder.possible_crtcs()).first().copied())
+}
+
+/// Open the first direct-touch panel the kernel is advertising, if there is one.
+///
+/// Failure is not fatal and barely worth a warning at error level: a Deck has a touchscreen,
+/// a desktop with glasses attached does not, and the sidecar is perfectly readable either way.
+fn open_touchscreen(session: &mut LibSeatSession) -> Option<spatiand_input::Touchscreen> {
+    let node = spatiand_input::touch::find_touchscreens().into_iter().next()?;
+    log::info!("touchscreen: {} at {}", node.name, node.path.display());
+    let fd = match session.open(&node.path, OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK) {
+        Ok(fd) => fd,
+        Err(e) => {
+            log::warn!("could not open {}: {e}", node.path.display());
+            return None;
+        }
+    };
+    match spatiand_input::Touchscreen::from_fd(fd) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            log::warn!("touchscreen {} is unusable: {e}", node.path.display());
+            None
+        }
+    }
 }
 
 /// A second screen, showing the sidecar.

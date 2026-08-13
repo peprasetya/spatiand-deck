@@ -108,6 +108,21 @@ pub struct Hit {
 /// the surface. Back faces are accepted deliberately: a window placed behind you is still a
 /// window, and refusing to point at it produces a dead zone nobody can explain.
 pub fn intersect_quad(ray: &Ray, quad: &Quad) -> Option<Hit> {
+    let hit = intersect_plane(ray, quad)?;
+    if !(0.0..=1.0).contains(&hit.u) || !(0.0..=1.0).contains(&hit.v) {
+        return None;
+    }
+    Some(hit)
+}
+
+/// The same intersection, but against the quad's whole infinite plane.
+///
+/// `u` and `v` run outside 0..1 for a hit beyond the quad's edges, which is the point. A
+/// resize drag is a running measurement of how far the ray has travelled since it grabbed an
+/// edge, and it stops being one the moment the ray leaves the window — which it does
+/// immediately, because dragging an edge outward means aiming past where the window used to
+/// be. Clamping there would let a window grow and never shrink.
+pub fn intersect_plane(ray: &Ray, quad: &Quad) -> Option<Hit> {
     let normal = quad.orientation * DVec3::X;
     let denominator = ray.direction.dot(normal);
     // Parallel, or near enough that the division would explode into a hit kilometres away.
@@ -122,15 +137,10 @@ pub fn intersect_quad(ray: &Ray, quad: &Quad) -> Option<Hit> {
     let point = ray.at(distance);
     let local = quad.orientation.inverse() * (point - quad.centre);
     // +Y is left, so u — which grows rightwards — runs against it.
-    let u = 0.5 - local.y / quad.width;
-    let v = 0.5 - local.z / quad.height;
-    if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
-        return None;
-    }
     Some(Hit {
         distance,
-        u,
-        v,
+        u: 0.5 - local.y / quad.width,
+        v: 0.5 - local.z / quad.height,
         point,
     })
 }

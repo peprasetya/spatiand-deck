@@ -40,7 +40,8 @@ are stripped.
 
 **Sidecar.** Second `DrmCompositor` on the Deck's panel: CPU/GPU/memory graphs, clock, battery,
 volume and brightness. Flip completions are tracked per-CRTC — a single flag lets one screen
-consume the other's and that screen then never presents again, silently.
+consume the other's and that screen then never presents again, silently. The volume and
+brightness bars are touchable (below).
 
 **Tooling.** `SPATIAND_BACKEND=snapshot` renders a frame to a PNG from a render node, with no
 display, session or headset, and can host a real Wayland client while doing it. Almost every
@@ -51,58 +52,35 @@ the controller map, the haptic command and the IMU axes.
 
 ---
 
-## Not done
+**Sidecar touch.** The panel's digitiser, read through evdev — `spatiand_input::touch`. Found
+by capability (`INPUT_PROP_DIRECT` plus the MT slot axes) rather than by name, so it is not a
+Deck quirk. Protocol B decoded into contacts, with nothing acted on before `SYN_REPORT`.
+Opened through libseat, because the event node is `root:input` with no ACL and only logind can
+hand it over. Volume and brightness are real sliders; the bars went from 30 px to 56 px
+because a landscape pixel here is 0.118 mm and a fingertip is 8–10 mm.
 
-### Touch input on the sidecar — next
+**Window resize.** The frame is a grab target — left, right, bottom and both bottom corners,
+each with a turned double-arrow cursor. Pixels follow the world size at constant density, so
+the client gets more buffer rather than a bigger picture of the same buffer: text keeps its
+angular size and more of it fits. The opposite edge stays put.
 
-The panel is a touchscreen and nothing reads it, which makes the volume and brightness
-readouts exactly as useful as a photograph of a slider. This is also what an on-screen keyboard
-*there* depends on.
+294 → 337 tests.
 
-The device is `i2c-FTS3528:00`, visible in `/proc/bus/input/devices`; the same hardware appears
-as `hidraw3` but evdev is the right layer here because the kernel already assembles the
-multitouch protocol.
+---
 
-Protocol B, so: `ABS_MT_SLOT` (0x2f) selects a finger, `ABS_MT_TRACKING_ID` (0x39) with −1
-means that finger lifted, `ABS_MT_POSITION_X/Y` (0x35/0x36) move it, and `SYN_REPORT` ends a
-packet — nothing should be acted on until then, or a half-updated position gets used. An
-`input_event` is 24 bytes on 64-bit: 16 for the timeval, then `u16 type`, `u16 code`,
-`i32 value`. Ranges come from `EVIOCGABS`, which is `_IOR('E', 0x40 + axis, …)` into six `i32`s
-(value, min, max, fuzz, flat, resolution) — do not assume the panel's pixel size, because the
-digitiser's coordinate space is its own.
+## Not tested by a human yet
 
-Discovery should parse `/proc/bus/input/devices` for a name matching the panel and take its
-`eventN` handler, the same approach `spatiand_hmd::hid` uses for hidraw. Match on the name, not
-the number: `eventN` is not stable across boots.
+Everything above has tests and builds; these two have never had a finger or a thumb on them.
 
-The sidecar is laid out in landscape and rotated at the projection, so touch coordinates need
-the same quarter turn applied — and that rotation is the thing most likely to be wrong in a way
-that looks like a calibration problem. Worth a test that a touch at a known corner lands on the
-widget drawn in that corner.
-
-Once touch works, the volume and brightness bars become real controls
-(`crate::system::Backlight::set` and `wpctl set-volume`), and the keyboard can move to the
-panel where it does not eat a third of the field of view.
-
-### Resizable windows — next
-
-Distinct from the two-thumb gesture, which scales the *quad in the world*. Resize means sending
-the client a new `xdg_toplevel` size so it gets more real estate — more terminal rows, not
-bigger letters.
-
-Design as discussed: thicken the window border so it is a grabbable target, and give the left,
-right, bottom and bottom-corner zones their own cursor shapes, the way a 2D desktop does. The
-top is the title bar and already means "move".
-
-The zone test is arithmetic on the hit's UV and belongs next to `pointer::surface_position`,
-where it can be tested. Sizing it in *degrees* rather than UV fraction matters: the same
-fraction of a small window is a much smaller angle, and the border has to stay hittable with a
-head-anchored ray — the title bar already had to be widened from 7.5% to 11% for exactly this
-reason.
-
-A resize drag then wants `toplevel.with_pending_state(|s| s.size = Some(…))` plus
-`send_configure()`, and the world-space width should follow so the window's apparent size does
-not jump when the client commits its new buffer.
+- **Sidecar touch.** Discovery, opening and the `EVIOCGABS` ranges are confirmed on the real
+  panel (`cargo run --example touch-probe`, as root). What is not confirmed is the quarter
+  turn, and the libseat open inside a live session. The sidecar draws a dot under every
+  contact, which is the fastest way to tell the two apart: **no dot at all** means the device
+  never opened; **a dot that mirrors the finger along one axis** means the turn in
+  `Sidecar::touch_to_layout` has a sign wrong. Those are different bugs and they look
+  identical from a description.
+- **Window resize.** The frame renders at the right thickness (checked with the snapshot
+  renderer) and the arithmetic is tested, but no edge has been dragged.
 
 ### Games
 
@@ -141,3 +119,12 @@ Worth keeping, because each was invisible from the outside and none would be gue
 - MCU length fields count themselves. The controller's do not.
 - One degree is about 2% of a window's height at 2.2 m. Anything sized as a fraction of
   something else needs checking in degrees before it is called a target.
+- **Build in the `holo` distrobox, not `spatiand`.** Both were made from `archlinux:latest`,
+  but at different times: `holo` has glibc 2.41 and `spatiand` has 2.44, against SteamOS's
+  2.41. A binary from the newer box builds perfectly and then dies on launch with
+  `GLIBC_2.43 not found`, which reads as a broken build rather than an old host.
+  `tools/setup-buildbox.sh` now checks this instead of printing it. `holo` needs
+  `PATH=$HOME/.cargo/bin:$PATH` and its own `CARGO_TARGET_DIR` — the two boxes cannot share
+  one, the fingerprints collide and the second gets a permission error.
+- Rotating a basis by reusing the axis you just rotated is not a rotation, it is a skew. Both
+  new axes have to come from the old pair.

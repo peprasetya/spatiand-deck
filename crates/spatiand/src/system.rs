@@ -226,6 +226,23 @@ pub fn volume() -> Option<f32> {
     parse_volume(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Set the output volume, as a fraction.
+///
+/// Capped at 1.0 rather than passing the slider's value straight through. `wpctl` will happily
+/// go above unity, and a slider whose right-hand end is 150% has most of its travel in the
+/// range where the Deck's speakers distort.
+pub fn set_volume(level: f32) {
+    let level = level.clamp(0.0, 1.0);
+    let result = std::process::Command::new("wpctl")
+        .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{level:.3}")])
+        .status();
+    match result {
+        Ok(status) if !status.success() => log::warn!("wpctl set-volume failed: {status}"),
+        Err(e) => log::warn!("could not run wpctl: {e}"),
+        _ => {}
+    }
+}
+
 /// `wpctl` prints `Volume: 0.45` or `Volume: 0.45 [MUTED]`.
 pub fn parse_volume(text: &str) -> Option<f32> {
     let value = text.split_whitespace().nth(1)?;

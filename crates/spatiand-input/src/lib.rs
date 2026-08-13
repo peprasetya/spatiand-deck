@@ -12,6 +12,8 @@
 //! * [`gesture`] — two-thumb pan and scale, a pure state machine.
 //! * [`takeover`] — the feature reports that claim the device. The only part that must talk
 //!   to a real controller.
+//! * [`touch`] — a touchscreen, via evdev. The one device here the kernel already decodes
+//!   properly, and the only one found by capability rather than by vendor id.
 //!
 //! [`DeckController`] is the thin layer that joins them to a file descriptor.
 
@@ -24,11 +26,13 @@ pub mod haptics;
 pub mod layout;
 pub mod report;
 pub mod takeover;
+pub mod touch;
 
 pub use gesture::{GestureDelta, TwoPadGesture};
 pub use haptics::{Feel, Pad as HapticPad};
 pub use layout::{Confidence, Control};
 pub use report::{Buttons, ControllerState, Pad};
+pub use touch::{Contact, TouchEvent, Touchscreen};
 
 /// Valve's vendor/product for the Deck's built-in controls.
 const VALVE_VID: u16 = 0x28DE;

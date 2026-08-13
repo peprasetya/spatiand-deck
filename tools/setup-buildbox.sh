@@ -65,8 +65,26 @@ INNER
 distrobox enter --name "$BOX" -- bash /tmp/buildbox-inner.sh
 
 echo
-echo "== host glibc (must be >= the container's) =="
-pacman -Q glibc
+echo "== glibc =="
+# The binary is built in the container and run on the host, so the host's glibc has to be at
+# least the container's. Arch tracks glibc closely and SteamOS does not, so a box built from
+# `archlinux:latest` drifts ahead within a few months and then produces binaries that die on
+# launch with `version GLIBC_2.xx not found` — which looks like a broken build, not an old OS.
+#
+# Checked rather than printed. This was a printed warning and it was read exactly as often as
+# printed warnings are.
+host_glibc=$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')
+box_glibc=$(distrobox enter --name "$BOX" -- bash -c "ldd --version | head -1" 2>/dev/null |
+    grep -oE '[0-9]+\.[0-9]+$')
+echo "  host      $host_glibc"
+echo "  container $box_glibc"
+if [ -n "$host_glibc" ] && [ -n "$box_glibc" ] &&
+    [ "$(printf '%s\n%s\n' "$host_glibc" "$box_glibc" | sort -V | tail -1)" != "$host_glibc" ]; then
+    echo
+    echo "  !! The container is AHEAD of the host. Binaries built here will not run on SteamOS."
+    echo "     Either rebuild the box from an older archlinux image, or build in a box whose"
+    echo "     glibc is <= $host_glibc."
+fi
 echo
 echo "Build with:"
 echo "  distrobox enter --name $BOX -- bash -c 'cd ~/spatiand && cargo build --release'"
