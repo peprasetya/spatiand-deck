@@ -80,6 +80,16 @@ const MAX_PAD_STEP: f64 = 0.25;
 /// The glasses stream at about a kilohertz, so a second of nothing is already thousands of
 /// missing samples. Three is generous enough to survive a stall without flapping.
 const IMU_SILENCE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// A gap between poll attempts longer than this means *we* stopped asking, not that the
+/// headset stopped answering.
+///
+/// The silence watchdog reads "time since the last sample arrived", which is the right
+/// question only while we are actually reading. Under a heavy client -- a browser running a
+/// speed test was the case that found this -- the render loop can stall for seconds, and the
+/// watchdog then blames the glasses for our own pause and tears down a healthy headset. The
+/// world disappears mid-use, which is indistinguishable from a crash to anyone wearing it.
+const POLL_STALL_FORGIVENESS: Duration = Duration::from_millis(500);
 const PANEL_WIDTH: f32 = 0.9;
 
 /// How long to wait for the glasses' stereo mode to appear on the connector.
@@ -156,6 +166,8 @@ pub fn run(
     // show digits nobody can read that fast. Recompute it a few times a second instead; the
     // "only rebuild when the text changes" check is right, it was the text that was wrong.
     let mut last_status_update = std::time::Instant::now();
+    // When we last got as far as polling the headset. See [`POLL_STALL_FORGIVENESS`].
+    let mut last_poll_attempt = std::time::Instant::now();
     let mut status_text = String::new();
     let mut controller = spatiand_input::DeckController::open();
     if controller.is_none() {
@@ -703,10 +715,22 @@ pub fn run(
                             // for finding out, and a restart undoes it.
                             let swapped = tracker.axes().next_pitch_roll_variant();
                             tracker.set_axes(swapped);
+                            // Logged in full, because whichever option the wearer stops on is
+                            // the answer calibration should have produced by itself. Comparing
+                            // this line with the "calibration built" line from the same
+                            // session is what turns a recurring argument into a diff.
                             log::info!(
-                                "axes option {} of 4: {} (this run only; recalibrate to keep it)",
+                                "axes option {} of 4: {} (this run only; recalibrate to keep it) \
+                                 -- if this is the one that feels right, it is what calibration \
+                                 should have produced: yaw {}{} pitch {}{} roll {}{}",
                                 swapped.variant_index() + 1,
                                 swapped.summary(),
+                                if swapped.yaw_sign < 0.0 { "-" } else { "+" },
+                                swapped.yaw_axis,
+                                if swapped.pitch_sign < 0.0 { "-" } else { "+" },
+                                swapped.pitch_axis,
+                                if swapped.roll_sign < 0.0 { "-" } else { "+" },
+                                swapped.roll_axis,
                             );
                         }
                         HudAction::ReturnToDesktop => leaving = true,
@@ -741,6 +765,15 @@ pub fn run(
             // renders, everything looks healthy, and nothing responds. Reopening costs a
             // fraction of a second and is always the right answer -- the device is either
             // wedged or something has told it to stop streaming.
+            // Forgive time we spent not asking, so the watchdog only ever measures the
+            // device's silence and never our own.
+            let stall = last_poll_attempt.elapsed();
+            if stall > POLL_STALL_FORGIVENESS {
+                log::debug!("render loop stalled for {stall:?}; not counting it against the IMU");
+                last_imu = (last_imu + stall).min(std::time::Instant::now());
+            }
+            last_poll_attempt = std::time::Instant::now();
+
             if hmd.is_some() && last_imu.elapsed() >= IMU_SILENCE_TIMEOUT {
                 log::warn!(
                     "no IMU samples for {:?}; reopening the headset",

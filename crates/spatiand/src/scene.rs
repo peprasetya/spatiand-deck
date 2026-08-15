@@ -745,13 +745,14 @@ impl Scene {
         // The description is wrapped to the *rows'* measure, not the panel's maximum, so it
         // can never widen the panel -- and smaller, because it is reference material read once
         // rather than the thing being chosen between.
+        // Padded to the same width as the rows, for the same reason they are.
+        //
+        // Fixing only the rows was half a fix: the description is a different length for every
+        // item, and the panel's height is computed from *both* images' aspects, so a shorter
+        // description still resized the panel — just less obviously than the marker did, and
+        // only when moving between items rather than within them.
         let detail_image = (!detail.is_empty()).then(|| {
-            text.render(
-                detail,
-                px_per_degree * 0.72,
-                rows.width.max(64),
-                [176, 190, 216, 255],
-            )
+            text.render_padded(detail, px_per_degree * 0.72, panel_width, [176, 190, 216, 255])
         });
 
         let old = (self.menu.take(), self.menu_detail.take());
@@ -912,18 +913,27 @@ impl Scene {
         // The panel's width comes from the ROWS, and the description is laid out inside it.
         // Sizing from a combined image let the description -- always the longest line -- set
         // the width, so the whole panel shrank to fit the field and took the rows with it.
-        let ratio = self.menu_detail_ratio.clamp(0.01, 1.0);
         let gap_fraction = 0.12f32;
-        // Total height in units of the panel's width, so a single fit solves for both blocks.
-        let mut height_per_width = 1.0 / rows.aspect.max(0.01);
-        if let Some(detail) = self.menu_detail {
-            height_per_width += gap_fraction / rows.aspect.max(0.01);
-            height_per_width += ratio / detail.aspect.max(0.01);
-        }
-        let (width, total_height) =
-            fit_to_fov(1.0 / height_per_width, fov.0, fov.1, distance);
+        // The width comes from the ROWS ALONE, and nothing else is allowed to influence it.
+        //
+        // Fitting the rows and the description together as one block meant the description's
+        // height fed back into the width: a longer description made the block taller, and
+        // fitting a taller block into the same field made it narrower. So the panel changed
+        // width when moving between items even after the rows themselves were a fixed size.
+        // Height may vary — a longer description is genuinely taller — but width must not,
+        // because width is what the eye reads as the panel's identity.
+        //
+        // Two thirds of the vertical field for the rows leaves room for the description
+        // underneath without the two competing for it.
+        let (width, rows_height) = fit_to_fov(rows.aspect.max(0.01), fov.0, fov.1 * 0.62, distance);
 
-        let rows_height = width / rows.aspect.max(0.01);
+        let mut total_height = rows_height;
+        if let Some(detail) = self.menu_detail {
+            // Both images are padded to the same width, so the description occupies the full
+            // panel and its height follows from its own aspect.
+            total_height += rows_height * gap_fraction;
+            total_height += width / detail.aspect.max(0.01);
+        }
         let centre = self.menu_centre(distance);
         let quat = self.anchor_quat();
         let up = quat * Vec3::Z;
@@ -951,7 +961,7 @@ impl Scene {
         );
 
         if let Some(detail) = self.menu_detail {
-            let detail_width = width * ratio;
+            let detail_width = width;
             let detail_height = detail_width / detail.aspect.max(0.01);
             let detail_centre = centre + up * ((total_height * 0.5) - rows_height
                 - rows_height * gap_fraction

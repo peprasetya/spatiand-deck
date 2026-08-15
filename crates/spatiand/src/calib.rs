@@ -158,8 +158,24 @@ impl Calibration {
     }
 
     fn finish(&mut self) {
+        // The raw measurements, before anything interprets them.
+        //
+        // Pitch and roll have come out exchanged since the beginning of this project, and
+        // every attempt to reason it out from the conventions has been wrong, including
+        // several of mine. The three numbers below are the ground truth: which sensor axis
+        // dominated during each prompted motion, and by how much. With them, and with the
+        // variant the wearer ends up choosing, the correct mapping is arithmetic rather than
+        // argument -- and the argument has cost more than the measurement ever would.
+        for (phase, (axis, degrees)) in Phase::ALL.iter().zip(self.measured.iter()) {
+            log::info!(
+                "calibration measured {:?} (\"{}\") -> sensor axis {axis}, {degrees:+.1} deg",
+                phase,
+                phase.heading()
+            );
+        }
         match calibration::build(&self.measured) {
             Ok(map) => {
+                log::info!("calibration built: {}", map.summary());
                 self.result = Some(map);
                 match spatiand_track::config::save_axes(&map) {
                     Ok(path) => log::info!("calibration saved to {}: {}", path.display(), map.summary()),
