@@ -35,11 +35,16 @@ pub enum HudAction {
     /// 3DoF headset, because yaw drift is bounded but never zero.
     Recentre,
     /// Re-run the in-world axis calibration.
+    ///
+    /// There is deliberately no companion control for stepping through pitch/roll
+    /// interpretations. One existed, and it was a symptom: the sensor convention was being
+    /// treated as something to be guessed at per wearer when it is a fact about where the IMU
+    /// is soldered. It now comes from the device table, so there is nothing to step through —
+    /// see `AxisMap::from_mounting`. This entry is for hardware whose mounting nobody has
+    /// measured yet, which is the only case left that needs it.
     Calibrate,
     /// Save what the wearer is looking at, so a problem can be shown rather than described.
     Screenshot,
-    /// Step to the next of the four valid pitch/roll interpretations.
-    CyclePitchRoll,
     /// Show or hide the on-screen keyboard.
     ToggleKeyboard,
     /// Cycle the 360 environment.
@@ -99,11 +104,6 @@ impl Hud {
                 label: "Keyboard",
                 detail: "Show a keyboard you can point at and click",
                 action: HudAction::ToggleKeyboard,
-            },
-            HudItem {
-                label: "Try pitch and roll",
-                detail: "Next of four, for this run only. Recalibrate to keep one",
-                action: HudAction::CyclePitchRoll,
             },
             HudItem {
                 label: "Take a screenshot",

@@ -696,42 +696,6 @@ pub fn run(
                             keyboard.open = !keyboard.open;
                             log::info!("keyboard {}", if keyboard.open { "shown" } else { "hidden" });
                         }
-                        HudAction::CyclePitchRoll => {
-                            // Applied live, and deliberately **not** saved.
-                            //
-                            // It used to save on every press, and that turned one stray press
-                            // into a permanent fault. A wrong pitch/roll interpretation is a
-                            // valid rotation with determinant +1, so nothing downstream can
-                            // notice; the only symptom is that nodding rolls the world, and
-                            // the only way to find out is to put the glasses on. Restarting
-                            // did not help either, because the stored map beats the measured
-                            // default -- so the wearer's own report was "it is swapped again",
-                            // three times over, with no way to get back.
-                            //
-                            // Recalibration is the thing that writes the map, and it is the
-                            // only thing that should: it is the one action where the wearer
-                            // has just demonstrated which motion is which. This control is
-                            // for finding out, and a restart undoes it.
-                            let swapped = tracker.axes().next_pitch_roll_variant();
-                            tracker.set_axes(swapped);
-                            // Logged in full, because whichever option the wearer stops on is
-                            // the answer calibration should have produced by itself. Comparing
-                            // this line with the "calibration built" line from the same
-                            // session is what turns a recurring argument into a diff.
-                            log::info!(
-                                "axes option {} of 4: {} (this run only; recalibrate to keep it) \
-                                 -- if this is the one that feels right, it is what calibration \
-                                 should have produced: yaw {}{} pitch {}{} roll {}{}",
-                                swapped.variant_index() + 1,
-                                swapped.summary(),
-                                if swapped.yaw_sign < 0.0 { "-" } else { "+" },
-                                swapped.yaw_axis,
-                                if swapped.pitch_sign < 0.0 { "-" } else { "+" },
-                                swapped.pitch_axis,
-                                if swapped.roll_sign < 0.0 { "-" } else { "+" },
-                                swapped.roll_axis,
-                            );
-                        }
                         HudAction::ReturnToDesktop => leaving = true,
                         HudAction::OpenSystemSettings(module) => {
                             let command = format!("kcmshell6 {module}");
@@ -947,8 +911,8 @@ pub fn run(
             scene.sync_menu(
                 &mut renderer,
                 &mut text,
-                &menu_text_with(&shell, Some(tracker.axes())),
-                &menu_detail(&shell, Some(tracker.axes())),
+                &menu_text(&shell),
+                &menu_detail(&shell),
                 ppd,
                 stereo.per_eye.0.saturating_sub(160).max(64),
             )?;
@@ -2010,14 +1974,6 @@ fn send_key(state: &mut Spatiand, evdev_code: u32, time_ms: u32) {
     }
 }
 
-/// The text of whichever menu is open, or empty in the world.
-///
-/// The HUD is rendered as one text panel rather than as a row of separate textures. At the
-/// resolution one eye actually resolves, a settings list *is* text — giving each row its own
-/// quad would buy nothing and cost a dozen uploads every time the cursor moved.
-pub fn menu_text(shell: &Shell) -> String {
-    menu_text_with(shell, None)
-}
 
 /// Decide which sensor axis convention to track with, now that a headset is open.
 ///
@@ -2087,24 +2043,19 @@ pub fn settle_axes(
 }
 
 /// The explanation under the menu, laid out separately so it cannot widen the panel.
-fn menu_detail(shell: &Shell, axes: Option<spatiand_track::AxisMap>) -> String {
+fn menu_detail(shell: &Shell) -> String {
     match shell.mode() {
-        Mode::Hud => {
-            let hud = shell.hud();
-            let mut out = hud.focused().detail.to_string();
-            if let Some(map) = axes {
-                if matches!(hud.focused().action, HudAction::CyclePitchRoll) {
-                    out.push_str(&format!("\n\nNow using option {} of 4.", map.variant_index() + 1));
-                }
-            }
-            out
-        }
+        Mode::Hud => shell.hud().focused().detail.to_string(),
         _ => String::new(),
     }
 }
 
-/// As [`menu_text`], but able to show live state the shell itself does not hold.
-fn menu_text_with(shell: &Shell, axes: Option<spatiand_track::AxisMap>) -> String {
+/// The text of whichever menu is open, or empty in the world.
+///
+/// The HUD is rendered as one text panel rather than as a row of separate textures. At the
+/// resolution one eye actually resolves, a settings list *is* text — giving each row its own
+/// quad would buy nothing and cost a dozen uploads every time the cursor moved.
+pub fn menu_text(shell: &Shell) -> String {
     match shell.mode() {
         Mode::World => String::new(),
         Mode::Hud => {

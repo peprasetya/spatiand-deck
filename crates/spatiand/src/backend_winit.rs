@@ -293,16 +293,6 @@ pub fn run(
                             }
                         }
                         // Nothing to hand back in a window on someone else's desktop.
-                        // Applied live and deliberately **not** saved, matching the DRM
-                        // backend. Persisting here turned one stray press into a permanent
-                        // fault: the result is a valid rotation, so nothing downstream can
-                        // notice, and the stored map then beat the correct built-in one on
-                        // every subsequent launch.
-                        HudAction::CyclePitchRoll => {
-                            let swapped = tracker.axes().next_pitch_roll_variant();
-                            tracker.set_axes(swapped);
-                            log::info!("axes now {} (this run only)", swapped.summary());
-                        }
                         HudAction::ToggleKeyboard | HudAction::ReturnToDesktop
                         | HudAction::Screenshot => {
                             log::info!("{action:?} does nothing in the nested backend");

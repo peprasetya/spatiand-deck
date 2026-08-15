@@ -1,6 +1,10 @@
 //! How the IMU's raw axes map onto head motion.
 //!
-//! The glasses do not publish their axis convention, so it is measured once and stored.
+//! The glasses do not publish their axis convention over USB, but it is a fixed property of
+//! how the IMU is mounted inside them — so for hardware anyone has measured it comes from the
+//! device table via [`AxisMap::from_mounting`], not from the wearer. Calibration is the
+//! fallback for headsets nobody has held, not the normal path.
+//!
 //! Ported from HoloFrame's `AxisMap.swift`, including the reasoning, because getting this
 //! wrong produces symptoms that look like filter bugs.
 //!
@@ -72,13 +76,13 @@ impl AxisMap {
     /// and tipping the nose down leaves the head-LEFT axis unchanged, which names it outright.
     /// Up is +Z, left is +X, and forward is therefore −Y.
     ///
-    /// This is the fallback when nothing is stored, in place of [`Self::IDENTITY`]. A generic
-    /// identity map is the *wrong* answer for the only hardware this runs on, and getting it
-    /// wrong is not subtle: looking down rolls the world instead of nodding it.
+    /// The same measurement now also lives in `devices.toml`, stated as the physical mounting
+    /// rather than as a sign convention, and that is what a running session actually uses —
+    /// see [`Self::from_mounting`], and the test asserting the two cannot drift apart. This
+    /// constant remains the last-resort default for the window before a headset is open.
     ///
-    /// It belongs in `devices.toml` alongside the other per-device facts once there is a
-    /// second headset to compare against; putting it there now would mean threading an
-    /// `AxisMap` through `spatiand-hmd`, which does not otherwise know the tracker exists.
+    /// A generic identity map is the *wrong* answer for this hardware, and getting it wrong is
+    /// not subtle: looking down rolls the world instead of nodding it.
     pub const XREAL_AIR: Self = Self {
         version: CURRENT_VERSION,
         yaw_axis: 2,
@@ -153,93 +157,6 @@ impl AxisMap {
             self.pitch_sign * a[self.pitch_axis], // +Y is pitch DOWN, measured DOWN
             self.yaw_sign * a[self.yaw_axis],     // +Z is yaw LEFT, measured LEFT
         )
-    }
-
-    /// Exchange the pitch and roll axes, keeping the frame right-handed.
-    ///
-    /// The one calibration mistake that is both easy to make and invisible to the measurement:
-    /// nodding and tilting are adjacent motions, and if the wearer performs one when asked for
-    /// the other, the two axes are recorded swapped. The resulting map is a perfectly valid
-    /// rotation with determinant +1, so nothing downstream can tell it is wrong -- it just
-    /// makes looking down roll the world and leaning pitch it.
-    ///
-    /// Note the sign flip. Exchanging two axes of a right-handed frame mirrors it, so one
-    /// sense must reverse to stay a rotation; without that this returns a map with determinant
-    /// −1, where gyro integration and gravity correction fight each other.
-    pub fn with_pitch_roll_swapped(self) -> Self {
-        Self {
-            pitch_axis: self.roll_axis,
-            pitch_sign: self.roll_sign,
-            roll_axis: self.pitch_axis,
-            roll_sign: -self.pitch_sign,
-            ..self
-        }
-    }
-
-    /// The next of the four pitch/roll interpretations, leaving yaw alone.
-    ///
-    /// With the yaw axis settled there are **exactly four** maps that are proper rotations.
-    /// `apply` reads `out.x = -roll_sign * a[roll_axis]` and `out.y = pitch_sign *
-    /// a[pitch_axis]`, so the 2x2 block over the remaining sensor axes must have determinant
-    /// +1, which allows:
-    ///
-    /// | roll | pitch | constraint |
-    /// |---|---|---|
-    /// | axis A | axis B | `roll_sign * pitch_sign = -1` |
-    /// | axis B | axis A | `roll_sign * pitch_sign = +1` |
-    ///
-    /// Two sign choices each. Nothing else is a rotation — inverting a single sense flips the
-    /// determinant and gives a mirrored frame, where gyro integration and gravity correction
-    /// fight each other and the symptoms read as drift rather than as a bad axis.
-    ///
-    /// This exists because calibration cannot reliably pick between them: performing the nod
-    /// or the tilt slightly off-axis yields a different member of the set, and every one of
-    /// them passes every check. Cycling and looking is the only way to settle it.
-    pub fn next_pitch_roll_variant(self) -> Self {
-        let variants = self.pitch_roll_variants();
-        let current = variants
-            .iter()
-            .position(|v| v.pitch_axis == self.pitch_axis
-                && v.pitch_sign == self.pitch_sign
-                && v.roll_axis == self.roll_axis
-                && v.roll_sign == self.roll_sign)
-            .unwrap_or(0);
-        variants[(current + 1) % variants.len()]
-    }
-
-    /// All four, in a stable order.
-    pub fn pitch_roll_variants(self) -> [Self; 4] {
-        // The two sensor axes that are not yaw.
-        let mut others = [0usize, 1, 2]
-            .into_iter()
-            .filter(|a| *a != self.yaw_axis)
-            .collect::<Vec<_>>();
-        others.sort_unstable();
-        let (a, b) = (others[0], others[1]);
-        let make = |roll_axis, roll_sign, pitch_axis, pitch_sign| Self {
-            roll_axis,
-            roll_sign,
-            pitch_axis,
-            pitch_sign,
-            ..self
-        };
-        [
-            make(a, -1.0, b, 1.0),
-            make(b, 1.0, a, 1.0),
-            make(a, 1.0, b, -1.0),
-            make(b, -1.0, a, -1.0),
-        ]
-    }
-
-    /// Which of [`Self::pitch_roll_variants`] this is, for showing in the HUD.
-    pub fn variant_index(self) -> usize {
-        self.pitch_roll_variants()
-            .iter()
-            .position(|v| v.pitch_axis == self.pitch_axis
-                && v.pitch_sign == self.pitch_sign
-                && v.roll_axis == self.roll_axis
-                && v.roll_sign == self.roll_sign)
-            .unwrap_or(0)
     }
 
     /// +1 for a proper rotation, −1 for a mirrored frame.
@@ -362,133 +279,29 @@ mod tests_mounting {
 }
 
 #[cfg(test)]
-mod tests_swap {
+mod tests_measured {
     use super::*;
 
     #[test]
-    fn swapping_pitch_and_roll_stays_a_rotation() {
-        // A mirrored map is far worse than a swapped one: the filter fights itself and the
-        // symptoms look like drift rather than like a bad axis.
-        for map in [
-            AxisMap::IDENTITY,
-            AxisMap {
-                version: CURRENT_VERSION,
-                yaw_axis: 2,
-                yaw_sign: 1.0,
-                pitch_axis: 0,
-                pitch_sign: 1.0,
-                roll_axis: 1,
-                roll_sign: 1.0,
-            },
-        ] {
-            let swapped = map.with_pitch_roll_swapped();
-            assert!(
-                (swapped.determinant() - map.determinant()).abs() < 1e-9,
-                "handedness changed: {} -> {}",
-                map.determinant(),
-                swapped.determinant()
-            );
-            assert!(swapped.is_usable(), "{swapped:?} is not usable");
-        }
-    }
-
-    #[test]
     fn the_measured_map_is_a_usable_rotation() {
-        // It is the default now, so a mistake in transcribing it from the measurement would
-        // ship to everyone rather than to whoever recalibrated.
+        // Still the fallback for a headset with no mounting in the table, so a slip in
+        // transcribing it from the measurement would ship to everyone.
         assert!(AxisMap::XREAL_AIR.is_usable());
         assert!(AxisMap::XREAL_AIR.is_right_handed());
     }
 
     #[test]
     fn the_measured_map_is_not_the_generic_identity() {
-        // The whole point: the identity map differs from this hardware by exactly a pitch/roll
-        // exchange, which is why the wrong default produced "looking down rolls the world".
+        // The two differ by exactly a pitch/roll exchange, which is why the generic identity
+        // produced "looking down rolls the world" -- and why a stored copy of it, which is
+        // what was found on the wearer's Deck, survived every restart without anything
+        // downstream being able to object.
         assert_ne!(AxisMap::XREAL_AIR, AxisMap::IDENTITY);
         assert_eq!(
             AxisMap::XREAL_AIR.pitch_axis,
             AxisMap::IDENTITY.roll_axis,
             "the two differ by exchanging pitch and roll"
         );
-    }
-
-    #[test]
-    fn all_four_variants_are_proper_rotations() {
-        // The whole point: every option offered to the wearer must be a rotation. A mirrored
-        // map does not merely look wrong, it makes the filter fight itself.
-        for start in [AxisMap::IDENTITY] {
-            for v in start.pitch_roll_variants() {
-                assert!((v.determinant() - 1.0).abs() < 1e-9, "{v:?} has det {}", v.determinant());
-                assert!(v.is_usable(), "{v:?} is not usable");
-                assert_eq!(v.yaw_axis, start.yaw_axis, "yaw must not move");
-                assert_eq!(v.yaw_sign, start.yaw_sign);
-            }
-        }
-    }
-
-    #[test]
-    fn the_four_variants_are_distinct_and_cycle() {
-        let start = AxisMap::IDENTITY;
-        let mut seen = vec![start];
-        let mut current = start;
-        for _ in 0..3 {
-            current = current.next_pitch_roll_variant();
-            assert!(!seen.contains(&current), "{current:?} repeated early");
-            seen.push(current);
-        }
-        // Four steps must come back round, or the wearer can never return to a setting that
-        // worked.
-        assert_eq!(current.next_pitch_roll_variant(), start);
-    }
-
-    #[test]
-    fn the_default_and_the_measured_map_are_both_in_the_set() {
-        // Both have been seen on this hardware, and both were reported wrong at different
-        // times -- which is exactly why all four are offered rather than just these two.
-        let measured = AxisMap {
-            version: CURRENT_VERSION,
-            yaw_axis: 2,
-            yaw_sign: 1.0,
-            pitch_axis: 0,
-            pitch_sign: 1.0,
-            roll_axis: 1,
-            roll_sign: 1.0,
-        };
-        let set = AxisMap::IDENTITY.pitch_roll_variants();
-        assert!(set.contains(&AxisMap::IDENTITY), "default missing");
-        assert!(set.contains(&measured), "measured map missing: {set:?}");
-    }
-
-    #[test]
-    fn swapping_is_not_an_involution_and_the_caller_must_not_assume_it_is() {
-        // Worth pinning down, because it is surprising. Exchanging two axes of a right-handed
-        // frame mirrors it, so exactly one sign has to flip to stay a rotation -- and an
-        // operation that flips one sign cannot be its own inverse. Pressing the HUD toggle
-        // twice therefore lands on a *third* valid-but-wrong map, which is why the caller
-        // remembers the previous value instead of swapping again.
-        let twice = AxisMap::IDENTITY
-            .with_pitch_roll_swapped()
-            .with_pitch_roll_swapped();
-        assert_ne!(twice, AxisMap::IDENTITY);
-        // It is at least still a usable rotation, so a caller that gets this wrong produces a
-        // world that is oriented oddly rather than one that tears itself apart.
-        assert!(twice.is_usable());
-    }
-
-    #[test]
-    fn the_measured_map_swaps_to_the_device_default() {
-        // The specific case that prompted this: a calibration that recorded the nod and the
-        // tilt the wrong way round produces exactly the default map, swapped.
-        let measured = AxisMap {
-            version: CURRENT_VERSION,
-            yaw_axis: 2,
-            yaw_sign: 1.0,
-            pitch_axis: 0,
-            pitch_sign: 1.0,
-            roll_axis: 1,
-            roll_sign: 1.0,
-        };
-        assert_eq!(measured.with_pitch_roll_swapped(), AxisMap::IDENTITY);
     }
 }
 
