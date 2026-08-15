@@ -152,6 +152,26 @@ pub trait Hmd: Send {
 
     fn display_mode(&self) -> DisplayMode;
 
+    /// Panel brightness as 0..1, or [`HmdError::Unsupported`] if the device will not say.
+    ///
+    /// Glasses that have their own brightness buttons still want this: the wearer cannot see
+    /// the temple buttons while wearing them, and a slider on the Deck's panel is something
+    /// they can look down at. Callers should treat an error as "no such control" and leave the
+    /// row out, not as a failure worth reporting.
+    fn brightness(&mut self) -> Result<f32> {
+        Err(HmdError::Unsupported("brightness"))
+    }
+
+    /// Set panel brightness from 0..1, returning the level actually reached.
+    ///
+    /// Devices have a small number of steps rather than a continuum, so the value coming back
+    /// is usually not the value going in. Returning it rather than assuming keeps the slider
+    /// showing where the hardware really is.
+    fn set_brightness(&mut self, level: f32) -> Result<f32> {
+        let _ = level;
+        Err(HmdError::Unsupported("brightness"))
+    }
+
     /// Wait up to `timeout` for the next event. `Ok(None)` means the timeout expired with
     /// nothing to report, which is not an error.
     fn poll(&mut self, timeout: Duration) -> Result<Option<HmdEvent>>;

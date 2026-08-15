@@ -26,6 +26,21 @@ use crate::{
 // --- MCU (interface 4) ---
 const MCU_HEAD: u8 = 0xFD;
 const MSG_W_DISP_MODE: u16 = 0x0008;
+const MSG_R_BRIGHTNESS: u16 = 0x0003;
+const MSG_W_BRIGHTNESS: u16 = 0x0004;
+
+/// How many brightness steps the panel has, counting from zero.
+///
+/// `docs/xreal-air.md` marks the brightness messages **[driver]** — read out of the vendor
+/// driver's headers rather than seen on a wire — so unlike the display modes this has not been
+/// confirmed against hardware. Everything here treats a refusal as ordinary: a headset that
+/// does not answer simply reports no brightness, and the sidecar leaves the row out rather
+/// than drawing a control that does nothing.
+///
+/// It belongs in `devices.toml` beside the display modes once someone has actually watched the
+/// glasses step through it; putting an unmeasured number in the table would give four rows the
+/// same authority as the one fact in there that was measured.
+const BRIGHTNESS_LEVELS: u8 = 8;
 /// Bytes the MCU length field counts before the payload: itself (2) + timestamp (8)
 /// + msgid (2) + reserved (5).
 const MCU_LEN_OVERHEAD: u16 = 17;
@@ -148,6 +163,21 @@ impl XrealGlasses {
         packet
     }
 
+    /// A raw brightness step as 0..1.
+    ///
+    /// Steps run `0..BRIGHTNESS_LEVELS - 1` inclusive, so the divisor is one less than the
+    /// count — otherwise the top step reports as 7/8 and the slider can never reach its end.
+    fn brightness_to_unit(step: u8) -> f32 {
+        let top = (BRIGHTNESS_LEVELS - 1).max(1) as f32;
+        (step.min(BRIGHTNESS_LEVELS - 1) as f32 / top).clamp(0.0, 1.0)
+    }
+
+    /// The nearest raw step to a 0..1 request.
+    fn unit_to_brightness(level: f32) -> u8 {
+        let top = (BRIGHTNESS_LEVELS - 1).max(1) as f32;
+        (level.clamp(0.0, 1.0) * top).round() as u8
+    }
+
     /// Send an MCU command and wait for the device to echo its msgid back.
     ///
     /// Async events arriving in the meantime are handled rather than dropped, so a button
@@ -158,7 +188,7 @@ impl XrealGlasses {
         data: &[u8],
         what: &'static str,
         pending: &mut Vec<HmdEvent>,
-    ) -> Result<()> {
+    ) -> Result<Vec<u8>> {
         self.mcu.write_report(&Self::mcu_packet(msgid, data))?;
 
         let deadline = std::time::Instant::now() + Duration::from_millis(1500);
@@ -173,7 +203,8 @@ impl XrealGlasses {
             }
             let echoed = u16::from_le_bytes([buf[MCU_MSGID_OFFSET], buf[MCU_MSGID_OFFSET + 1]]);
             if echoed == msgid {
-                return Ok(());
+                // The payload of the reply, which a read command needs and a write ignores.
+                return Ok(buf.get(MCU_DATA_OFFSET..n).unwrap_or(&[]).to_vec());
             }
             if let Some(evt) = Self::decode_async(echoed, &buf[..n]) {
                 pending.push(evt);
@@ -297,7 +328,7 @@ impl Hmd for XrealGlasses {
         };
 
         let mut err = match self.mcu_command(MSG_W_DISP_MODE, &[primary], "display mode", &mut pending) {
-            Ok(()) => {
+            Ok(_) => {
                 self.mode = mode;
                 return Ok(mode);
             }
@@ -308,7 +339,7 @@ impl Hmd for XrealGlasses {
         if let Some(alt) = fallback {
             log::warn!("display mode {primary:#04x} not acknowledged ({err}); trying {alt:#04x}");
             match self.mcu_command(MSG_W_DISP_MODE, &[alt], "display mode (fallback)", &mut pending) {
-                Ok(()) => {
+                Ok(_) => {
                     self.mode = mode;
                     return Ok(mode);
                 }
@@ -320,6 +351,27 @@ impl Hmd for XrealGlasses {
 
     fn display_mode(&self) -> DisplayMode {
         self.mode
+    }
+
+    fn brightness(&mut self) -> Result<f32> {
+        let mut pending = Vec::new();
+        let reply = self.mcu_command(MSG_R_BRIGHTNESS, &[], "read brightness", &mut pending)?;
+        // Async pushes that arrived while waiting are dropped here rather than queued. This is
+        // called from a settings path, not the event loop, and a button press is reported again
+        // by the device's own state on the next poll.
+        let raw = *reply
+            .first()
+            .ok_or_else(|| HmdError::Protocol("brightness reply had no payload".into()))?;
+        Ok(Self::brightness_to_unit(raw))
+    }
+
+    fn set_brightness(&mut self, level: f32) -> Result<f32> {
+        let step = Self::unit_to_brightness(level);
+        let mut pending = Vec::new();
+        self.mcu_command(MSG_W_BRIGHTNESS, &[step], "set brightness", &mut pending)?;
+        // Report the step actually asked for rather than reading it back. A second round trip
+        // costs another 1.5 s worst case on a control the wearer is dragging.
+        Ok(Self::brightness_to_unit(step))
     }
 
     fn poll(&mut self, timeout: Duration) -> Result<Option<HmdEvent>> {
@@ -417,6 +469,37 @@ impl Drop for XrealGlasses {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brightness_reaches_both_ends_of_the_slider() {
+        // The off-by-one that makes a slider feel broken: dividing by the level *count* rather
+        // than the top level leaves the brightest step reading as 7/8, so dragging to the far
+        // right never fills the bar and the wearer keeps pushing at a control already at its
+        // limit.
+        assert_eq!(XrealGlasses::brightness_to_unit(0), 0.0);
+        assert_eq!(XrealGlasses::brightness_to_unit(BRIGHTNESS_LEVELS - 1), 1.0);
+        assert_eq!(XrealGlasses::unit_to_brightness(0.0), 0);
+        assert_eq!(XrealGlasses::unit_to_brightness(1.0), BRIGHTNESS_LEVELS - 1);
+    }
+
+    #[test]
+    fn every_step_survives_the_round_trip() {
+        // The sidecar shows the value it got back, so a step that does not map cleanly both
+        // ways would make the handle jump away from the finger that just placed it.
+        for step in 0..BRIGHTNESS_LEVELS {
+            let back = XrealGlasses::unit_to_brightness(XrealGlasses::brightness_to_unit(step));
+            assert_eq!(back, step, "step {step} came back as {back}");
+        }
+    }
+
+    #[test]
+    fn a_request_past_either_end_is_clamped_rather_than_wrapped() {
+        // A drag off the end of the bar produces these, and a u8 that wraps would turn "as dim
+        // as possible" into "as bright as possible" on a display strapped to someone's face.
+        assert_eq!(XrealGlasses::unit_to_brightness(-5.0), 0);
+        assert_eq!(XrealGlasses::unit_to_brightness(9.0), BRIGHTNESS_LEVELS - 1);
+        assert_eq!(XrealGlasses::brightness_to_unit(200), 1.0);
+    }
 
     #[test]
     fn mcu_packet_matches_the_documented_capture() {
