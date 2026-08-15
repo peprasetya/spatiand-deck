@@ -197,8 +197,13 @@ pub fn run(
     // taken this way, however permissive its mode bits.
     let mut touchscreen = open_touchscreen(&mut session.clone());
     let backlight = crate::system::Backlight::find();
-    let mut cached_volume = crate::system::volume();
-    let mut cached_brightness = backlight.as_ref().and_then(|b| b.level());
+    // What the sidecar shows and changes. Read here once so the panel has something to draw
+    // before the first two-second poll comes round; the glasses filled in when one is opened.
+    let mut levels = crate::sidecar::Levels {
+        screen: backlight.as_ref().and_then(|b| b.level()),
+        glasses: None,
+        volume: crate::system::volume(),
+    };
     let mut slow_status = std::time::Instant::now();
 
     // The shell — what is on screen and what a button means. Deliberately built once, outside
@@ -268,6 +273,20 @@ pub fn run(
             Ok(h) => {
                 log::info!("headset: {}", h.info().name);
                 settle_axes(h.info(), stored, &mut tracker, &mut calibration);
+                // Once, here, rather than on the sidecar's poll: an MCU exchange blocks for up
+                // to 1.5 s waiting for its ack, and the render loop cannot afford that twice a
+                // second. A headset that will not answer simply has no slider.
+                let mut h = h;
+                levels.glasses = match h.brightness() {
+                    Ok(level) => {
+                        log::info!("glasses brightness {:.0}%", level * 100.0);
+                        Some(level)
+                    }
+                    Err(e) => {
+                        log::info!("no glasses brightness control ({e})");
+                        None
+                    }
+                };
                 Some(h)
             }
             Err(e) => {
@@ -1443,8 +1462,12 @@ pub fn run(
                 monitors.tick();
                 if slow_status.elapsed() >= Duration::from_secs(2) {
                     slow_status = std::time::Instant::now();
-                    cached_volume = crate::system::volume();
-                    cached_brightness = backlight.as_ref().and_then(|b| b.level());
+                    levels.volume = crate::system::volume();
+                    levels.screen = backlight.as_ref().and_then(|b| b.level());
+                    // Not re-read from the glasses on this timer. Every MCU exchange waits up
+                    // to 1.5 s for an ack, and doing that twice a second on the render thread
+                    // would stall the frame loop far worse than a stale reading ever shows.
+                    // The value is read once when the headset opens and tracked from there.
                 }
 
                 // --- touch ---
@@ -1456,21 +1479,37 @@ pub fn run(
                 if let Some(touch) = touchscreen.as_mut() {
                     let events = touch.poll();
                     if !events.is_empty() {
-                        for knob in ui.touch(&events, cached_volume, cached_brightness) {
-                            let Some(value) = ui.knob_value(knob, cached_volume, cached_brightness)
-                            else {
+                        for knob in ui.touch(&events, levels) {
+                            let Some(value) = ui.knob_value(knob, levels) else {
                                 continue;
                             };
                             match knob {
                                 crate::sidecar::Knob::Volume => {
-                                    cached_volume = Some(value);
+                                    levels.volume = Some(value);
                                     crate::system::set_volume(value);
                                 }
-                                crate::sidecar::Knob::Brightness => {
-                                    cached_brightness = Some(value);
+                                crate::sidecar::Knob::Screen => {
+                                    levels.screen = Some(value);
                                     if let Some(b) = backlight.as_ref() {
                                         if let Err(e) = b.set(value) {
-                                            log::warn!("could not set brightness: {e}");
+                                            log::warn!("could not set screen brightness: {e}");
+                                        }
+                                    }
+                                }
+                                crate::sidecar::Knob::Glasses => {
+                                    // Show the finger's position straight away and correct it
+                                    // to whatever step the hardware settled on. The glasses
+                                    // have eight of them, so a drag that does not snap back
+                                    // would let the handle sit between two settings that do
+                                    // not exist.
+                                    levels.glasses = Some(value);
+                                    if let Some(h) = hmd.as_mut() {
+                                        match h.set_brightness(value) {
+                                            Ok(reached) => levels.glasses = Some(reached),
+                                            Err(e) => {
+                                                log::warn!("could not set glasses brightness: {e}");
+                                                levels.glasses = None;
+                                            }
                                         }
                                     }
                                 }
@@ -1478,34 +1517,18 @@ pub fn run(
                         }
                     }
                 }
-                let prepared = ui.prepare(
-                    &mut renderer,
-                    &mut text,
-                    &monitors,
-                    &status_text,
-                    cached_volume,
-                    cached_brightness,
-                );
+                let prepared = ui.prepare(&mut renderer, &mut text, &monitors, &status_text, levels);
                 let (sw, sh) = (side.size.0 as i32, side.size.1 as i32);
                 let fbo = side.fbo;
-                let white = scene.white_texture();
                 let quads = scene.quads();
-                let _ = white;
+                let rounded = scene.rounded();
                 renderer.with_context(|gl| unsafe {
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
                     gl.Disable(ffi::SCISSOR_TEST);
                     gl.Viewport(0, 0, sw, sh);
                     gl.ClearColor(0.02, 0.03, 0.05, 1.0);
                     gl.Clear(ffi::COLOR_BUFFER_BIT);
-                    ui.draw(
-                        gl,
-                        quads,
-                        &monitors,
-                        &status_text,
-                        cached_volume,
-                        cached_brightness,
-                        &prepared,
-                    );
+                    ui.draw(gl, quads, rounded, &monitors, levels, &prepared);
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
                 })?;
 

@@ -240,6 +240,92 @@ unsafe fn make_unit_quad(gl: &ffi::Gles2) -> UnitQuad {
     UnitQuad { vao, vbo }
 }
 
+/// A rounded rectangle, drawn from a signed distance field rather than from a texture.
+///
+/// Untextured, so the shape comes out of arithmetic on the fragment's position: no atlas, no
+/// nine-slice, and no distortion when a card is wide and short. Setting the radius to half the
+/// shorter side gives a capsule, and to half of a square gives a circle — which is where the
+/// touch dots and slider handles come from, rather than from a second asset that would have to
+/// be generated, uploaded and kept in step.
+///
+/// The edge is antialiased across one pixel. On a panel held at arm's length that is the whole
+/// difference between "drawn by a program" and "designed".
+const ROUNDED_FRAG: &str = r#"
+in vec2 v_uv;
+uniform vec4 u_tint;
+// Size of this quad in panel pixels, so the corner radius and the antialiased edge are both
+// measured in the units the layout is written in.
+uniform vec2 u_size;
+uniform float u_radius;
+out vec4 f_color;
+void main() {
+    vec2 half_size = u_size * 0.5;
+    // Distance from the centre, in pixels, folded into one quadrant by the symmetry.
+    vec2 d = abs((v_uv - 0.5) * u_size) - (half_size - vec2(u_radius));
+    float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - u_radius;
+    // One pixel of coverage either side of the boundary.
+    float alpha = 1.0 - smoothstep(-0.7, 0.7, dist);
+    f_color = vec4(u_tint.rgb, u_tint.a * alpha);
+}
+"#;
+
+pub struct RoundedPipeline {
+    program: u32,
+    vao: u32,
+    loc_mvp: i32,
+    loc_tint: i32,
+    loc_size: i32,
+    loc_radius: i32,
+}
+
+impl RoundedPipeline {
+    pub fn new(renderer: &mut GlesRenderer, quads: &QuadPipeline) -> Result<Self, String> {
+        let vao = quads.quad.vao;
+        renderer
+            .with_context(|gl| unsafe {
+                let program = link(gl, QUAD_VERT, ROUNDED_FRAG)?;
+                let name = |s: &str| std::ffi::CString::new(s).unwrap();
+                let at = |s: &str| gl.GetUniformLocation(program, name(s).as_ptr());
+                Ok(Self {
+                    program,
+                    vao,
+                    loc_mvp: at("u_mvp"),
+                    loc_tint: at("u_tint"),
+                    loc_size: at("u_size"),
+                    loc_radius: at("u_radius"),
+                })
+            })
+            .map_err(|e| format!("no GL context: {e}"))?
+    }
+
+    /// Draw one rounded rectangle. `size` is in the same pixels the radius is given in.
+    ///
+    /// # Safety
+    /// Must be called with the GL context current.
+    pub unsafe fn draw(
+        &self,
+        gl: &ffi::Gles2,
+        mvp: &Mat4,
+        tint: [f32; 4],
+        size: (f32, f32),
+        radius: f32,
+    ) {
+        gl.UseProgram(self.program);
+        gl.BindVertexArray(self.vao);
+        gl.Enable(ffi::BLEND);
+        gl.BlendFunc(ffi::SRC_ALPHA, ffi::ONE_MINUS_SRC_ALPHA);
+        gl.UniformMatrix4fv(self.loc_mvp, 1, ffi::FALSE, mvp.to_cols_array().as_ptr());
+        gl.Uniform4f(self.loc_tint, tint[0], tint[1], tint[2], tint[3]);
+        gl.Uniform2f(self.loc_size, size.0.abs(), size.1.abs());
+        // A radius past half the shorter side would make the distance field fold back on
+        // itself and pinch the shape; clamping means "very round" is expressible as a large
+        // number rather than as an exact one the caller has to work out.
+        gl.Uniform1f(self.loc_radius, radius.min(size.0.abs().min(size.1.abs()) * 0.5));
+        gl.DrawArrays(ffi::TRIANGLES, 0, 6);
+        gl.BindVertexArray(0);
+    }
+}
+
 pub struct QuadPipeline {
     program: u32,
     quad: UnitQuad,

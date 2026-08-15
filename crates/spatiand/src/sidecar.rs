@@ -20,19 +20,37 @@ use crate::system::{Monitors, Series};
 
 use smithay::backend::renderer::gles::ffi;
 
-/// Colours, in the same family as the world's glass.
-const INK: [f32; 4] = [0.88, 0.92, 1.0, 1.0];
-const DIM: [f32; 4] = [0.55, 0.62, 0.78, 1.0];
-const PLATE: [f32; 4] = [0.06, 0.08, 0.13, 0.92];
-const ACCENT: [f32; 4] = [0.45, 0.72, 1.0, 1.0];
+/// Colours.
+///
+/// A near-black ground with cards lifted off it by a few percent of white, one accent, and
+/// two weights of text. The previous set painted every row a solid mid-blue plate, which is
+/// why the panel read as an instrument rather than as something anyone would want to look at:
+/// with no dark ground there is nothing for a bright value to be bright *against*.
+const INK: [f32; 4] = [0.94, 0.96, 1.0, 1.0];
+const DIM: [f32; 4] = [0.62, 0.67, 0.78, 1.0];
+const GROUND: [f32; 4] = [0.035, 0.04, 0.055, 1.0];
+/// Cards, and the unfilled part of a slider track. Barely there on purpose — enough to say
+/// where a thing begins and ends, not enough to compete with its contents.
+const CARD: [f32; 4] = [1.0, 1.0, 1.0, 0.055];
+const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.13];
+const ACCENT: [f32; 4] = [0.42, 0.68, 1.0, 1.0];
+/// The graph fill, and the same colour again at a fraction of its alpha for the area under it.
+const GRAPH_INK: [f32; 4] = [0.42, 0.68, 1.0, 0.85];
 
-/// Row heights and gaps, in landscape pixels. Named because the hit test has to agree with
-/// the drawing exactly, and two copies of `34.0` do not stay equal.
-const MARGIN: f32 = 34.0;
-const HEADER_HEIGHT: f32 = 74.0;
-const HEADER_GAP: f32 = 26.0;
-const GRAPH_HEIGHT: f32 = 132.0;
-const GRAPH_GAP: f32 = 18.0;
+/// Corner radii. Cards are gently rounded; anything that takes a touch is a full capsule,
+/// which is the difference the eye reads as "this one is a control".
+const CARD_RADIUS: f32 = 18.0;
+
+/// Layout, in landscape pixels. Named because the hit test has to agree with the drawing
+/// exactly, and two copies of `34.0` do not stay equal.
+const MARGIN: f32 = 40.0;
+const HEADER_HEIGHT: f32 = 96.0;
+const HEADER_GAP: f32 = 28.0;
+/// The gutter between the two columns.
+const COLUMN_GAP: f32 = 28.0;
+/// Padding inside a card, between its edge and its contents.
+const CARD_PAD: f32 = 22.0;
+const CARD_GAP: f32 = 18.0;
 
 /// How tall a touchable bar is drawn.
 ///
@@ -40,21 +58,34 @@ const GRAPH_GAP: f32 = 18.0;
 /// 0.118 mm and there are ~8.5 to the millimetre. A fingertip contact patch is 8–10 mm wide.
 /// The bars were 30 px — 3.5 mm — when nothing could touch them, which was fine for something
 /// only being read and far too thin for something being aimed at.
-const BAR_HEIGHT: f32 = 56.0;
-const BAR_GAP: f32 = 14.0;
+const BAR_HEIGHT: f32 = 26.0;
+/// Text sizes. A card's reading is deliberately about twice its name: at arm's length on an
+/// 800-pixel panel the number is the only part anyone actually reads, and setting the two at
+/// the same weight is what made the old panel look like a log file.
+const HEADER_TEXT: f32 = 46.0;
+const LABEL_TEXT: f32 = 24.0;
+const VALUE_TEXT: f32 = 44.0;
 
-/// Extra height, above and below, that counts as a hit but is not drawn.
-///
-/// 10 px each side takes the target to 76 px ≈ 9 mm, which is a finger. Growing the *drawn*
-/// bar to that instead would make two chunky slabs the eye reads as the main content, when
-/// they are the least important thing on the screen.
-const BAR_TOUCH_SLOP: f32 = 10.0;
 
 /// The lowest the brightness slider will go.
 ///
 /// Not a taste decision. At zero the panel is dark, and the control you need in order to
 /// undo that is drawn on it.
 const MINIMUM_BRIGHTNESS: f32 = 0.05;
+
+/// One piece of text, positioned and rasterised, ready to draw.
+///
+/// A struct rather than the tuple this used to be. It grew a colour when labels and readings
+/// stopped being the same weight, and at six positional fields the two `f32` coordinates and
+/// the `f32` height were one careless reorder away from silently swapping.
+pub struct Label {
+    /// Texture id and aspect ratio.
+    pub texture: (u32, f32),
+    pub x: f32,
+    pub y: f32,
+    pub height: f32,
+    pub colour: [f32; 4],
+}
 
 /// A rectangle in landscape pixels, origin top left.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,15 +101,6 @@ impl Rect {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 
-    /// The same rectangle, grown by `pad` top and bottom.
-    fn taller(&self, pad: f32) -> Self {
-        Self {
-            y: self.y - pad,
-            h: self.h + pad * 2.0,
-            ..*self
-        }
-    }
-
     /// Where `x` sits across the rectangle, 0..1.
     fn fraction(&self, x: f32) -> f32 {
         if self.w <= 0.0 {
@@ -91,8 +113,49 @@ impl Rect {
 /// Something on the sidecar a finger can change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Knob {
+    /// The Deck's own backlight.
+    Screen,
+    /// The headset's panel. The glasses have their own temple buttons for this, but nobody
+    /// can see a temple button while wearing them, whereas the Deck is right there to look
+    /// down at.
+    Glasses,
     Volume,
-    Brightness,
+}
+
+impl Knob {
+    /// In the order they are drawn.
+    pub const ALL: [Knob; 3] = [Knob::Screen, Knob::Glasses, Knob::Volume];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Knob::Screen => "Screen",
+            Knob::Glasses => "Glasses",
+            Knob::Volume => "Volume",
+        }
+    }
+}
+
+/// Everything the sidecar can both show and change, as it stands right now.
+///
+/// One struct rather than a parameter each, because `rows`, `touch`, `knob_value`, `prepare`
+/// and `draw` all need the same set and all have to agree about it. Three positional
+/// `Option<f32>` arguments threaded through five call sites is a swap waiting to happen, and
+/// the symptom would be the volume slider moving the backlight.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Levels {
+    pub screen: Option<f32>,
+    pub glasses: Option<f32>,
+    pub volume: Option<f32>,
+}
+
+impl Levels {
+    pub fn get(&self, knob: Knob) -> Option<f32> {
+        match knob {
+            Knob::Screen => self.screen,
+            Knob::Glasses => self.glasses,
+            Knob::Volume => self.volume,
+        }
+    }
 }
 
 /// Every row of the sidecar, worked out once.
@@ -103,18 +166,40 @@ pub enum Knob {
 /// broken digitiser rather than as arithmetic.
 pub struct Rows {
     pub header: Rect,
+    /// The left column, one card per measurement.
     pub graphs: [Rect; 3],
-    pub volume: Option<Rect>,
-    pub brightness: Option<Rect>,
+    /// The right column, one card per knob, indexed by [`Knob::ALL`]. `None` where the machine
+    /// has no reading to show — a slider that moves nothing is worse than an absent one.
+    pub sliders: [Option<Rect>; 3],
 }
 
 impl Rows {
+    /// The capsule inside a slider card that shows the value.
+    ///
+    /// Smaller than the card it sits in, and deliberately so: the *card* is the touch target,
+    /// which makes the thing a finger has to hit about four times the height of the thing the
+    /// eye has to read. Sizing a control by what a fingertip needs makes for a panel of chunky
+    /// slabs; sizing it by what it has to say makes for one nobody can hit.
+    pub fn track(card: Rect) -> Rect {
+        Rect {
+            x: card.x + CARD_PAD,
+            y: card.y + card.h - CARD_PAD - BAR_HEIGHT,
+            w: (card.w - CARD_PAD * 2.0).max(1.0),
+            h: BAR_HEIGHT,
+        }
+    }
+
+    pub fn slider(&self, knob: Knob) -> Option<Rect> {
+        let index = Knob::ALL.iter().position(|k| *k == knob)?;
+        self.sliders[index]
+    }
+
     /// Which knob is under a point, and where along it, in landscape pixels.
     pub fn knob_at(&self, x: f32, y: f32) -> Option<(Knob, f32)> {
-        for (knob, rect) in [(Knob::Volume, self.volume), (Knob::Brightness, self.brightness)] {
-            if let Some(rect) = rect {
-                if rect.taller(BAR_TOUCH_SLOP).contains(x, y) {
-                    return Some((knob, rect.fraction(x)));
+        for (knob, card) in Knob::ALL.into_iter().zip(self.sliders) {
+            if let Some(card) = card {
+                if card.contains(x, y) {
+                    return Some((knob, Self::track(card).fraction(x)));
                 }
             }
         }
@@ -194,34 +279,49 @@ impl Sidecar {
     }
 
     /// Where every row sits. See [`Rows`].
-    pub fn rows(&self, volume: Option<f32>, brightness: Option<f32>) -> Rows {
-        let (width, _) = self.size;
+    ///
+    /// Two columns of three cards, measurements on the left and controls on the right, under
+    /// a full-width header. The wearer's objection to the previous arrangement was that
+    /// everything ran the whole way across, and that is not only a matter of taste: a slider
+    /// 1200 px wide gives roughly twelve pixels per percent, so a thumb cannot place it to
+    /// better than a percent or two and the extra width buys nothing but the appearance of
+    /// technical seriousness. Half the width is still far finer than the ear or the eye can
+    /// tell apart, and it leaves room for the graphs to sit beside rather than below.
+    pub fn rows(&self, levels: Levels) -> Rows {
+        let (width, height) = self.size;
         let full = width - MARGIN * 2.0;
-        let mut y = MARGIN;
 
-        let header = Rect { x: MARGIN, y, w: full, h: HEADER_HEIGHT };
-        y += HEADER_HEIGHT + HEADER_GAP;
+        let header = Rect { x: MARGIN, y: MARGIN, w: full, h: HEADER_HEIGHT };
+        let top = MARGIN + HEADER_HEIGHT + HEADER_GAP;
 
-        let graphs = std::array::from_fn(|_| {
-            let r = Rect { x: MARGIN, y, w: full, h: GRAPH_HEIGHT };
-            y += GRAPH_HEIGHT + GRAPH_GAP;
-            r
-        });
+        let column = (full - COLUMN_GAP) * 0.5;
+        let right = MARGIN + column + COLUMN_GAP;
+        // Both columns take the same three rows, so the two line up across the gutter. A grid
+        // that agrees with itself is most of what separates this from the version that looked
+        // like a readout.
+        let available = (height - MARGIN - top).max(1.0);
+        let card = ((available - CARD_GAP * 2.0) / 3.0).max(1.0);
+        let slot = |x: f32, index: usize| Rect {
+            x,
+            y: top + (card + CARD_GAP) * index as f32,
+            w: column,
+            h: card,
+        };
 
-        // A bar exists only if there is a value for it: a brightness slider on a machine with
-        // no backlight control would be a control that does nothing, which is worse than an
-        // absent one.
-        let mut bar = |present: bool| -> Option<Rect> {
-            present.then(|| {
-                let r = Rect { x: MARGIN, y, w: full, h: BAR_HEIGHT };
-                y += BAR_HEIGHT + BAR_GAP;
+        let graphs = std::array::from_fn(|i| slot(MARGIN, i));
+
+        // Absent readings close up rather than leaving their slot empty: a gap in the middle
+        // of a column of three reads as something having failed to draw.
+        let mut next = 0usize;
+        let sliders = Knob::ALL.map(|knob| {
+            levels.get(knob).map(|_| {
+                let r = slot(right, next);
+                next += 1;
                 r
             })
-        };
-        let volume = bar(volume.is_some());
-        let brightness = bar(brightness.is_some());
+        });
 
-        Rows { header, graphs, volume, brightness }
+        Rows { header, graphs, sliders }
     }
 
     /// A touch, in the digitiser's 0..1, as a point in landscape pixels.
@@ -285,14 +385,9 @@ impl Sidecar {
     /// Returning actions rather than calling `wpctl` and writing to sysfs from here keeps this
     /// file about layout. It also means the whole interaction — where a finger landed, what it
     /// grabbed, what it dragged — is testable without a panel, a mixer or a backlight.
-    pub fn touch(
-        &mut self,
-        events: &[spatiand_input::TouchEvent],
-        volume: Option<f32>,
-        brightness: Option<f32>,
-    ) -> Vec<Knob> {
+    pub fn touch(&mut self, events: &[spatiand_input::TouchEvent], levels: Levels) -> Vec<Knob> {
         use spatiand_input::TouchEvent;
-        let rows = self.rows(volume, brightness);
+        let rows = self.rows(levels);
         let mut changed = Vec::new();
         for event in events {
             match *event {
@@ -338,23 +433,22 @@ impl Sidecar {
     ///
     /// Read from the finger's own position rather than passed along with the event, so that a
     /// drag which has wandered off the bar still tracks horizontally.
-    pub fn knob_value(&self, knob: Knob, volume: Option<f32>, brightness: Option<f32>) -> Option<f32> {
+    pub fn knob_value(&self, knob: Knob, levels: Levels) -> Option<f32> {
         let (slot, held) = self.held?;
         if held != knob {
             return None;
         }
         let (_, x, _) = self.touches.iter().find(|(s, _, _)| *s == slot)?;
-        let rows = self.rows(volume, brightness);
-        let rect = match knob {
-            Knob::Volume => rows.volume?,
-            Knob::Brightness => rows.brightness?,
-        };
-        let fraction = rect.fraction(*x);
+        let fraction = Rows::track(self.rows(levels).slider(knob)?).fraction(*x);
         Some(match knob {
             // A backlight dragged to zero turns off the screen the slider is drawn on, and
             // there is then nothing to see in order to drag it back. The floor is what makes
             // the control safe to explore.
-            Knob::Brightness => fraction.max(MINIMUM_BRIGHTNESS),
+            //
+            // The glasses get the same floor for the same reason turned around: the panel the
+            // wearer is actually looking through is the one that goes dark, and the control to
+            // undo it is on a screen behind their eyes.
+            Knob::Screen | Knob::Glasses => fraction.max(MINIMUM_BRIGHTNESS),
             Knob::Volume => fraction,
         })
     }
@@ -400,110 +494,113 @@ impl Sidecar {
         &mut self,
         gl: &ffi::Gles2,
         quads: &QuadPipeline,
+        rounded: &crate::gl::RoundedPipeline,
         monitors: &Monitors,
-        status: &str,
-        volume: Option<f32>,
-        brightness: Option<f32>,
-        prepared: &[(String, (u32, f32), f32, f32, f32)],
+        levels: Levels,
+        prepared: &[Label],
     ) {
         let layout = Layout {
             width: self.size.0,
             height: self.size.1,
         };
         let projection = self.projection();
+        // Every rounded shape goes through here, so the radius is always expressed in the same
+        // pixels as the rectangle it belongs to.
+        let round = |r: Rect, colour: [f32; 4], radius: f32| {
+            // SAFETY: same context as the rest of this function -- the caller has made the GL
+            // context current and bound the target. A closure inside an `unsafe fn` does not
+            // inherit that, so it is restated rather than assumed.
+            unsafe {
+                rounded.draw(gl, &(projection * layout.of(r)), colour, (r.w, r.h), radius);
+            }
+        };
 
-        // Backdrop.
+        // Backdrop. Flat and nearly black, so everything above it is what carries the light.
         quads.draw(
             gl,
             self.white,
             &(projection * layout.rect(0.0, 0.0, layout.width, layout.height)),
-            [0.02, 0.03, 0.05, 1.0],
+            GROUND,
             (0.0, 1.0),
         );
 
-        let rows = self.rows(volume, brightness);
+        let rows = self.rows(levels);
 
-        // Header plate.
-        quads.draw(gl, self.white, &(projection * layout.of(rows.header)), PLATE, (0.0, 1.0));
-        let _ = status;
+        // The header carries no card of its own. Text on the ground reads as a title; text on
+        // a plate reads as another row of data, and the clock is not data.
 
-        // Graphs.
-        for (series, rect) in [&monitors.cpu, &monitors.gpu, &monitors.memory]
+        for (series, card) in [&monitors.cpu, &monitors.gpu, &monitors.memory]
             .into_iter()
             .zip(rows.graphs)
         {
-            quads.draw(gl, self.white, &(projection * layout.of(rect)), PLATE, (0.0, 1.0));
-            self.draw_series(
-                gl,
-                quads,
-                &projection,
-                &layout,
-                series,
-                rect.x + 16.0,
-                rect.y + 10.0,
-                rect.w - 32.0,
-                rect.h - 20.0,
-            );
+            round(card, CARD, CARD_RADIUS);
+            // Leave the upper part of the card for the label and the reading; the history
+            // occupies the lower two thirds.
+            let plot = Rect {
+                x: card.x + CARD_PAD,
+                y: card.y + card.h * 0.42,
+                w: card.w - CARD_PAD * 2.0,
+                h: card.h * 0.58 - CARD_PAD,
+            };
+            self.draw_series(gl, quads, &projection, &layout, series, plot);
         }
 
-        // Volume and brightness. These are sliders now rather than readouts, so they are drawn
-        // with a handle: a filled bar alone says "this is how loud it is" where a handle says
-        // "this is how loud it is, and you may move it".
-        for (value, rect, colour) in [
-            (volume, rows.volume, ACCENT),
-            (brightness, rows.brightness, DIM),
-        ] {
-            let (Some(value), Some(rect)) = (value, rect) else {
+        for (knob, card) in Knob::ALL.into_iter().zip(rows.sliders) {
+            let (Some(card), Some(value)) = (card, levels.get(knob)) else {
                 continue;
             };
-            let value = value.clamp(0.0, 1.0);
-            quads.draw(gl, self.white, &(projection * layout.of(rect)), PLATE, (0.0, 1.0));
-            let inner = (rect.w - 8.0) * value;
-            quads.draw(
-                gl,
-                self.white,
-                &(projection * layout.rect(rect.x + 4.0, rect.y + 4.0, inner, rect.h - 8.0)),
-                colour,
-                (0.0, 1.0),
-            );
-            let handle = 10.0;
-            quads.draw(
-                gl,
-                self.white,
-                &(projection
-                    * layout.rect(
-                        rect.x + 4.0 + (inner - handle).max(0.0),
-                        rect.y + 2.0,
-                        handle,
-                        rect.h - 4.0,
-                    )),
+            round(card, CARD, CARD_RADIUS);
+
+            let track = Rows::track(card);
+            let radius = track.h * 0.5;
+            round(track, TRACK, radius);
+
+            // The filled part keeps the full capsule's radius so its left end stays round even
+            // when it is short, and never narrower than a full circle so that zero still shows
+            // a handle to grab rather than nothing at all.
+            let filled = Rect {
+                w: (track.w * value.clamp(0.0, 1.0)).max(track.h),
+                ..track
+            };
+            round(filled, ACCENT, radius);
+
+            // A handle, because a filled bar alone says "this is how loud it is" where a
+            // handle says "this is how loud it is, and you may move it".
+            let knob_size = track.h * 1.7;
+            round(
+                Rect {
+                    x: filled.x + filled.w - knob_size * 0.5,
+                    y: track.y + track.h * 0.5 - knob_size * 0.5,
+                    w: knob_size,
+                    h: knob_size,
+                },
                 INK,
-                (0.0, 1.0),
+                knob_size * 0.5,
             );
         }
 
         // Wherever a finger is. This is the only confirmation the panel gives that a touch
         // arrived at all, and it is what tells a wrong quarter turn from a dead digitiser:
         // a dot that mirrors the finger is a sign error, a dot that never appears is not.
+        //
+        // Round, because a fingertip is, and a square one looked like a rendering fault.
         for (_, x, y) in &self.touches {
-            let size = 40.0;
-            quads.draw(
-                gl,
-                self.white,
-                &(projection * layout.rect(x - size * 0.5, y - size * 0.5, size, size)),
-                [1.0, 1.0, 1.0, 0.28],
-                (0.0, 1.0),
+            let size = 56.0;
+            round(
+                Rect { x: x - size * 0.5, y: y - size * 0.5, w: size, h: size },
+                [1.0, 1.0, 1.0, 0.22],
+                size * 0.5,
             );
         }
 
-        // Text last, so it is never behind a plate.
-        for (_, (id, aspect), x, ty, height) in prepared {
-            let width = height * aspect.max(0.01);
+        // Text last, so it is never behind a card.
+        for label in prepared {
+            let width = label.height * label.texture.1.max(0.01);
             quads.draw(
                 gl,
-                *id,
-                &(projection * layout.rect(*x, *ty, width, *height)),
-                INK,
+                label.texture.0,
+                &(projection * layout.rect(label.x, label.y, width, label.height)),
+                label.colour,
                 (0.0, 1.0),
             );
         }
@@ -514,7 +611,6 @@ impl Sidecar {
     /// Drawn as one column per sample rather than a line: at this size a line is a single pixel
     /// that disappears against the plate, and a filled area reads as a shape from across a
     /// room, which is the whole point of putting it on a screen you glance at.
-    #[allow(clippy::too_many_arguments)]
     unsafe fn draw_series(
         &self,
         gl: &ffi::Gles2,
@@ -522,30 +618,35 @@ impl Sidecar {
         projection: &Mat4,
         layout: &Layout,
         series: &Series,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
+        plot: Rect,
     ) {
         let count = crate::system::HISTORY as f32;
-        let column = width / count;
+        let column = plot.w / count;
         for (i, value) in series.samples().enumerate() {
             // Right-aligned, so the newest sample is always at the same edge even before the
             // history has filled up. A left-aligned graph appears to scroll while filling and
             // then stops, which looks like it has frozen.
             let offset = count - series.len() as f32 + i as f32;
-            let bar = (value * height).max(1.0);
+            // Grows up from the floor of the plot. This looked inverted on the panel for a
+            // while -- 8% memory drawing tall bars and a 99% GPU drawing a hairline -- but the
+            // arithmetic here was right all along and the projection was reflected. See
+            // [`Sidecar::projection`].
+            let bar = (value.clamp(0.0, 1.0) * plot.h).max(1.5);
+            // A hairline gap between columns, so a flat reading is a texture rather than a
+            // solid block. Below about two pixels per column there is no room for one, and
+            // running them together is better than dropping every other bar.
+            let width = (column - 1.0).max(column * 0.6);
             quads.draw(
                 gl,
                 self.white,
                 &(*projection
                     * layout.rect(
-                        x + offset * column,
-                        y + height - bar,
-                        column.max(1.0),
+                        plot.x + offset * column,
+                        plot.y + plot.h - bar,
+                        width,
                         bar,
                     )),
-                [0.36, 0.62, 0.95, 0.85],
+                GRAPH_INK,
                 (0.0, 1.0),
             );
         }
@@ -561,51 +662,105 @@ impl Sidecar {
         text: &mut spatiand_render::TextRenderer,
         monitors: &Monitors,
         status: &str,
-        volume: Option<f32>,
-        brightness: Option<f32>,
-    ) -> Vec<(String, (u32, f32), f32, f32, f32)> {
-        let rows = self.rows(volume, brightness);
+        levels: Levels,
+    ) -> Vec<Label> {
+        let rows = self.rows(levels);
         let mut out = Vec::new();
+        // `x` is the left edge, or the right edge when `from_right`. Right alignment has to
+        // happen here rather than in `draw`, because the width of a piece of text is not known
+        // until it has been rasterised and its aspect measured.
         let mut push = |this: &mut Self,
                         renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
                         text: &mut spatiand_render::TextRenderer,
                         s: String,
                         x: f32,
                         y: f32,
-                        h: f32| {
+                        h: f32,
+                        from_right: bool,
+                        colour: [f32; 4]| {
+            // `s` is consumed here as the texture cache's key; nothing downstream needs the
+            // characters again, only the pixels they were rasterised into.
             if let Some(entry) = this.label(renderer, text, &s, h * 1.35) {
-                out.push((s, entry, x, y, h));
+                let x = if from_right { x - h * entry.1.max(0.01) } else { x };
+                out.push(Label { texture: entry, x, y, height: h, colour });
             }
         };
 
+        // The clock, large, on the ground rather than on a plate.
         let header = rows.header;
-        push(self, renderer, text, status.to_string(), header.x + 18.0, header.y + 20.0, 34.0);
+        push(
+            self,
+            renderer,
+            text,
+            status.to_string(),
+            header.x + 4.0,
+            header.y + (header.h - HEADER_TEXT) * 0.5,
+            HEADER_TEXT,
+            false,
+            INK,
+        );
 
-        for (series, rect) in [&monitors.cpu, &monitors.gpu, &monitors.memory]
+        // Every card reads the same way: what it is on the left, what it says on the right,
+        // the reading twice the size of its name. That consistency is most of what makes a
+        // panel scannable -- the eye learns one shape and then only has to find the numbers.
+        let mut card_heading = |this: &mut Self,
+                                renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+                                text: &mut spatiand_render::TextRenderer,
+                                card: Rect,
+                                name: String,
+                                reading: String| {
+            // The name is quieter than the reading. Two weights of the same colour family is
+            // what tells the eye which half of a card it is meant to land on.
+            push(
+                this,
+                renderer,
+                text,
+                name,
+                card.x + CARD_PAD,
+                card.y + CARD_PAD,
+                LABEL_TEXT,
+                false,
+                DIM,
+            );
+            push(
+                this,
+                renderer,
+                text,
+                reading,
+                card.x + card.w - CARD_PAD,
+                card.y + CARD_PAD - (VALUE_TEXT - LABEL_TEXT) * 0.5,
+                VALUE_TEXT,
+                true,
+                INK,
+            );
+        };
+
+        for (series, card) in [&monitors.cpu, &monitors.gpu, &monitors.memory]
             .into_iter()
             .zip(rows.graphs)
         {
-            push(
+            card_heading(
                 self,
                 renderer,
                 text,
-                format!("{}  {:.0}%", series.label, series.latest() * 100.0),
-                rect.x + 18.0,
-                rect.y + 8.0,
-                26.0,
+                card,
+                series.label.to_string(),
+                format!("{:.0}%", series.latest() * 100.0),
             );
         }
-        for (label, rect) in [
-            (volume.map(|v| format!("VOL {:.0}%", v * 100.0)), rows.volume),
-            (brightness.map(|b| format!("BRIGHT {:.0}%", b * 100.0)), rows.brightness),
-        ] {
-            let (Some(label), Some(rect)) = (label, rect) else {
+
+        for (knob, card) in Knob::ALL.into_iter().zip(rows.sliders) {
+            let (Some(card), Some(value)) = (card, levels.get(knob)) else {
                 continue;
             };
-            // Centred in the bar rather than at its top: the bar is tall enough to touch now,
-            // and text pinned to the top edge of a 56 px slab looks like it belongs to the row
-            // above it.
-            push(self, renderer, text, label, rect.x + 14.0, rect.y + (rect.h - 22.0) * 0.5, 22.0);
+            card_heading(
+                self,
+                renderer,
+                text,
+                card,
+                knob.label().to_string(),
+                format!("{:.0}%", value * 100.0),
+            );
         }
         out
     }
@@ -658,6 +813,15 @@ mod tests {
         let m = layout.rect(10.0, 20.0, 30.0, 40.0);
         let centre = m * Vec4::new(0.0, 0.0, 0.0, 1.0);
         assert_eq!((centre.x, centre.y), (25.0, 40.0));
+    }
+
+    /// Every reading present, which is the ordinary case in a session with glasses on.
+    fn all() -> Levels {
+        Levels {
+            screen: Some(0.5),
+            glasses: Some(0.5),
+            volume: Some(0.5),
+        }
     }
 
     /// Where the digitiser reports a given panel pixel, as normalised `(u, v)`.
@@ -740,7 +904,7 @@ mod tests {
         // drew a hairline, because every column hung from the ceiling of its row.
         let panel = (800u32, 1280u32);
         let s = sidecar(panel);
-        let row = s.rows(Some(0.5), Some(0.5)).graphs[0];
+        let row = s.rows(all()).graphs[0];
         let floor = draws_at(&s, panel, row.x, row.y + row.h);
         let small = draws_at(&s, panel, row.x, row.y + row.h - row.h * 0.1);
         let large = draws_at(&s, panel, row.x, row.y + row.h - row.h * 0.9);
@@ -749,6 +913,52 @@ mod tests {
             rise(large) > rise(small),
             "a bigger reading must reach further from the floor: 10% at {small:?}, 90% at {large:?}"
         );
+    }
+
+    #[test]
+    fn nothing_but_the_header_runs_the_full_width() {
+        // The wearer's objection to the old panel, as an assertion. Every graph and every
+        // slider used to span the whole content width, which is what made it read as a
+        // readout: six full-width bands stacked down the screen with nowhere for the eye to
+        // rest.
+        let s = sidecar((800, 1280));
+        let rows = s.rows(all());
+        let full = s.size.0 - MARGIN * 2.0;
+        for card in rows.graphs.into_iter().chain(rows.sliders.into_iter().flatten()) {
+            assert!(
+                card.w < full * 0.6,
+                "a card is {} wide of a possible {full}",
+                card.w
+            );
+        }
+        assert_eq!(rows.header.w, full, "the header is the one thing that should span");
+    }
+
+    #[test]
+    fn the_two_columns_line_up() {
+        // Graphs on the left, controls on the right, sharing three rows. A grid that agrees
+        // with itself across the gutter is most of the difference between this and the
+        // version that looked assembled out of whatever fitted.
+        let s = sidecar((800, 1280));
+        let rows = s.rows(all());
+        for (graph, slider) in rows.graphs.into_iter().zip(rows.sliders.into_iter().flatten()) {
+            assert_eq!(graph.y, slider.y, "rows should share a baseline");
+            assert_eq!(graph.h, slider.h);
+            assert!(graph.x + graph.w < slider.x, "the columns should not touch");
+        }
+    }
+
+    #[test]
+    fn a_slider_at_zero_still_shows_something_to_grab() {
+        // A filled bar of width zero is invisible, and the control then looks broken at
+        // exactly the moment someone wants to turn it back up.
+        let s = sidecar((800, 1280));
+        let card = s
+            .rows(Levels { volume: Some(0.0), ..all() })
+            .slider(Knob::Volume)
+            .expect("volume card");
+        let track = Rows::track(card);
+        assert!(track.h > 0.0 && track.w > track.h, "a track should be a capsule, not a dot");
     }
 
     #[test]
@@ -763,9 +973,16 @@ mod tests {
         // The bars grew from 30 px to 56 px to be touchable. There is no scrolling here, so a
         // row past the bottom edge is simply invisible.
         let s = sidecar((800, 1280));
-        let rows = s.rows(Some(0.5), Some(0.5));
-        let bottom = rows.brightness.expect("brightness row").y + BAR_HEIGHT;
-        assert!(bottom + MARGIN <= s.size.1, "content runs to {bottom} of {}", s.size.1);
+        let rows = s.rows(all());
+        for card in rows.graphs.into_iter().chain(rows.sliders.into_iter().flatten()) {
+            assert!(
+                card.y + card.h <= s.size.1 - MARGIN + 0.5,
+                "a card runs to {} of {}",
+                card.y + card.h,
+                s.size.1
+            );
+            assert!(card.x + card.w <= s.size.0 - MARGIN + 0.5, "a card runs off the side");
+        }
     }
 
     #[test]
@@ -773,34 +990,59 @@ mod tests {
         // knob_at walks them in order and returns the first hit, so an overlap would make one
         // control permanently unreachable.
         let s = sidecar((800, 1280));
-        let rows = s.rows(Some(0.5), Some(0.5));
-        let volume = rows.volume.expect("volume row");
-        let brightness = rows.brightness.expect("brightness row");
-        assert!(rows.graphs[2].y + rows.graphs[2].h <= volume.y);
-        assert!(volume.taller(BAR_TOUCH_SLOP).y + volume.taller(BAR_TOUCH_SLOP).h <= brightness.y);
+        let rows = s.rows(all());
+        let cards: Vec<Rect> = rows
+            .graphs
+            .into_iter()
+            .chain(rows.sliders.into_iter().flatten())
+            .collect();
+        for (i, a) in cards.iter().enumerate() {
+            for b in &cards[i + 1..] {
+                let apart = a.x + a.w <= b.x
+                    || b.x + b.w <= a.x
+                    || a.y + a.h <= b.y
+                    || b.y + b.h <= a.y;
+                assert!(apart, "{a:?} overlaps {b:?}");
+            }
+        }
     }
 
     #[test]
     fn a_touch_target_is_a_fingers_width() {
         // ~8.5 landscape pixels to the millimetre on this panel; a fingertip is 8-10 mm. The
         // original 30 px bar was 3.5 mm, which is a stylus target, not a thumb one.
+        //
+        // The drawn capsule is smaller than that now, and deliberately: the whole card takes
+        // the touch, so the thing being aimed at and the thing being read no longer have to be
+        // the same size. Measure the card, which is what a finger actually has to find.
+        let s = sidecar((800, 1280));
         let millimetre = 800.0 / 94.1;
-        let height = BAR_HEIGHT + BAR_TOUCH_SLOP * 2.0;
-        assert!(height / millimetre >= 8.0, "target is {} mm", height / millimetre);
+        for card in s.rows(all()).sliders.into_iter().flatten() {
+            let mm = card.h / millimetre;
+            assert!(mm >= 8.0, "{} is only {mm} mm tall", card.h);
+        }
     }
 
     #[test]
     fn an_absent_reading_leaves_out_the_row_it_would_control() {
-        // A machine with no backlight control should not offer a brightness slider that does
-        // nothing -- and the volume bar must not shift when it is absent.
+        // A machine with no backlight, or a session with no glasses, should not offer a
+        // slider that moves nothing.
         let s = sidecar((800, 1280));
-        let both = s.rows(Some(0.5), Some(0.5));
-        let volume_only = s.rows(Some(0.5), None);
-        assert!(volume_only.brightness.is_none());
-        assert_eq!(volume_only.volume, both.volume);
-        let neither = s.rows(None, None);
-        assert!(neither.volume.is_none() && neither.brightness.is_none());
-        assert!(neither.knob_at(400.0, 700.0).is_none());
+        let no_glasses = s.rows(Levels { glasses: None, ..all() });
+        assert!(no_glasses.slider(Knob::Glasses).is_none());
+        // The two that remain close up rather than leaving a hole where the third was.
+        assert_eq!(no_glasses.slider(Knob::Screen), s.rows(all()).slider(Knob::Screen));
+        assert_eq!(
+            no_glasses.slider(Knob::Volume),
+            s.rows(all()).slider(Knob::Glasses),
+            "volume should move up into the empty slot"
+        );
+
+        let none = s.rows(Levels::default());
+        assert!(Knob::ALL.into_iter().all(|k| none.slider(k).is_none()));
+        // Graphs do not depend on any of this, so they must be untouched.
+        assert_eq!(none.graphs, s.rows(all()).graphs);
+        assert!(none.knob_at(900.0, 400.0).is_none());
     }
 
     /// A press at a landscape point, as the decoder would report it.
@@ -836,11 +1078,14 @@ mod tests {
     #[test]
     fn touching_a_bar_sets_it_to_where_the_finger_is() {
         let mut s = sidecar((800, 1280));
-        let volume = s.rows(Some(0.5), Some(0.5)).volume.expect("volume row");
-        let quarter = volume.x + volume.w * 0.25;
-        let event = press(&s, 0, quarter, volume.y + volume.h * 0.5);
-        assert_eq!(s.touch(&[event], Some(0.5), Some(0.5)), vec![Knob::Volume]);
-        let value = s.knob_value(Knob::Volume, Some(0.5), Some(0.5)).expect("a value");
+        let card = s.rows(all()).slider(Knob::Volume).expect("volume card");
+        // A quarter of the way along the *track*, not the card. The card is what the finger
+        // has to hit; the track is what the value is measured across, and they are not the
+        // same rectangle.
+        let track = Rows::track(card);
+        let event = press(&s, 0, track.x + track.w * 0.25, card.y + card.h * 0.5);
+        assert_eq!(s.touch(&[event], all()), vec![Knob::Volume]);
+        let value = s.knob_value(Knob::Volume, all()).expect("a value");
         assert!((value - 0.25).abs() < 0.02, "got {value}");
     }
 
@@ -849,23 +1094,24 @@ mod tests {
         // Every slider anywhere behaves this way, and on a 9 mm target a thumb drifts off it
         // constantly. Re-testing the position each frame would drop the drag mid-gesture.
         let mut s = sidecar((800, 1280));
-        let volume = s.rows(Some(0.5), Some(0.5)).volume.expect("volume row");
-        let down = press(&s, 0, volume.x + 10.0, volume.y + volume.h * 0.5);
-        s.touch(&[down], Some(0.5), Some(0.5));
-        // Well above the bar, and three quarters of the way across.
-        let away = drag(&s, 0, volume.x + volume.w * 0.75, volume.y - 120.0);
-        assert_eq!(s.touch(&[away], Some(0.5), Some(0.5)), vec![Knob::Volume]);
-        let value = s.knob_value(Knob::Volume, Some(0.5), Some(0.5)).expect("still held");
+        let card = s.rows(all()).slider(Knob::Volume).expect("volume card");
+        let track = Rows::track(card);
+        let down = press(&s, 0, track.x + 10.0, card.y + card.h * 0.5);
+        s.touch(&[down], all());
+        // Well clear of the card, and three quarters of the way across the track.
+        let away = drag(&s, 0, track.x + track.w * 0.75, card.y - 120.0);
+        assert_eq!(s.touch(&[away], all()), vec![Knob::Volume]);
+        let value = s.knob_value(Knob::Volume, all()).expect("still held");
         assert!((value - 0.75).abs() < 0.02, "got {value}");
     }
 
     #[test]
     fn lifting_releases_the_knob() {
         let mut s = sidecar((800, 1280));
-        let volume = s.rows(Some(0.5), Some(0.5)).volume.expect("volume row");
-        s.touch(&[press(&s, 0, volume.x + 40.0, volume.y + 20.0)], Some(0.5), Some(0.5));
-        s.touch(&[spatiand_input::TouchEvent::Up { slot: 0 }], Some(0.5), Some(0.5));
-        assert!(s.knob_value(Knob::Volume, Some(0.5), Some(0.5)).is_none());
+        let volume = s.rows(all()).slider(Knob::Volume).expect("volume card");
+        s.touch(&[press(&s, 0, volume.x + 40.0, volume.y + 20.0)], all());
+        s.touch(&[spatiand_input::TouchEvent::Up { slot: 0 }], all());
+        assert!(s.knob_value(Knob::Volume, all()).is_none());
         assert!(s.touches.is_empty(), "the dot should go with the finger");
     }
 
@@ -874,20 +1120,20 @@ mod tests {
         // A palm or a second thumb landing on the same bar would otherwise take the slider
         // and jump the value to wherever it touched.
         let mut s = sidecar((800, 1280));
-        let volume = s.rows(Some(0.5), Some(0.5)).volume.expect("volume row");
-        s.touch(&[press(&s, 0, volume.x + 10.0, volume.y + 20.0)], Some(0.5), Some(0.5));
+        let volume = s.rows(all()).slider(Knob::Volume).expect("volume card");
+        s.touch(&[press(&s, 0, volume.x + 10.0, volume.y + 20.0)], all());
         let intruder = press(&s, 1, volume.x + volume.w - 10.0, volume.y + 20.0);
-        s.touch(&[intruder], Some(0.5), Some(0.5));
-        let value = s.knob_value(Knob::Volume, Some(0.5), Some(0.5)).expect("still ours");
+        s.touch(&[intruder], all());
+        let value = s.knob_value(Knob::Volume, all()).expect("still ours");
         assert!(value < 0.1, "the first finger should still own it, got {value}");
     }
 
     #[test]
     fn touching_a_graph_changes_nothing() {
         let mut s = sidecar((800, 1280));
-        let graph = s.rows(Some(0.5), Some(0.5)).graphs[1];
+        let graph = s.rows(all()).graphs[1];
         let event = press(&s, 0, graph.x + graph.w * 0.5, graph.y + graph.h * 0.5);
-        assert!(s.touch(&[event], Some(0.5), Some(0.5)).is_empty());
+        assert!(s.touch(&[event], all()).is_empty());
         assert_eq!(s.touches.len(), 1, "but it should still show a dot");
     }
 
@@ -896,12 +1142,12 @@ mod tests {
         // At zero the panel goes dark, and the slider you need in order to undo it is drawn
         // on that panel.
         let mut s = sidecar((800, 1280));
-        let bar = s.rows(Some(0.5), Some(0.5)).brightness.expect("brightness row");
-        s.touch(&[press(&s, 0, bar.x - 200.0, bar.y + 20.0)], Some(0.5), Some(0.5));
+        let bar = s.rows(all()).slider(Knob::Screen).expect("screen card");
+        s.touch(&[press(&s, 0, bar.x - 200.0, bar.y + 20.0)], all());
         // Pressing left of the bar still grabs nothing; press on it, then drag off the left.
-        s.touch(&[press(&s, 1, bar.x + 40.0, bar.y + 20.0)], Some(0.5), Some(0.5));
-        s.touch(&[drag(&s, 1, bar.x - 500.0, bar.y + 20.0)], Some(0.5), Some(0.5));
-        let value = s.knob_value(Knob::Brightness, Some(0.5), Some(0.5)).expect("held");
+        s.touch(&[press(&s, 1, bar.x + 40.0, bar.y + 20.0)], all());
+        s.touch(&[drag(&s, 1, bar.x - 500.0, bar.y + 20.0)], all());
+        let value = s.knob_value(Knob::Screen, all()).expect("held");
         assert!(value >= MINIMUM_BRIGHTNESS, "got {value}");
     }
 

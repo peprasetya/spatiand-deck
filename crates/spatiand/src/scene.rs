@@ -29,7 +29,7 @@ use spatiand_shell::{Mode, Shell};
 
 use smithay::backend::renderer::gles::ffi;
 
-use crate::gl::{upload_raw, upload_rgba, BubbleParams, BubblePipeline, QuadPipeline, SkyPipeline};
+use crate::gl::{upload_raw, upload_rgba, BubbleParams, BubblePipeline, QuadPipeline, RoundedPipeline, SkyPipeline};
 
 /// Angular size of the pointer reticle, degrees. Constant in *angle*, not in metres, so it
 /// stays the same size on screen wherever it lands.
@@ -105,6 +105,7 @@ struct Texture {
 /// Textures and pipelines that live for the session.
 pub struct Scene {
     quads: QuadPipeline,
+    rounded: RoundedPipeline,
     sky_pipeline: SkyPipeline,
     bubbles: BubblePipeline,
 
@@ -193,6 +194,7 @@ impl Scene {
         let quads = QuadPipeline::new(renderer)?;
         let sky_pipeline = SkyPipeline::new(renderer, &quads)?;
         let bubbles = BubblePipeline::new(renderer, &quads)?;
+        let rounded = RoundedPipeline::new(renderer, &quads)?;
 
         let (sky, white, reticle, reticle_left, resize_cursor, glass) = renderer
             .with_context(|gl| unsafe {
@@ -225,6 +227,7 @@ impl Scene {
 
         Ok(Self {
             quads,
+            rounded,
             sky_pipeline,
             bubbles,
             sky,
@@ -256,6 +259,11 @@ impl Scene {
 
     pub fn quads(&self) -> &QuadPipeline {
         &self.quads
+    }
+
+    /// Rounded rectangles and circles, from a distance field rather than a texture.
+    pub fn rounded(&self) -> &RoundedPipeline {
+        &self.rounded
     }
 
     /// A 1x1 white texture, for drawing solid shapes.
