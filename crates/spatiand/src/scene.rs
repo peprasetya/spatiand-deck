@@ -721,7 +721,27 @@ impl Scene {
             return Ok(());
         }
 
-        let rows = text.render(list, px_per_degree * 1.05, max_width, [236, 241, 255, 255]);
+        // Measure the list as if *every* row were the selected one, then render the real list
+        // padded to that width.
+        //
+        // The marker is wider than the spaces standing in for it, so the widest line — and
+        // therefore the cropped image, and therefore the panel fitted to that image's aspect —
+        // changed as the cursor moved down the list. The panel grew when the selection reached
+        // the longest label and shrank again on the way past, which looks like the layout is
+        // unstable rather than like one glyph being wider than three spaces.
+        //
+        // Marking every line gives an upper bound that does not depend on the selection at
+        // all, so the panel is the same size whichever row is under the cursor.
+        let widest = list.replace("\n   ", "\n\u{25b8} ");
+        let measured = text.render(&widest, px_per_degree * 1.05, max_width, [255, 255, 255, 255]);
+        // A little air either side, so the longest label is not touching the panel edge.
+        let panel_width = ((measured.width as f32 * 1.06).ceil() as u32).clamp(64, max_width);
+        let rows = text.render_padded(
+            list,
+            px_per_degree * 1.05,
+            panel_width,
+            [236, 241, 255, 255],
+        );
         // The description is wrapped to the *rows'* measure, not the panel's maximum, so it
         // can never widen the panel -- and smaller, because it is reference material read once
         // rather than the thing being chosen between.

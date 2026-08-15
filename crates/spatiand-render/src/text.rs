@@ -58,6 +58,36 @@ impl TextRenderer {
     ///
     /// `size_px` is the em size; `color` is straight RGBA.
     pub fn render(&mut self, text: &str, size_px: f32, max_width: u32, color: [u8; 4]) -> TextImage {
+        self.render_inner(text, size_px, max_width, color, false)
+    }
+
+    /// As [`Self::render`], but the image keeps the full `max_width` instead of being cropped
+    /// to the ink.
+    ///
+    /// For anything whose *size* must not depend on its contents. A menu is the case that
+    /// forced this: the selected row carries a marker and the others carry spaces, so the
+    /// widest line — and with it the cropped image, and with it the panel fitted to that
+    /// image's aspect — changed every time the cursor moved. The panel visibly grew and shrank
+    /// as you moved down the list, which reads as the layout being unstable rather than as a
+    /// consequence of one glyph.
+    pub fn render_padded(
+        &mut self,
+        text: &str,
+        size_px: f32,
+        max_width: u32,
+        color: [u8; 4],
+    ) -> TextImage {
+        self.render_inner(text, size_px, max_width, color, true)
+    }
+
+    fn render_inner(
+        &mut self,
+        text: &str,
+        size_px: f32,
+        max_width: u32,
+        color: [u8; 4],
+        keep_full_width: bool,
+    ) -> TextImage {
         // Generous line spacing: at a 40 degree field the eye travels a long way between
         // lines, and tight leading reads as cramped in a way it does not on a monitor.
         let metrics = Metrics::new(size_px, size_px * 1.4);
@@ -133,6 +163,16 @@ impl TextRenderer {
             },
         );
 
+        // Keeping the full width is the whole point for a padded render: the text is already
+        // centred within it, so there is nothing further to do.
+        if keep_full_width {
+            return TextImage {
+                width,
+                height,
+                rgba,
+            };
+        }
+
         // Crop to the painted area.
         let mut min_x = width;
         let mut max_x = 0u32;
@@ -173,6 +213,49 @@ impl TextRenderer {
 impl Default for TextRenderer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod padded_tests {
+    use super::*;
+
+    /// A padded render's width must not depend on what it contains.
+    ///
+    /// This is the property the settings panel needs: it is fitted to the rendered image's
+    /// aspect, so a width that varies with the text makes the panel grow and shrink as the
+    /// selection moves. Cropping is right for a label and wrong for anything whose size is
+    /// part of the layout.
+    #[test]
+    fn a_padded_render_is_always_the_width_it_was_asked_for() {
+        let mut t = TextRenderer::new();
+        let short = t.render_padded("i", 24.0, 512, [255, 255, 255, 255]);
+        let long = t.render_padded("a much longer line of text", 24.0, 512, [255, 255, 255, 255]);
+        assert_eq!(short.width, 512);
+        assert_eq!(long.width, 512);
+    }
+
+    /// And the ordinary render must still shrink to fit, or every label carries a full-width
+    /// bitmap around with it.
+    #[test]
+    fn an_ordinary_render_still_crops_to_the_ink() {
+        let mut t = TextRenderer::new();
+        let short = t.render("i", 24.0, 512, [255, 255, 255, 255]);
+        assert!(short.width < 512, "cropped width was {}", short.width);
+    }
+
+    /// The marker is what made the panel move, so it is worth stating that it is wider than
+    /// the spaces that stand in for it. If this ever stops being true the padding is harmless,
+    /// but the reason for it is gone.
+    #[test]
+    fn the_selection_marker_is_wider_than_the_blank_that_replaces_it() {
+        let mut t = TextRenderer::new();
+        let marked = t.render("\u{25b8} Calibrate head tracking", 24.0, 1024, [255; 4]);
+        let blank = t.render("   Calibrate head tracking", 24.0, 1024, [255; 4]);
+        assert_ne!(
+            marked.width, blank.width,
+            "if these are equal the panel never moved and this fix is unnecessary"
+        );
     }
 }
 

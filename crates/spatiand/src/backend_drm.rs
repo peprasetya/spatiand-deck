@@ -1362,7 +1362,14 @@ pub fn run(
                         // Two lasers with only one of them meaning anything is worse than one:
                         // it is not discoverable which is which, and the idle one is drawn
                         // across whatever you are trying to read.
-                        let right_owns = right_aim.is_some();
+                        // Hidden only while the right pad is actually *pressed*. Merely resting
+                        // a thumb on it is the normal state while the other hand does
+                        // something -- during a two-thumb zoom, for instance -- and blanking
+                        // the left beam then removes the pointer you are working with.
+                        let right_owns = pads
+                            .as_ref()
+                            .map(|p| p.right_pad.clicked)
+                            .unwrap_or(false);
                         for (aim, right_hand) in
                             [(right_aim.as_ref(), true), (left_aim.as_ref(), false)]
                         {
