@@ -24,6 +24,21 @@ default_ipd_mm = 63.0
 mode_mono = 0x05           # 1920x1080 @72
 mode_stereo = 0x04         # 3840x1080 @72  <- preferred, verified working on Steam Deck
 mode_stereo_fallback = 0x03 # 3840x1080 @60
+# IMU mounting: sensor +X points out of the left temple, +Y out of the back of the head, +Z
+# out of the top. Measured against gravity, not guessed: held level, the accelerometer reads
+# +1 g on Z, which names the up axis; tipping the nose down leaves X unchanged, which names
+# the left axis; forward is then whatever is left over, and it is -Y.
+#
+# This is the fact the wearer kept having to rediscover by hand. It is a property of where
+# the chip is soldered, so it is the same on every Air gen 1 and there is nothing here for a
+# per-user calibration to find.
+sensor_axes = ["left", "back", "up"]
+
+# The rows below deliberately omit `sensor_axes`. The Air family very probably shares the Air
+# gen 1's mounting, but "very probably" is exactly the reasoning that produced a world where
+# nodding rolled the horizon. An absent mounting sends the wearer through calibration, which
+# is the honest outcome for hardware nobody here has held. Fill a row in when one has been
+# measured, not when it seems likely.
 
 [[device]]
 name = "XREAL Air 2"

@@ -107,6 +107,7 @@ impl XrealGlasses {
             supports_stereo: true,
             // Raw gyro/accel/mag only. `spatiand-track` turns it into an orientation.
             provides_fused_pose: false,
+            sensor_axes: spec.sensor_axes,
         };
 
         let mut this = Self {

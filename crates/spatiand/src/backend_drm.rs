@@ -221,13 +221,11 @@ pub fn run(
     let mut sky_dirty = false;
     // Owns the three pipelines and every texture that outlives one frame.
     let mut scene = Scene::new(&mut renderer, &sky_image)?;
+    // Deliberately not decided here. Which axis convention applies is a fact about the
+    // headset, so it cannot be settled before one is open — see `settle_axes`, called from
+    // the rebuild loop below.
     let stored = spatiand_track::config::load_axes();
-    let mut calibration = if stored.is_none() && spatiand_hmd::is_present() {
-        log::info!("no stored axis calibration — starting the in-world flow");
-        Some(Calibration::new())
-    } else {
-        None
-    };
+    let mut calibration: Option<Calibration> = None;
     let mut tracker =
         HeadTracker::new(stored.unwrap_or(AxisMap::XREAL_AIR), TrackerConfig::default());
 
@@ -269,6 +267,7 @@ pub fn run(
         hmd = match spatiand_hmd::open_any() {
             Ok(h) => {
                 log::info!("headset: {}", h.info().name);
+                settle_axes(h.info(), stored, &mut tracker, &mut calibration);
                 Some(h)
             }
             Err(e) => {
@@ -826,8 +825,29 @@ pub fn run(
                 c.tick();
                 if c.is_finished() {
                     if let Some(map) = c.result() {
-                        log::info!("adopting measured axes: {}", map.summary());
-                        tracker.set_axes(map);
+                        // A headset that states its mounting has already answered this, and a
+                        // measurement that disagrees with the hardware is a measurement that
+                        // went wrong -- almost always the nod and the tilt performed the
+                        // wrong way round, which produces a valid rotation that nothing
+                        // downstream can flag. Saying so is more use than adopting it.
+                        let known = hmd
+                            .as_ref()
+                            .and_then(|h| h.info().sensor_axes)
+                            .and_then(AxisMap::from_mounting);
+                        match known {
+                            Some(known) if known != map => log::warn!(
+                                "calibration measured {} but these glasses are built {}; \
+                                 keeping the hardware answer. The nod and the tilt were most \
+                                 likely performed the wrong way round.",
+                                map.summary(),
+                                known.summary()
+                            ),
+                            Some(_) => log::info!("calibration agrees with the hardware: {}", map.summary()),
+                            None => {
+                                log::info!("adopting measured axes: {}", map.summary());
+                                tracker.set_axes(map);
+                            }
+                        }
                     }
                     if matches!(
                         c.stage(),
@@ -1997,6 +2017,73 @@ fn send_key(state: &mut Spatiand, evdev_code: u32, time_ms: u32) {
 /// quad would buy nothing and cost a dozen uploads every time the cursor moved.
 pub fn menu_text(shell: &Shell) -> String {
     menu_text_with(shell, None)
+}
+
+/// Decide which sensor axis convention to track with, now that a headset is open.
+///
+/// The order of preference is the whole point, and it is the reverse of what it used to be.
+///
+/// A headset that publishes its IMU mounting wins outright, because the mounting is a fact
+/// about where a chip is soldered — the same on every unit of that product, and not something
+/// a wearer can have a different answer to. A stored map used to beat it, and that is the
+/// defect this function exists to close: a calibration is three head movements, two of which
+/// (nodding and tilting) are adjacent enough that performing one when asked for the other
+/// records them swapped. The result is still a proper rotation, so nothing downstream can
+/// tell it is wrong; the only symptom is that looking down rolls the world. It then survived
+/// every restart, because the stored file beat the correct built-in answer — which is exactly
+/// the loop the wearer was stuck in, reaching for "Try pitch and roll" after every launch.
+///
+/// Calibration remains the right answer for hardware whose mounting nobody has measured, and
+/// that is the only case that now reaches it.
+pub fn settle_axes(
+    info: &spatiand_hmd::HmdInfo,
+    stored: Option<spatiand_track::AxisMap>,
+    tracker: &mut HeadTracker,
+    calibration: &mut Option<Calibration>,
+) {
+    if let Some(mounting) = info.sensor_axes {
+        match AxisMap::from_mounting(mounting) {
+            Some(map) => {
+                if let Some(old) = stored.filter(|s| *s != map) {
+                    log::info!(
+                        "ignoring the stored axis map ({}): {} states its own IMU mounting, \
+                         which gives {}",
+                        old.summary(),
+                        info.name,
+                        map.summary()
+                    );
+                }
+                log::info!("axes from {} hardware: {}", info.name, map.summary());
+                tracker.set_axes(map);
+                // Nothing left to measure, so an in-progress flow is asking the wearer for
+                // an answer we already have.
+                *calibration = None;
+                return;
+            }
+            // An authoring error in `devices.toml`, caught by its own unit test, so this is
+            // a belt-and-braces path rather than an expected one.
+            None => log::error!(
+                "{} has an impossible IMU mounting in the device table ({mounting:?}); \
+                 falling back to measuring it",
+                info.name
+            ),
+        }
+    }
+
+    match stored {
+        Some(map) => {
+            log::info!("axes from the stored calibration: {}", map.summary());
+            tracker.set_axes(map);
+        }
+        None if calibration.is_none() => {
+            log::info!(
+                "{} does not state its IMU mounting and nothing is stored — calibrating",
+                info.name
+            );
+            *calibration = Some(Calibration::new());
+        }
+        None => {}
+    }
 }
 
 /// The explanation under the menu, laid out separately so it cannot widen the panel.

@@ -89,6 +89,58 @@ impl AxisMap {
         roll_sign: 1.0,
     };
 
+    /// Derive the map from where the IMU physically sits in the headset.
+    ///
+    /// This is the preferred way to get an `AxisMap`, and it makes calibration unnecessary on
+    /// any headset whose mounting has been measured. The mounting is a property of the
+    /// product — where the chip is soldered and which way round the board is — so it is the
+    /// same on every unit and identical for every wearer. Treating it as something to be
+    /// discovered per user is what produced the long-running complaint that pitch and roll
+    /// were swapped again after every restart: three motions performed by a human, two of
+    /// which (nodding and tilting) are adjacent, cannot settle a question the datasheet
+    /// already answers.
+    ///
+    /// Each entry says which head direction that sensor axis points along, in order X, Y, Z.
+    /// Reading the assignments backwards out of [`Self::apply`]: `out.x` is head-forward and
+    /// is built as `-roll_sign * a[roll_axis]`, hence the inverted sign on the forward axis;
+    /// `out.y` is head-left and `out.z` is head-up, both of which take their sign directly.
+    ///
+    /// Returns `None` for a mounting that is not three distinct axes, or that describes a
+    /// left-handed sensor frame. Both are authoring mistakes in the device table rather than
+    /// runtime conditions, and a mirrored frame in particular must never reach the filter:
+    /// gyro integration and gravity correction then disagree about handedness and fight each
+    /// other, which reads as drift rather than as bad data.
+    pub fn from_mounting(mounting: spatiand_hmd::device::Mounting) -> Option<Self> {
+        use spatiand_hmd::device::HeadDirection as D;
+
+        let (mut yaw, mut pitch, mut roll) = (None, None, None);
+        for (axis, direction) in mounting.into_iter().enumerate() {
+            match direction {
+                D::Up => yaw = Some((axis, 1.0)),
+                D::Down => yaw = Some((axis, -1.0)),
+                D::Left => pitch = Some((axis, 1.0)),
+                D::Right => pitch = Some((axis, -1.0)),
+                // `apply` negates the roll term, so a sensor axis pointing along +forward
+                // needs a negative roll sign to come back out as +forward.
+                D::Forward => roll = Some((axis, -1.0)),
+                D::Back => roll = Some((axis, 1.0)),
+            }
+        }
+
+        let ((yaw_axis, yaw_sign), (pitch_axis, pitch_sign), (roll_axis, roll_sign)) =
+            (yaw?, pitch?, roll?);
+        let map = Self {
+            version: CURRENT_VERSION,
+            yaw_axis,
+            yaw_sign,
+            pitch_axis,
+            pitch_sign,
+            roll_axis,
+            roll_sign,
+        };
+        (map.is_usable() && map.is_right_handed()).then_some(map)
+    }
+
     /// Reorder a raw sensor vector into the canonical head frame.
     ///
     /// Applied to the gyro **and** the accelerometer — gravity correction has to live in the
@@ -231,6 +283,81 @@ impl AxisMap {
             NAMES[self.roll_axis],
             if self.determinant() > 0.0 { "+1" } else { "-1" }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests_mounting {
+    use super::*;
+    use spatiand_hmd::device::HeadDirection as D;
+
+    #[test]
+    fn the_airs_mounting_derives_the_map_that_was_measured_for_it() {
+        // The load-bearing test in this file. `XREAL_AIR` was established by holding the
+        // glasses in known poses and reading the accelerometer; the mounting in
+        // `devices.toml` records the same measurement in physical terms. If these two ever
+        // disagree, one of them has been edited without the other and the wearer is about to
+        // be told that nodding rolls the world.
+        let derived = AxisMap::from_mounting([D::Left, D::Back, D::Up]).expect("a valid frame");
+        assert_eq!(derived, AxisMap::XREAL_AIR);
+    }
+
+    #[test]
+    fn the_table_and_the_constant_agree() {
+        // Same claim, but reading the actual shipped row rather than a literal, so an edit to
+        // `devices.toml` cannot quietly diverge from the constant.
+        let air = spatiand_hmd::device::lookup(0x3318, 0x0424).expect("the Air is in the table");
+        let mounting = air.sensor_axes.expect("the Air's mounting has been measured");
+        assert_eq!(AxisMap::from_mounting(mounting), Some(AxisMap::XREAL_AIR));
+    }
+
+    #[test]
+    fn every_mounting_in_the_table_is_a_proper_rotation() {
+        // A left-handed or repeated mounting is an authoring slip that would otherwise only
+        // show up as a headset that tracks strangely.
+        for device in spatiand_hmd::device::all() {
+            let Some(mounting) = device.sensor_axes else {
+                continue;
+            };
+            assert!(
+                AxisMap::from_mounting(mounting).is_some(),
+                "{} has an impossible mounting: {mounting:?}",
+                device.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_mirrored_mounting_is_refused_rather_than_returned() {
+        // Swapping two axes of a right-handed frame without flipping a sign describes a
+        // reflection, which no physical mounting can be.
+        assert_eq!(AxisMap::from_mounting([D::Back, D::Left, D::Up]), None);
+    }
+
+    #[test]
+    fn a_mounting_that_repeats_a_direction_is_refused() {
+        assert_eq!(AxisMap::from_mounting([D::Up, D::Up, D::Left]), None);
+    }
+
+    #[test]
+    fn a_mounting_round_trips_a_sensor_vector_into_the_head_frame() {
+        // Stated independently of the constant: with the Air's mounting, sensor +Z is the top
+        // of the head and must come out as canonical +Z, and sensor +Y points backwards so it
+        // must come out as canonical -X.
+        let map = AxisMap::from_mounting([D::Left, D::Back, D::Up]).expect("a valid frame");
+        assert_eq!(map.apply(DVec3::new(0.0, 0.0, 1.0)), DVec3::new(0.0, 0.0, 1.0));
+        assert_eq!(map.apply(DVec3::new(0.0, 1.0, 0.0)), DVec3::new(-1.0, 0.0, 0.0));
+        assert_eq!(map.apply(DVec3::new(1.0, 0.0, 0.0)), DVec3::new(0.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn the_generic_identity_is_not_what_this_hardware_needs() {
+        // The map that was found stored on the wearer's Deck, and the reason this whole
+        // mechanism exists: it is a perfectly valid rotation, so nothing downstream could
+        // notice it was wrong for these glasses.
+        let derived = AxisMap::from_mounting([D::Left, D::Back, D::Up]).expect("a valid frame");
+        assert_ne!(derived, AxisMap::IDENTITY);
+        assert!(AxisMap::IDENTITY.is_right_handed(), "which is exactly why it went unnoticed");
     }
 }
 

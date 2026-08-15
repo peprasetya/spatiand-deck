@@ -6,6 +6,34 @@
 use serde::Deserialize;
 use std::sync::OnceLock;
 
+/// A direction in the wearer's head frame, used to say where a sensor axis points.
+///
+/// The head frame is the canonical one: forward is the nose, left is the left ear, up is the
+/// top of the head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HeadDirection {
+    Forward,
+    Back,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Which head direction each of the IMU's three axes points along, in order X, Y, Z.
+///
+/// This is the IMU's physical mounting inside the glasses — where the chip sits on the board
+/// and which way round the board is. It is a property of the product, identical across every
+/// unit of it, and it cannot change between wearers or between sessions.
+///
+/// Stating it this way rather than as a ready-made axis map is deliberate. A map is six
+/// numbers with a sign convention folded in, which nobody can check by looking; a mounting is
+/// a claim about the physical world that anyone can verify in a minute with an accelerometer
+/// and a flat table. `AxisMap::from_mounting` turns the checkable statement into the
+/// convention-laden one, and is tested against the measurement this row came from.
+pub type Mounting = [HeadDirection; 3];
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct DeviceSpec {
     pub name: String,
@@ -24,6 +52,14 @@ pub struct DeviceSpec {
     pub mode_mono: u8,
     pub mode_stereo: u8,
     pub mode_stereo_fallback: u8,
+    /// Where the IMU's X, Y and Z axes point in the head frame, if it has been measured on
+    /// real hardware.
+    ///
+    /// `None` means nobody has held one of these level and looked at the accelerometer, so
+    /// the wearer has to calibrate. Present means the answer is known and calibration is not
+    /// a per-user question at all — see [`Mounting`].
+    #[serde(default)]
+    pub sensor_axes: Option<Mounting>,
 }
 
 #[derive(Debug, Deserialize)]

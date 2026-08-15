@@ -51,6 +51,9 @@ impl NullHmd {
                 default_ipd_mm: 63.0,
                 supports_stereo: true,
                 provides_fused_pose: false,
+                // The synthetic pose is generated directly in the head frame, so there is no
+                // sensor mounting to describe and nothing for calibration to discover.
+                sensor_axes: None,
             },
             mode: DisplayMode::Mono,
             started: Instant::now(),

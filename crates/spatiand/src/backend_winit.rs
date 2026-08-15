@@ -147,17 +147,16 @@ pub fn run(
         ..Default::default()
     };
 
-    // A stored calibration means this headset's axes are already known. Without one, run the
-    // in-world flow rather than silently trusting a guess — the guess is usually right, but
-    // "usually" produces a world that nods when it should pan and no clue why.
+    // A headset that states its own IMU mounting has already answered this; calibration is
+    // only for hardware whose mounting nobody has measured. See `backend_drm::settle_axes`
+    // for why that order matters — it is the fix for pitch and roll coming back swapped after
+    // every restart.
     let stored = spatiand_track::config::load_axes();
-    let mut calibration = if stored.is_none() && hmd.is_some() {
-        log::info!("no stored axis calibration — starting the in-world flow");
-        Some(Calibration::new())
-    } else {
-        None
-    };
+    let mut calibration: Option<Calibration> = None;
     let mut tracker = HeadTracker::new(stored.unwrap_or(AxisMap::XREAL_AIR), TrackerConfig::default());
+    if let Some(h) = hmd.as_ref() {
+        crate::backend_drm::settle_axes(h.info(), stored, &mut tracker, &mut calibration);
+    }
 
     // --- the shell ---
     //
@@ -294,11 +293,15 @@ pub fn run(
                             }
                         }
                         // Nothing to hand back in a window on someone else's desktop.
+                        // Applied live and deliberately **not** saved, matching the DRM
+                        // backend. Persisting here turned one stray press into a permanent
+                        // fault: the result is a valid rotation, so nothing downstream can
+                        // notice, and the stored map then beat the correct built-in one on
+                        // every subsequent launch.
                         HudAction::CyclePitchRoll => {
                             let swapped = tracker.axes().next_pitch_roll_variant();
                             tracker.set_axes(swapped);
-                            let _ = spatiand_track::config::save_axes(&swapped);
-                            log::info!("axes now {}", swapped.summary());
+                            log::info!("axes now {} (this run only)", swapped.summary());
                         }
                         HudAction::ToggleKeyboard | HudAction::ReturnToDesktop
                         | HudAction::Screenshot => {

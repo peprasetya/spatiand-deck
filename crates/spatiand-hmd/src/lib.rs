@@ -108,6 +108,12 @@ pub struct HmdInfo {
     /// `true` for runtime-backed devices that emit [`HmdEvent::Pose`]; `false` for raw-IMU
     /// devices, whose samples must be run through `spatiand-track`.
     pub provides_fused_pose: bool,
+    /// Where this model's IMU axes point in the head frame, if it has been measured.
+    ///
+    /// `Some` means the sensor convention is known hardware fact and the tracker should use
+    /// it in preference to anything stored on disk. `None` means it has to be measured from
+    /// the wearer's own movements. See [`device::Mounting`].
+    pub sensor_axes: Option<device::Mounting>,
 }
 
 #[derive(Debug, thiserror::Error)]
