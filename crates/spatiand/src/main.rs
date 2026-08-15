@@ -24,6 +24,7 @@ mod icon;
 mod input_map;
 mod pointer;
 mod scene;
+mod shutdown;
 mod sidecar;
 mod state;
 mod status;
@@ -41,6 +42,11 @@ pub struct Runtime {
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    // Before any backend, and so before anything claims the controller. The window between
+    // claiming hardware and being able to hand it back is exactly the window this closes, so
+    // it belongs at the top of `main` rather than inside whichever backend happens to run.
+    shutdown::install();
 
     let backend = std::env::var("SPATIAND_BACKEND").unwrap_or_else(|_| "winit".into());
     log::info!("starting spatiand ({backend} backend)");

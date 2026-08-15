@@ -722,6 +722,12 @@ pub fn run(
                     },
                 }
             }
+            // A signal is a request to leave, handled exactly like the button that means the
+            // same thing -- so the controller gets handed back and the glasses go back to 2D.
+            if crate::shutdown::requested() {
+                log::info!("asked to stop; returning the hardware and exiting");
+                leaving = true;
+            }
             if leaving {
                 // Exiting is not enough. SDDM restarts whatever the default session is, and
                 // getting here means that is Spatiand - so quitting just relaunches us, which

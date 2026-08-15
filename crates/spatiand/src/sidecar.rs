@@ -226,13 +226,19 @@ impl Sidecar {
     /// `(2·ly/h − 1, 2·lx/w − 1)`, and the viewport maps that to panel pixels
     /// `(u·W, (1 − v)·H)` — so `lx = w·(1 − v)` and `ly = h·u`.
     ///
-    /// If this is ever a mirror image of the truth, the touch dots move the wrong way along
-    /// one axis while tracking correctly along the other. That is the signature of a sign
-    /// error here, not of a miscalibrated panel.
+    /// The derivation above predicted `(w·(1 − v), h·u)`, and on the hardware that put a touch
+    /// on the left at the right-hand end of the bar: correct vertically, mirrored horizontally.
+    /// The step that was wrong is the assumed sense of the viewport's Y, which the drawing path
+    /// never reveals because flipping it twice — once in the projection, once in the scanout —
+    /// looks identical on screen and only shows up when something maps *backwards* through it.
+    ///
+    /// So the panel's own report wins over the arithmetic. The remaining transform is
+    /// `(w·v, h·u)`: a transpose rather than a quarter turn, which is what a panel scanned out
+    /// the other way round gives you.
     pub fn touch_to_layout(&self, u: f32, v: f32) -> (f32, f32) {
         let (w, h) = self.size;
         if self.portrait {
-            (w * (1.0 - v), h * u)
+            (w * v, h * u)
         } else {
             (w * u, h * v)
         }
@@ -636,33 +642,22 @@ mod tests {
         assert_eq!((centre.x, centre.y), (25.0, 40.0));
     }
 
-    /// Where a landscape point ends up on the panel, in the panel's own pixels.
-    ///
-    /// This runs the *drawing* path — projection then viewport — so a touch mapped back
-    /// through `touch_to_layout` can be checked against where the pixel really went, rather
-    /// than against a second copy of the same assumption.
-    fn drawn_at(s: &Sidecar, panel: (f32, f32), lx: f32, ly: f32) -> (f32, f32) {
-        let clip = s.projection() * Vec4::new(lx, ly, 0.0, 1.0);
-        ((clip.x + 1.0) * 0.5 * panel.0, (1.0 - clip.y) * 0.5 * panel.1)
-    }
-
     #[test]
-    fn a_touch_lands_on_the_pixel_it_is_over() {
-        // The panel is mounted portrait and the image is turned a quarter turn to suit, so a
-        // touch has to make the same turn. Getting this wrong puts every press on a plausible
-        // but wrong widget, which reads as a calibration problem and is arithmetic.
-        let panel = (800.0f32, 1280.0f32);
+    fn a_touch_lands_where_the_panel_says_it_does() {
+        // These corners are measured, not derived. The arithmetic from the drawing path
+        // predicted the horizontal mirror of this, and the hardware disagreed: a touch on the
+        // left of the panel reported at the right-hand end of the bar. Drawing cannot expose
+        // the error, because a Y sense that is flipped twice looks identical on screen and
+        // only misbehaves when something maps backwards through it.
         let s = sidecar((800, 1280));
-        for &(lx, ly) in &[(0.0, 0.0), (1280.0, 0.0), (0.0, 800.0), (1280.0, 800.0), (300.0, 210.0)] {
-            let (px, py) = drawn_at(&s, panel, lx, ly);
-            // Feed the digitiser reading for that pixel back through the touch path.
-            let (back_x, back_y) = s.touch_to_layout(px / panel.0, py / panel.1);
-            assert!(
-                (back_x - lx).abs() < 0.5 && (back_y - ly).abs() < 0.5,
-                "landscape ({lx}, {ly}) is drawn at panel ({px}, {py}) but a touch there \
-                 reports ({back_x}, {back_y})"
-            );
-        }
+        let (w, h) = s.size;
+        // Panel top-left is the layout's origin.
+        assert_eq!(s.touch_to_layout(0.0, 0.0), (0.0, 0.0));
+        // Along the panel's long axis is the layout's horizontal.
+        assert_eq!(s.touch_to_layout(0.0, 1.0), (w, 0.0));
+        // Across the panel's short axis is the layout's vertical.
+        assert_eq!(s.touch_to_layout(1.0, 0.0), (0.0, h));
+        assert_eq!(s.touch_to_layout(1.0, 1.0), (w, h));
     }
 
     #[test]
@@ -737,7 +732,7 @@ mod tests {
         // in, and the turn is still exercised rather than sidestepped.
         let (w, h) = s.size;
         let (u, v) = if s.portrait {
-            (ly / h, 1.0 - lx / w)
+            (ly / h, lx / w)
         } else {
             (lx / w, ly / h)
         };
