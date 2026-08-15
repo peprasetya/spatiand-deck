@@ -134,10 +134,16 @@ impl Layout {
     /// The quad spans −0.5..0.5, so a rectangle is a scale and a translate. Pixel coordinates
     /// have their origin at the top left, which is what every layout number below assumes;
     /// [`Sidecar::projection`] is where that becomes GL's bottom-left world.
+    ///
+    /// Note the **negated height**, which is not a typo. `QUAD_VERT` derives the texture
+    /// coordinate from the vertex position as `v_uv.y = 0.5 - a_pos.y`, so a quad's texture
+    /// arrives already flipped relative to its geometry. Flipping the quad about its own
+    /// centre puts it back. Solid fills do not care — they are one colour — so this is
+    /// invisible everywhere except text, which is exactly where it matters.
     fn rect(&self, x: f32, y: f32, w: f32, h: f32) -> Mat4 {
         Mat4::from_cols(
             Vec4::new(w, 0.0, 0.0, 0.0),
-            Vec4::new(0.0, h, 0.0, 0.0),
+            Vec4::new(0.0, -h, 0.0, 0.0),
             Vec4::new(0.0, 0.0, 1.0, 0.0),
             Vec4::new(x + w * 0.5, y + h * 0.5, 0.0, 1.0),
         )
@@ -226,19 +232,15 @@ impl Sidecar {
     /// `(2·ly/h − 1, 2·lx/w − 1)`, and the viewport maps that to panel pixels
     /// `(u·W, (1 − v)·H)` — so `lx = w·(1 − v)` and `ly = h·u`.
     ///
-    /// The derivation above predicted `(w·(1 − v), h·u)`, and on the hardware that put a touch
-    /// on the left at the right-hand end of the bar: correct vertically, mirrored horizontally.
-    /// The step that was wrong is the assumed sense of the viewport's Y, which the drawing path
-    /// never reveals because flipping it twice — once in the projection, once in the scanout —
-    /// looks identical on screen and only shows up when something maps *backwards* through it.
-    ///
-    /// So the panel's own report wins over the arithmetic. The remaining transform is
-    /// `(w·v, h·u)`: a transpose rather than a quarter turn, which is what a panel scanned out
-    /// the other way round gives you.
+    /// It is the exact inverse of [`Sidecar::projection`] followed by the viewport, and
+    /// [`tests::a_touch_lands_on_what_was_drawn_there`] is what holds it to that. An earlier
+    /// version was tuned by hand against a panel until touches felt right, which made it the
+    /// inverse of a projection that was itself wrong — see [`Sidecar::projection`]. Two
+    /// compensating errors agree with each other and with nothing else.
     pub fn touch_to_layout(&self, u: f32, v: f32) -> (f32, f32) {
         let (w, h) = self.size;
         if self.portrait {
-            (w * v, h * u)
+            (w * v, h * (1.0 - u))
         } else {
             (w * u, h * v)
         }
@@ -246,19 +248,35 @@ impl Sidecar {
 
     /// Landscape pixels to clip space, with a quarter turn for a portrait panel.
     ///
-    /// Y is flipped here rather than in every rectangle: the layout reads top-down, which is
-    /// how anyone writing it thinks, and GL's origin is at the bottom.
+    /// **This must be a rotation, and for a long time it was a reflection.** The mistake is
+    /// worth describing, because the screen gave no sign of it.
+    ///
+    /// The landscape path flips Y, which is right: the layout reads top-down, as anyone
+    /// writing it thinks, and GL's origin is at the bottom. But the portrait path was built as
+    /// *that matrix composed with a quarter turn*, and a rotation preserves the sign of a
+    /// determinant — so folding a flip into it leaves a mirror. Every position on the panel was
+    /// reflected: the rows drew bottom-to-top, so the clock sat under the graphs and the
+    /// sliders came out at the top, and each graph grew downward from its ceiling instead of
+    /// upward from its floor.
+    ///
+    /// None of which looked like a transform bug, because **the text was perfect**. Text is a
+    /// texture, and `QUAD_VERT` flips texture coordinates relative to vertex positions, so
+    /// glyphs picked up a second reflection that cancelled the first. A panel of upright,
+    /// correctly-spaced text in the wrong order reads as a layout someone chose.
+    ///
+    /// So the flip is gone from here and moved into [`Layout::rect`], where it applies to a
+    /// quad's own contents rather than to where the quad sits.
     fn projection(&self) -> Mat4 {
         let (w, h) = self.size;
-        let to_clip = Mat4::from_scale(Vec3::new(2.0 / w, -2.0 / h, 1.0))
-            * Mat4::from_translation(Vec3::new(-w * 0.5, -h * 0.5, 0.0));
+        let centre = Mat4::from_translation(Vec3::new(-w * 0.5, -h * 0.5, 0.0));
         if self.portrait {
-            // The panel's top edge is along its long side, so the whole image turns a quarter
-            // turn. Which way matters: the wrong sign puts the text upside down, which reads
-            // as a mounting problem rather than a sign.
-            Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2) * to_clip
+            // A quarter turn and nothing else, hence the positive Y scale. The panel's top
+            // edge runs along its long side, so the whole image turns to suit.
+            Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2)
+                * Mat4::from_scale(Vec3::new(2.0 / w, 2.0 / h, 1.0))
+                * centre
         } else {
-            to_clip
+            Mat4::from_scale(Vec3::new(2.0 / w, -2.0 / h, 1.0)) * centre
         }
     }
 
@@ -642,22 +660,95 @@ mod tests {
         assert_eq!((centre.x, centre.y), (25.0, 40.0));
     }
 
+    /// Where the digitiser reports a given panel pixel, as normalised `(u, v)`.
+    ///
+    /// The one measured fact about this hardware, written down once. Everything else about
+    /// touch is arithmetic derived from it and from [`Sidecar::projection`], which is the
+    /// point: the previous code had this fact and the projection disagreeing, each tuned
+    /// separately until the pair happened to behave.
+    fn digitiser_reports(panel: (u32, u32), px: f32, py: f32) -> (f32, f32) {
+        let (pw, ph) = (panel.0 as f32, panel.1 as f32);
+        (px / pw, 1.0 - py / ph)
+    }
+
+    /// Push a layout point through the real projection and the viewport, to a panel pixel.
+    fn draws_at(s: &Sidecar, panel: (u32, u32), lx: f32, ly: f32) -> (f32, f32) {
+        let clip = s.projection() * glam::Vec4::new(lx, ly, 0.0, 1.0);
+        let (pw, ph) = (panel.0 as f32, panel.1 as f32);
+        ((clip.x + 1.0) * 0.5 * pw, (1.0 - clip.y) * 0.5 * ph)
+    }
+
     #[test]
-    fn a_touch_lands_where_the_panel_says_it_does() {
-        // These corners are measured, not derived. The arithmetic from the drawing path
-        // predicted the horizontal mirror of this, and the hardware disagreed: a touch on the
-        // left of the panel reported at the right-hand end of the bar. Drawing cannot expose
-        // the error, because a Y sense that is flipped twice looks identical on screen and
-        // only misbehaves when something maps backwards through it.
-        let s = sidecar((800, 1280));
+    #[allow(clippy::float_cmp)]
+    fn a_touch_lands_on_what_was_drawn_there() {
+        // The test this file was missing, and the reason a reflected projection survived for
+        // so long. Drawing and touching were each checked on their own, against the panel, by
+        // eye -- and two compensating errors pass that check every time. This closes the loop
+        // instead: take a point, draw it, ask the digitiser where that pixel is, and require
+        // touch_to_layout to hand back the point we started with.
+        let panel = (800u32, 1280u32);
+        let s = sidecar(panel);
         let (w, h) = s.size;
-        // Panel top-left is the layout's origin.
-        assert_eq!(s.touch_to_layout(0.0, 0.0), (0.0, 0.0));
-        // Along the panel's long axis is the layout's horizontal.
-        assert_eq!(s.touch_to_layout(0.0, 1.0), (w, 0.0));
-        // Across the panel's short axis is the layout's vertical.
-        assert_eq!(s.touch_to_layout(1.0, 0.0), (0.0, h));
-        assert_eq!(s.touch_to_layout(1.0, 1.0), (w, h));
+        for (lx, ly) in [
+            (0.0, 0.0),
+            (w, 0.0),
+            (0.0, h),
+            (w, h),
+            (w * 0.5, h * 0.5),
+            (MARGIN, MARGIN),
+            (w * 0.25, h * 0.75),
+        ] {
+            let (px, py) = draws_at(&s, panel, lx, ly);
+            let (u, v) = digitiser_reports(panel, px, py);
+            let (bx, by) = s.touch_to_layout(u, v);
+            assert!(
+                (bx - lx).abs() < 0.01 && (by - ly).abs() < 0.01,
+                "drew ({lx}, {ly}) at panel ({px}, {py}), which reads back as ({bx}, {by})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_layout_stacks_downward_on_the_panel() {
+        // Stated in the terms the wearer reported it in: the status line is the first row and
+        // the sliders are the last, and on the panel the first row was coming out *underneath*
+        // the last one, with each graph growing down from its ceiling instead of up from its
+        // floor.
+        //
+        // The direction below is an observation, not a derivation. The panel is mounted
+        // portrait, so the layout's vertical runs along the panel's X, and a photograph of the
+        // running screen is what says which end of that axis the wearer sees as the top: the
+        // high end. That fact cannot be recovered from the framebuffer alone -- the scanout
+        // sits between this matrix and anybody's eyes, and it is not in the matrix.
+        //
+        // Which is why there is no assertion here about the projection's determinant. A
+        // reflection in the matrix is not a reflection on the panel unless the scanout is
+        // known to be a rotation, and on this hardware it demonstrably is not.
+        let panel = (800u32, 1280u32);
+        let s = sidecar(panel);
+        let top = draws_at(&s, panel, s.size.0 * 0.5, MARGIN);
+        let bottom = draws_at(&s, panel, s.size.0 * 0.5, s.size.1 - MARGIN);
+        assert!(
+            top.0 > bottom.0,
+            "the first row must draw above the last: top at {top:?}, bottom at {bottom:?}"
+        );
+    }
+
+    #[test]
+    fn a_graph_column_grows_up_from_its_floor() {
+        // The symptom the wearer photographed: memory at 8% drew tall bars and the GPU at 99%
+        // drew a hairline, because every column hung from the ceiling of its row.
+        let panel = (800u32, 1280u32);
+        let s = sidecar(panel);
+        let row = s.rows(Some(0.5), Some(0.5)).graphs[0];
+        let floor = draws_at(&s, panel, row.x, row.y + row.h);
+        let small = draws_at(&s, panel, row.x, row.y + row.h - row.h * 0.1);
+        let large = draws_at(&s, panel, row.x, row.y + row.h - row.h * 0.9);
+        let rise = |p: (f32, f32)| (p.0 - floor.0).abs();
+        assert!(
+            rise(large) > rise(small),
+            "a bigger reading must reach further from the floor: 10% at {small:?}, 90% at {large:?}"
+        );
     }
 
     #[test]
@@ -728,14 +819,17 @@ mod tests {
         ly: f32,
         make: fn(spatiand_input::Contact) -> spatiand_input::TouchEvent,
     ) -> spatiand_input::TouchEvent {
-        // Invert `touch_to_layout` so the test speaks in the coordinates the layout is written
-        // in, and the turn is still exercised rather than sidestepped.
-        let (w, h) = s.size;
-        let (u, v) = if s.portrait {
-            (ly / h, lx / w)
+        // Go the long way round -- draw the point through the real projection, then ask the
+        // digitiser where that pixel is -- rather than inverting `touch_to_layout` by hand.
+        // A hand-written inverse here would have to be updated in step with the real one, and
+        // a test that is kept in step with the code it checks stops checking anything.
+        let panel = if s.portrait {
+            (s.size.1 as u32, s.size.0 as u32)
         } else {
-            (lx / w, ly / h)
+            (s.size.0 as u32, s.size.1 as u32)
         };
+        let (px, py) = draws_at(s, panel, lx, ly);
+        let (u, v) = digitiser_reports(panel, px, py);
         make(spatiand_input::Contact { slot, id: slot as i32, x: u, y: v })
     }
 
