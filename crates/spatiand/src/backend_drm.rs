@@ -223,6 +223,8 @@ pub fn run(
         || std::path::Path::new("/usr/bin/systemsettings").exists();
     let mut shell = Shell::new(apps, has_kde);
     let mut environments = Environments::discover();
+    shell.set_environments(environments.entries(), environments.choice());
+    let mut browser = crate::environment::Browser::new();
     let mut sky_image = environments.current();
     let mut sky_dirty = false;
     // Owns the three pipelines and every texture that outlives one frame.
@@ -697,6 +699,24 @@ pub fn run(
                             log::warn!("could not launch {}: {e}", app.name);
                         }
                     }
+                    ShellEvent::ChooseEnvironment(choice) => {
+                        environments.select(choice);
+                        sky_image = environments.current();
+                        sky_dirty = true;
+                    }
+                    ShellEvent::ListDirectory(name) => {
+                        if let Some(name) = name {
+                            browser.enter(&name);
+                        }
+                        shell.show_directory(browser.label(), browser.entries());
+                    }
+                    ShellEvent::AddEnvironment(name) => {
+                        let path = browser.resolve(&name);
+                        let choice = environments.add(&path);
+                        environments.select(choice);
+                        sky_image = environments.current();
+                        sky_dirty = true;
+                    }
                     ShellEvent::Hud(action) => match action {
                         HudAction::Recentre => {
                             tracker.recenter();
@@ -706,10 +726,15 @@ pub fn run(
                             log::info!("restarting axis calibration from the HUD");
                             calibration = Some(Calibration::new());
                         }
-                        HudAction::NextEnvironment => {
-                            environments.advance();
-                            sky_image = environments.current();
-                            sky_dirty = true;
+                        // Opening the picker re-reads the folders, so an image dropped in
+                        // while Spatiand was running appears without a restart. The shell has
+                        // already switched mode; all that is owed is a fresh list.
+                        HudAction::OpenEnvironments => {
+                            environments.refresh();
+                            shell.set_environments(
+                                environments.entries(),
+                                environments.choice(),
+                            );
                         }
                         HudAction::Screenshot => screenshot = true,
                         HudAction::ToggleKeyboard => {
@@ -2098,6 +2123,9 @@ pub fn settle_axes(
 fn menu_detail(shell: &Shell) -> String {
     match shell.mode() {
         Mode::Hud => shell.hud().focused().detail.to_string(),
+        // Where you are, not what the row does. In a browser the question is always "which
+        // folder is this", and the answer does not fit in a row.
+        Mode::Files => shell.files().directory().to_string(),
         _ => String::new(),
     }
 }
@@ -2121,6 +2149,44 @@ pub fn menu_text(shell: &Shell) -> String {
                 out.push('\n');
             }
             out.push_str("\nA select    B back");
+            out
+        }
+        Mode::Environment => {
+            let picker = shell.environments();
+            let mut out = String::from("Environment\n\n");
+            for (i, row) in picker.rows().iter().enumerate() {
+                out.push_str(if i == picker.cursor() { "\u{25b8} " } else { "   " });
+                out.push_str(row.label);
+                // Spelt out rather than marked with a glyph. A tick or a bullet has to
+                // survive being read through optics at an angle, and "in use" survives
+                // anything — including a font that has no tick in it.
+                if row.in_use {
+                    out.push_str("  (in use)");
+                }
+                out.push('\n');
+            }
+            out.push_str("\nA select    B back");
+            out
+        }
+        Mode::Files => {
+            let files = shell.files();
+            let rows = files.rows();
+            let mut out = String::from("Add an image\n\n");
+            for (i, row) in rows.iter().enumerate() {
+                out.push_str(if i == files.cursor() { "\u{25b8} " } else { "   " });
+                out.push_str(&row.name);
+                // A trailing slash marks a folder. Cheaper than an icon and unambiguous at
+                // this resolution, where the difference between two similar glyphs is not.
+                if row.is_directory && row.name != spatiand_shell::files::PARENT_LABEL {
+                    out.push('/');
+                }
+                out.push('\n');
+            }
+            if rows.len() == 1 {
+                // Otherwise an empty folder looks exactly like a folder that failed to open.
+                out.push_str("\nNo folders or images here.\n");
+            }
+            out.push_str("\nA open    B back");
             out
         }
         Mode::Launcher if shell.launcher().is_empty() => {

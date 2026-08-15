@@ -15,6 +15,8 @@
 use crate::grid::Direction;
 
 pub mod category;
+pub mod environment;
+pub mod files;
 pub mod grid;
 pub mod hud;
 pub mod keyboard;
@@ -24,6 +26,10 @@ pub use grid::{Direction as NavDirection, Grid};
 pub use hud::{Hud, HudAction, HudItem};
 pub use keyboard::{Key, Keyboard};
 pub use category::{Group, GROUPS};
+pub use environment::{
+    EnvironmentAction, EnvironmentChoice, EnvironmentEntry, EnvironmentPicker, EnvironmentRow,
+};
+pub use files::{FileAction, FileBrowser, FileEntry};
 pub use launcher::{AppEntry, BubblePlacement, Launcher, Level};
 
 /// What the wearer meant, independent of which button they pressed.
@@ -46,6 +52,11 @@ pub enum Mode {
     /// Windows and the environment. The pointer is live.
     World,
     Hud,
+    /// Choosing what surrounds you. Reached from the HUD, and B returns there rather than to
+    /// the world — you came from a menu, so backing out should land you in it.
+    Environment,
+    /// Looking for an image to add. Reached from the environment picker.
+    Files,
     Launcher,
 }
 
@@ -58,12 +69,21 @@ pub enum ShellEvent {
     Hud(HudAction),
     Launch(AppEntry),
     ModeChanged(Mode),
+    /// Surround me with this.
+    ChooseEnvironment(EnvironmentChoice),
+    /// List a directory for the browser. `None` means wherever browsing should start; a name
+    /// is relative to the directory last listed, and may be [`files::PARENT_LABEL`].
+    ListDirectory(Option<String>),
+    /// Add this file — named relative to the directory last listed — to the environments.
+    AddEnvironment(String),
 }
 
 pub struct Shell {
     mode: Mode,
     hud: Hud,
     launcher: Launcher,
+    environments: EnvironmentPicker,
+    files: FileBrowser,
 }
 
 impl Shell {
@@ -72,6 +92,8 @@ impl Shell {
             mode: Mode::World,
             hud: Hud::new(has_desktop_settings),
             launcher: Launcher::new(apps),
+            environments: EnvironmentPicker::default(),
+            files: FileBrowser::default(),
         }
     }
 
@@ -87,8 +109,28 @@ impl Shell {
         &self.launcher
     }
 
+    pub fn environments(&self) -> &EnvironmentPicker {
+        &self.environments
+    }
+
+    pub fn files(&self) -> &FileBrowser {
+        &self.files
+    }
+
     pub fn set_apps(&mut self, apps: Vec<AppEntry>) {
         self.launcher.set_apps(apps);
+    }
+
+    /// Hand the picker the current list. The compositor calls this on startup and again
+    /// whenever the HUD asks to open the picker, so a file dropped into the folder mid-session
+    /// shows up without a restart.
+    pub fn set_environments(&mut self, entries: Vec<EnvironmentEntry>, current: EnvironmentChoice) {
+        self.environments.set_entries(entries, current);
+    }
+
+    /// Hand the browser a directory listing, in answer to [`ShellEvent::ListDirectory`].
+    pub fn show_directory(&mut self, directory: String, entries: Vec<FileEntry>) {
+        self.files.show(directory, entries);
     }
 
     /// Is a menu covering the world?
@@ -137,11 +179,19 @@ impl Shell {
                 // Inside the launcher, B climbs out of a group first and only closes the
                 // launcher once already at the top.
                 Mode::Launcher if self.launcher.back() => None,
+                // These two came from somewhere, and backing out returns there. Dropping
+                // straight to the world would mean re-opening the HUD to make a second try at
+                // a setting you have just decided against — the browser especially, which you
+                // reach two levels down and often leave empty-handed.
+                Mode::Environment => self.enter(Mode::Hud),
+                Mode::Files => self.enter(Mode::Environment),
                 _ => self.enter(Mode::World),
             },
             Intent::Navigate(direction) => {
                 match self.mode {
                     Mode::Hud => self.hud.step(direction),
+                    Mode::Environment => self.environments.step(direction),
+                    Mode::Files => self.files.step(direction),
                     Mode::Launcher => self.launcher.step(direction),
                     // In the world the D-pad will move focus between windows; until windows
                     // are drawn there is nothing to move between.
@@ -152,14 +202,43 @@ impl Shell {
             Intent::Accept => match self.mode {
                 Mode::Hud => {
                     let action = self.hud.activate();
-                    // Every HUD action except opening a settings window takes you back to the
-                    // world: staying on the menu after recentring hides the thing you just
-                    // changed.
-                    if !matches!(action, HudAction::OpenSystemSettings(_)) {
-                        self.mode = Mode::World;
+                    // The environment row opens a list rather than doing something, so it is
+                    // the one row that goes deeper instead of back to the world. The event is
+                    // still emitted: the compositor answers it by re-reading the folder, which
+                    // is what makes a newly dropped-in image appear.
+                    match action {
+                        HudAction::OpenEnvironments => self.mode = Mode::Environment,
+                        // Opening a settings window leaves the HUD up, since the window
+                        // appears beside it rather than instead of it.
+                        HudAction::OpenSystemSettings(_) => {}
+                        // Everything else takes you back to the world: staying on the menu
+                        // after recentring hides the thing you just changed.
+                        _ => self.mode = Mode::World,
                     }
                     Some(ShellEvent::Hud(action))
                 }
+                Mode::Environment => match self.environments.activate() {
+                    EnvironmentAction::Choose(choice) => {
+                        self.mode = Mode::World;
+                        Some(ShellEvent::ChooseEnvironment(choice))
+                    }
+                    EnvironmentAction::Browse => {
+                        self.mode = Mode::Files;
+                        Some(ShellEvent::ListDirectory(None))
+                    }
+                },
+                Mode::Files => match self.files.activate() {
+                    // Stay put: walking down a tree is several presses and each one needs the
+                    // listing that answers it.
+                    FileAction::Enter(name) => Some(ShellEvent::ListDirectory(Some(name))),
+                    // Adding also selects — "add this one" means you want to see it, and
+                    // returning to a list to then pick what you just added is a step nobody
+                    // wants. The compositor does the selecting; the shell only says which.
+                    FileAction::Choose(name) => {
+                        self.mode = Mode::World;
+                        Some(ShellEvent::AddEnvironment(name))
+                    }
+                },
                 Mode::Launcher => {
                     // A group opens; an application launches and gets out of the way.
                     let app = self.launcher.activate()?;
@@ -347,5 +426,177 @@ mod tests {
                 assert_eq!(s.mode(), Mode::World, "stuck after {open:?} then {escape:?}");
             }
         }
+    }
+
+    /// A shell sitting on the environment picker, with two images to choose from.
+    fn at_the_picker() -> Shell {
+        let mut s = shell();
+        s.set_environments(
+            vec![
+                EnvironmentEntry {
+                    label: "Blank (black)".into(),
+                    choice: EnvironmentChoice::Blank,
+                },
+                EnvironmentEntry {
+                    label: "Studio (generated)".into(),
+                    choice: EnvironmentChoice::Studio,
+                },
+                EnvironmentEntry {
+                    label: "sunset".into(),
+                    choice: EnvironmentChoice::File(0),
+                },
+            ],
+            EnvironmentChoice::Studio,
+        );
+        s.handle(Intent::ToggleHud);
+        open_environments(&mut s);
+        s
+    }
+
+    /// Walk the HUD down to the Environment row and press A.
+    ///
+    /// By position rather than by index, so inserting a row above it does not silently make
+    /// these tests exercise the wrong thing.
+    fn open_environments(s: &mut Shell) {
+        let row = s
+            .hud()
+            .items()
+            .iter()
+            .position(|i| i.action == HudAction::OpenEnvironments)
+            .expect("the HUD has an Environment row");
+        for _ in 0..row {
+            s.handle(Intent::Navigate(Direction::Down));
+        }
+        assert_eq!(s.hud().activate(), HudAction::OpenEnvironments);
+        s.handle(Intent::Accept);
+    }
+
+    #[test]
+    fn the_environment_row_opens_a_list_instead_of_changing_anything() {
+        // The behaviour the picker replaced: activating this row used to swap the world
+        // immediately, so seeing your options meant living through all of them.
+        let s = at_the_picker();
+        assert_eq!(s.mode(), Mode::Environment);
+
+        // And the compositor is still told, because that is its cue to re-read the folder —
+        // which is the whole mechanism by which an image dropped in mid-session appears.
+        let mut fresh = shell();
+        fresh.handle(Intent::ToggleHud);
+        let row = fresh
+            .hud()
+            .items()
+            .iter()
+            .position(|i| i.action == HudAction::OpenEnvironments)
+            .expect("the HUD has an Environment row");
+        for _ in 0..row {
+            fresh.handle(Intent::Navigate(Direction::Down));
+        }
+        assert_eq!(
+            fresh.handle(Intent::Accept),
+            Some(ShellEvent::Hud(HudAction::OpenEnvironments))
+        );
+    }
+
+    #[test]
+    fn choosing_an_environment_names_it_and_returns_to_the_world() {
+        let mut s = at_the_picker();
+        // Cursor starts on what is in use; step up to Blank.
+        s.handle(Intent::Navigate(Direction::Up));
+        assert_eq!(
+            s.handle(Intent::Accept),
+            Some(ShellEvent::ChooseEnvironment(EnvironmentChoice::Blank))
+        );
+        assert_eq!(s.mode(), Mode::World, "you should be looking at what you picked");
+    }
+
+    #[test]
+    fn backing_out_of_the_picker_returns_to_the_settings_it_came_from() {
+        // Dropping to the world would mean re-opening the HUD to make a second attempt at a
+        // setting you have just decided against.
+        let mut s = at_the_picker();
+        assert_eq!(s.handle(Intent::Back), Some(ShellEvent::ModeChanged(Mode::Hud)));
+        assert_eq!(s.mode(), Mode::Hud);
+    }
+
+    #[test]
+    fn the_browser_is_two_levels_down_and_b_climbs_out_one_at_a_time() {
+        let mut s = at_the_picker();
+        for _ in 0..10 {
+            s.handle(Intent::Navigate(Direction::Down));
+        }
+        // The last row browses, and asks for a listing rather than guessing a path.
+        assert_eq!(s.handle(Intent::Accept), Some(ShellEvent::ListDirectory(None)));
+        assert_eq!(s.mode(), Mode::Files);
+        assert_eq!(
+            s.handle(Intent::Back),
+            Some(ShellEvent::ModeChanged(Mode::Environment))
+        );
+        assert_eq!(
+            s.handle(Intent::Back),
+            Some(ShellEvent::ModeChanged(Mode::Hud))
+        );
+        assert_eq!(
+            s.handle(Intent::Back),
+            Some(ShellEvent::ModeChanged(Mode::World))
+        );
+    }
+
+    #[test]
+    fn walking_into_a_folder_stays_in_the_browser_but_picking_a_file_leaves() {
+        // Descending is several presses and each needs the listing that answers it, so the
+        // mode must not change. Choosing is done, so it must.
+        let mut s = at_the_picker();
+        for _ in 0..10 {
+            s.handle(Intent::Navigate(Direction::Down));
+        }
+        s.handle(Intent::Accept);
+        s.show_directory(
+            "/home/deck/Pictures".into(),
+            vec![
+                FileEntry {
+                    name: "Panoramas".into(),
+                    is_directory: true,
+                },
+                FileEntry {
+                    name: "sunset.jpg".into(),
+                    is_directory: false,
+                },
+            ],
+        );
+        s.handle(Intent::Navigate(Direction::Down));
+        assert_eq!(
+            s.handle(Intent::Accept),
+            Some(ShellEvent::ListDirectory(Some("Panoramas".into())))
+        );
+        assert_eq!(s.mode(), Mode::Files, "still browsing");
+
+        s.show_directory(
+            "/home/deck/Pictures/Panoramas".into(),
+            vec![FileEntry {
+                name: "hall.jpg".into(),
+                is_directory: false,
+            }],
+        );
+        s.handle(Intent::Navigate(Direction::Down));
+        assert_eq!(
+            s.handle(Intent::Accept),
+            Some(ShellEvent::AddEnvironment("hall.jpg".into()))
+        );
+        assert_eq!(s.mode(), Mode::World, "adding also shows it");
+    }
+
+    #[test]
+    fn every_new_mode_still_counts_as_a_menu_over_the_world() {
+        // `menu_is_open` is what suppresses the pointer and the two-thumb gesture. A mode
+        // that forgets to be a menu lets the laser drag a window behind the list you are
+        // reading, which is invisible until it has already moved something.
+        let mut s = at_the_picker();
+        assert!(s.menu_is_open());
+        for _ in 0..10 {
+            s.handle(Intent::Navigate(Direction::Down));
+        }
+        s.handle(Intent::Accept);
+        assert_eq!(s.mode(), Mode::Files);
+        assert!(s.menu_is_open());
     }
 }

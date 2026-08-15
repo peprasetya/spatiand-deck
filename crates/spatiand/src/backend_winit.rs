@@ -180,6 +180,8 @@ pub fn run(
         || std::path::Path::new("/usr/bin/systemsettings").exists();
     let mut shell = Shell::new(apps, has_kde);
     let mut environments = Environments::discover();
+    shell.set_environments(environments.entries(), environments.choice());
+    let mut browser = crate::environment::Browser::new();
     let mut sky_image = environments.current();
     let mut sky_dirty = false;
     let mut controller = spatiand_input::DeckController::open();
@@ -273,16 +275,33 @@ pub fn run(
                             log::warn!("could not launch {}: {e}", app.name);
                         }
                     }
+                    ShellEvent::ChooseEnvironment(choice) => {
+                        environments.select(choice);
+                        sky_image = environments.current();
+                        sky_dirty = true;
+                    }
+                    ShellEvent::ListDirectory(name) => {
+                        if let Some(name) = name {
+                            browser.enter(&name);
+                        }
+                        shell.show_directory(browser.label(), browser.entries());
+                    }
+                    ShellEvent::AddEnvironment(name) => {
+                        let path = browser.resolve(&name);
+                        let choice = environments.add(&path);
+                        environments.select(choice);
+                        sky_image = environments.current();
+                        sky_dirty = true;
+                    }
                     ShellEvent::Hud(action) => match action {
                         HudAction::Recentre => {
                             tracker.recenter();
                             log::info!("recentred");
                         }
                         HudAction::Calibrate => calibration = Some(Calibration::new()),
-                        HudAction::NextEnvironment => {
-                            environments.advance();
-                            sky_image = environments.current();
-                            sky_dirty = true;
+                        HudAction::OpenEnvironments => {
+                            environments.refresh();
+                            shell.set_environments(environments.entries(), environments.choice());
                         }
                         HudAction::OpenSystemSettings(module) => {
                             let command = format!("kcmshell6 {module}");

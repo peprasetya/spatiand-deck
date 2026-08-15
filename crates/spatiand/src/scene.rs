@@ -907,7 +907,9 @@ impl Scene {
         };
         match mode {
             Mode::World => {}
-            Mode::Hud => self.draw_hud(gl, eye, fov),
+            // All three are the same thing to draw: one text panel of rows with a cursor.
+            // The launcher is the odd one out because it is bubbles in space, not a list.
+            Mode::Hud | Mode::Environment | Mode::Files => self.draw_hud(gl, eye, fov),
             Mode::Launcher => self.draw_launcher(gl, eye, shell, fov),
         }
     }

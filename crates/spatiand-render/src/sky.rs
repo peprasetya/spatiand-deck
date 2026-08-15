@@ -180,6 +180,32 @@ impl Sky {
         ]
     }
 
+    /// Nothing at all.
+    ///
+    /// A deliberate choice rather than a failure state: with a window in front of you and
+    /// black behind it there is nothing competing for the eye, which is what you want when the
+    /// point of the session is the work and not the room. It is also the only environment that
+    /// costs no fill rate worth measuring.
+    ///
+    /// The consequence is honest and worth knowing before choosing it: the environment is also
+    /// what the glass bubbles refract, so with nothing to refract they read as flat dark discs.
+    /// Emptiness is the thing being asked for, and that is what emptiness looks like.
+    ///
+    /// Four pixels is enough — every direction samples the same colour, and a full-size black
+    /// image would be 8 MB of zeroes.
+    pub fn blank() -> Self {
+        let mut rgba = vec![0u8; 2 * 2 * 4];
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        Self {
+            width: 2,
+            height: 2,
+            rgba,
+            source: SkySource::mono_360(),
+        }
+    }
+
     /// The default environment, generated rather than downloaded.
     ///
     /// Spatiand has to look like something the first time it runs, on a machine with no assets
@@ -432,6 +458,21 @@ mod tests {
             total / sky.width
         };
         assert!(luma(8) > luma(56), "zenith {} vs nadir {}", luma(8), luma(56));
+    }
+
+    #[test]
+    fn the_blank_environment_is_black_and_opaque_everywhere() {
+        // Opaque matters: the sky is drawn first and everything else over it, so a
+        // transparent "black" would show whatever the framebuffer happened to hold.
+        let sky = Sky::blank();
+        assert_eq!(sky.rgba.len(), (sky.width * sky.height * 4) as usize);
+        for pixel in sky.rgba.chunks_exact(4) {
+            assert_eq!(pixel, [0, 0, 0, 255]);
+        }
+        // And it must still be a well-formed 360 source, or the shader samples a rect that
+        // does not exist.
+        assert_eq!(sky.source, SkySource::mono_360());
+        assert!(sky.source.sample_uv([1.0, 0.0, 0.0]).is_some());
     }
 
     #[test]

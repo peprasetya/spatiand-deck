@@ -47,8 +47,14 @@ pub enum HudAction {
     Screenshot,
     /// Show or hide the on-screen keyboard.
     ToggleKeyboard,
-    /// Cycle the 360 environment.
-    NextEnvironment,
+    /// Open the environment picker.
+    ///
+    /// This was once "cycle to the next one", which is a control that gets worse with every
+    /// image you add: reaching the fourth means loading and looking at the second and third,
+    /// and there is no way back other than all the way round. The compositor should answer
+    /// this by re-reading the environments folder and calling `Shell::set_environments`, which
+    /// is what lets an image dropped in mid-session appear without a restart.
+    OpenEnvironments,
     /// Hand the display back and return to the desktop session.
     ReturnToDesktop,
     /// Float a system settings panel as a 2D window.
@@ -97,8 +103,8 @@ impl Hud {
             },
             HudItem {
                 label: "Environment",
-                detail: "Change the world around you",
-                action: HudAction::NextEnvironment,
+                detail: "Choose what surrounds you, or add an image",
+                action: HudAction::OpenEnvironments,
             },
             HudItem {
                 label: "Keyboard",
