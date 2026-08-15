@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Hand the Steam Deck's controller back to its own firmware.
 
 Run this if a button stops responding — the left bumper was the one that found it — and a
@@ -13,7 +13,22 @@ So the symptom outlives every obvious remedy and looks exactly like a failed but
 
 This sends the one command that undoes it, and nothing else.
 
-    sudo python3 tools/restore-controller.py
+    sudo tools/restore-controller.py
+
+Two things about *where* to run it, both of which look like the script being broken:
+
+  * **On the Deck's own desktop, not inside the build container.** The `holo` distrobox is an
+    Arch image that only ever needed a Rust toolchain, so it has no Python at all — hence the
+    interpreter pinned above rather than `/usr/bin/env python3`, which resolves against
+    whatever `PATH` the calling shell happens to have.
+  * **From a terminal, with sudo.** Writing a HID feature report needs privilege, and a file
+    manager double-click never elevates. Launched that way it fails silently, with the
+    explanation going to a stdout nobody is reading.
+
+If it reports "default settings restored" and the button is still dead, the answer is not in
+here: the command reached the firmware and the firmware did what it was asked. Stop Steam,
+run `tools/probe-controller.py --record 30`, and watch whether the bit moves at all. A bit
+that never goes high is a switch or a flex cable, not state this script can clear.
 """
 import fcntl
 import glob
