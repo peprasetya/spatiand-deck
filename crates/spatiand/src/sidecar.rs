@@ -16,7 +16,7 @@
 use glam::{Mat4, Vec3, Vec4};
 
 use crate::gl::QuadPipeline;
-use crate::system::{Monitors, Series};
+use crate::system::{AudioDevice, Direction, Monitors, Series};
 
 use smithay::backend::renderer::gles::ffi;
 
@@ -63,8 +63,14 @@ const BAR_HEIGHT: f32 = 26.0;
 /// 800-pixel panel the number is the only part anyone actually reads, and setting the two at
 /// the same weight is what made the old panel look like a log file.
 const HEADER_TEXT: f32 = 46.0;
-const LABEL_TEXT: f32 = 24.0;
-const VALUE_TEXT: f32 = 44.0;
+const LABEL_TEXT: f32 = 22.0;
+const VALUE_TEXT: f32 = 36.0;
+/// One entry in a device list. Smaller than a reading, because there are several of them and
+/// they are read once when choosing rather than glanced at continually.
+const DEVICE_TEXT: f32 = 22.0;
+/// How tall one device row is. A finger has to land on it, so this is the same order as a
+/// slider card rather than the size the text needs.
+const DEVICE_ROW: f32 = 54.0;
 
 
 /// The lowest the brightness slider will go.
@@ -113,23 +119,26 @@ impl Rect {
 /// Something on the sidecar a finger can change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Knob {
-    /// The Deck's own backlight.
-    Screen,
     /// The headset's panel. The glasses have their own temple buttons for this, but nobody
     /// can see a temple button while wearing them, whereas the Deck is right there to look
     /// down at.
     Glasses,
+    /// The Deck's own backlight.
+    Screen,
     Volume,
 }
 
 impl Knob {
-    /// In the order they are drawn.
-    pub const ALL: [Knob; 3] = [Knob::Screen, Knob::Glasses, Knob::Volume];
+    /// In the order they are drawn: the glasses first, because in a spatial session they are
+    /// the display being looked *through*, and the Deck's panel is the one glanced down at.
+    pub const ALL: [Knob; 3] = [Knob::Glasses, Knob::Screen, Knob::Volume];
 
     pub fn label(self) -> &'static str {
         match self {
-            Knob::Screen => "Screen",
-            Knob::Glasses => "Glasses",
+            // Named for the thing, not for the setting. "Screen" and "Glasses" side by side
+            // left it ambiguous which screen was which.
+            Knob::Glasses => "Glass Brightness",
+            Knob::Screen => "Deck Brightness",
             Knob::Volume => "Volume",
         }
     }
@@ -158,6 +167,36 @@ impl Levels {
     }
 }
 
+/// What is available to listen to and speak into, as it stands right now.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Audio {
+    pub outputs: Vec<AudioDevice>,
+    pub inputs: Vec<AudioDevice>,
+}
+
+impl Audio {
+    pub fn list(&self, direction: Direction) -> &[AudioDevice] {
+        match direction {
+            Direction::Output => &self.outputs,
+            Direction::Input => &self.inputs,
+        }
+    }
+}
+
+/// What a touch asked the machine to do.
+///
+/// The sidecar decides *what was meant* and the backend decides *how to do it*. Keeping
+/// `wpctl` and sysfs out of this file is what lets the whole interaction -- where a finger
+/// landed, what it grabbed, what it chose -- be tested with no panel, no mixer and no
+/// backlight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// A slider is being dragged; ask [`Sidecar::knob_value`] where it is now.
+    Moved(Knob),
+    /// Make this PipeWire node the default for its direction.
+    ChooseDevice(Direction, u32),
+}
+
 /// Every row of the sidecar, worked out once.
 ///
 /// Drawing, laying out text and hit testing all need these numbers, and before this they each
@@ -168,9 +207,11 @@ pub struct Rows {
     pub header: Rect,
     /// The left column, one card per measurement.
     pub graphs: [Rect; 3],
-    /// The right column, one card per knob, indexed by [`Knob::ALL`]. `None` where the machine
+    /// The middle column, one card per knob, indexed by [`Knob::ALL`]. `None` where the machine
     /// has no reading to show — a slider that moves nothing is worse than an absent one.
     pub sliders: [Option<Rect>; 3],
+    /// The right column, one card per direction, indexed by [`Direction::ALL`].
+    pub devices: [Rect; 2],
 }
 
 impl Rows {
@@ -187,6 +228,50 @@ impl Rows {
             w: (card.w - CARD_PAD * 2.0).max(1.0),
             h: BAR_HEIGHT,
         }
+    }
+
+    /// Where each entry in a device card is drawn, top to bottom.
+    ///
+    /// Only as many as fit. A list that overflowed its card would draw over the one below and
+    /// take touches meant for it, so the overflow is dropped rather than clipped — and
+    /// [`Rows::device_capacity`] is what the caller uses to say so out loud.
+    pub fn device_rows(card: Rect, count: usize) -> impl Iterator<Item = Rect> {
+        let top = card.y + CARD_PAD + LABEL_TEXT + CARD_PAD * 0.6;
+        let shown = count.min(Self::device_capacity(card));
+        (0..shown).map(move |i| Rect {
+            x: card.x + CARD_PAD * 0.5,
+            y: top + DEVICE_ROW * i as f32,
+            w: (card.w - CARD_PAD).max(1.0),
+            h: DEVICE_ROW,
+        })
+    }
+
+    /// How many entries a device card has room for.
+    pub fn device_capacity(card: Rect) -> usize {
+        let top = card.y + CARD_PAD + LABEL_TEXT + CARD_PAD * 0.6;
+        let room = (card.y + card.h - CARD_PAD * 0.5) - top;
+        (room / DEVICE_ROW).floor().max(0.0) as usize
+    }
+
+    pub fn device_card(&self, direction: Direction) -> Rect {
+        match direction {
+            Direction::Output => self.devices[0],
+            Direction::Input => self.devices[1],
+        }
+    }
+
+    /// Which device entry is under a point.
+    pub fn device_at(&self, x: f32, y: f32, audio: &Audio) -> Option<(Direction, usize)> {
+        for direction in Direction::ALL {
+            let card = self.device_card(direction);
+            let count = audio.list(direction).len();
+            for (index, row) in Self::device_rows(card, count).enumerate() {
+                if row.contains(x, y) {
+                    return Some((direction, index));
+                }
+            }
+        }
+        None
     }
 
     pub fn slider(&self, knob: Knob) -> Option<Rect> {
@@ -294,8 +379,11 @@ impl Sidecar {
         let header = Rect { x: MARGIN, y: MARGIN, w: full, h: HEADER_HEIGHT };
         let top = MARGIN + HEADER_HEIGHT + HEADER_GAP;
 
-        let column = (full - COLUMN_GAP) * 0.5;
-        let right = MARGIN + column + COLUMN_GAP;
+        // Three columns: what the machine is doing, what the wearer can change, and where the
+        // sound goes.
+        let column = (full - COLUMN_GAP * 2.0) / 3.0;
+        let middle = MARGIN + column + COLUMN_GAP;
+        let right = middle + column + COLUMN_GAP;
         // Both columns take the same three rows, so the two line up across the gutter. A grid
         // that agrees with itself is most of what separates this from the version that looked
         // like a readout.
@@ -307,6 +395,15 @@ impl Sidecar {
             w: column,
             h: card,
         };
+        // The device lists get the same column split two ways instead of three, because a list
+        // needs height and there are only two of them.
+        let tall = ((available - CARD_GAP) / 2.0).max(1.0);
+        let devices = std::array::from_fn(|i| Rect {
+            x: right,
+            y: top + (tall + CARD_GAP) * i as f32,
+            w: column,
+            h: tall,
+        });
 
         let graphs = std::array::from_fn(|i| slot(MARGIN, i));
 
@@ -315,13 +412,13 @@ impl Sidecar {
         let mut next = 0usize;
         let sliders = Knob::ALL.map(|knob| {
             levels.get(knob).map(|_| {
-                let r = slot(right, next);
+                let r = slot(middle, next);
                 next += 1;
                 r
             })
         });
 
-        Rows { header, graphs, sliders }
+        Rows { header, graphs, sliders, devices }
     }
 
     /// A touch, in the digitiser's 0..1, as a point in landscape pixels.
@@ -385,7 +482,12 @@ impl Sidecar {
     /// Returning actions rather than calling `wpctl` and writing to sysfs from here keeps this
     /// file about layout. It also means the whole interaction — where a finger landed, what it
     /// grabbed, what it dragged — is testable without a panel, a mixer or a backlight.
-    pub fn touch(&mut self, events: &[spatiand_input::TouchEvent], levels: Levels) -> Vec<Knob> {
+    pub fn touch(
+        &mut self,
+        events: &[spatiand_input::TouchEvent],
+        levels: Levels,
+        audio: &Audio,
+    ) -> Vec<Action> {
         use spatiand_input::TouchEvent;
         let rows = self.rows(levels);
         let mut changed = Vec::new();
@@ -400,7 +502,14 @@ impl Sidecar {
                     if self.held.is_none() {
                         if let Some((knob, _)) = rows.knob_at(x, y) {
                             self.held = Some((c.slot, knob));
-                            changed.push(knob);
+                            changed.push(Action::Moved(knob));
+                        } else if let Some((direction, index)) = rows.device_at(x, y, audio) {
+                            // Chosen on the way down rather than on release. A device list is
+                            // a set of buttons, not a slider, so there is nothing to drag and
+                            // waiting for the lift only adds a delay before the sound moves.
+                            if let Some(device) = audio.list(direction).get(index) {
+                                changed.push(Action::ChooseDevice(direction, device.id));
+                            }
                         }
                     }
                 }
@@ -413,7 +522,7 @@ impl Sidecar {
                     }
                     if let Some((slot, knob)) = self.held {
                         if slot == c.slot {
-                            changed.push(knob);
+                            changed.push(Action::Moved(knob));
                         }
                     }
                 }
@@ -497,6 +606,7 @@ impl Sidecar {
         rounded: &crate::gl::RoundedPipeline,
         monitors: &Monitors,
         levels: Levels,
+        audio: &Audio,
         prepared: &[Label],
     ) {
         let layout = Layout {
@@ -577,6 +687,32 @@ impl Sidecar {
                 INK,
                 knob_size * 0.5,
             );
+        }
+
+        for direction in Direction::ALL {
+            let card = rows.device_card(direction);
+            round(card, CARD, CARD_RADIUS);
+            let devices = audio.list(direction);
+            for (device, row) in devices.iter().zip(Rows::device_rows(card, devices.len())) {
+                if !device.is_default {
+                    continue;
+                }
+                // Only the chosen one is drawn. An unselected row is its text and nothing
+                // else, so the eye finds the current device by looking for the one thing on
+                // the card that is lit rather than by comparing five similar rows.
+                round(row, [ACCENT[0], ACCENT[1], ACCENT[2], 0.22], row.h * 0.5);
+                let dot = DEVICE_TEXT * 0.5;
+                round(
+                    Rect {
+                        x: row.x + CARD_PAD * 0.5,
+                        y: row.y + (row.h - dot) * 0.5,
+                        w: dot,
+                        h: dot,
+                    },
+                    ACCENT,
+                    dot * 0.5,
+                );
+            }
         }
 
         // Wherever a finger is. This is the only confirmation the panel gives that a touch
@@ -663,6 +799,7 @@ impl Sidecar {
         monitors: &Monitors,
         status: &str,
         levels: Levels,
+        audio: &Audio,
     ) -> Vec<Label> {
         let rows = self.rows(levels);
         let mut out = Vec::new();
@@ -761,6 +898,53 @@ impl Sidecar {
                 knob.label().to_string(),
                 format!("{:.0}%", value * 100.0),
             );
+        }
+
+        for direction in Direction::ALL {
+            let card = rows.device_card(direction);
+            push(
+                self,
+                renderer,
+                text,
+                direction.label().to_string(),
+                card.x + CARD_PAD,
+                card.y + CARD_PAD,
+                LABEL_TEXT,
+                false,
+                DIM,
+            );
+            let devices = audio.list(direction);
+            if devices.is_empty() {
+                // Say so rather than leaving an empty card, which reads as something still
+                // loading.
+                push(
+                    self,
+                    renderer,
+                    text,
+                    "None found".to_string(),
+                    card.x + CARD_PAD,
+                    card.y + CARD_PAD * 2.0 + LABEL_TEXT,
+                    DEVICE_TEXT,
+                    false,
+                    DIM,
+                );
+                continue;
+            }
+            for (device, row) in devices.iter().zip(Rows::device_rows(card, devices.len())) {
+                push(
+                    self,
+                    renderer,
+                    text,
+                    device.name.clone(),
+                    // Clear of the dot that marks the current one, and by the same amount
+                    // whether or not this row has one, so the list does not step sideways.
+                    row.x + CARD_PAD * 0.5 + DEVICE_TEXT + CARD_PAD * 0.5,
+                    row.y + (row.h - DEVICE_TEXT) * 0.5,
+                    DEVICE_TEXT,
+                    false,
+                    if device.is_default { INK } else { DIM },
+                );
+            }
         }
         out
     }
@@ -924,9 +1108,14 @@ mod tests {
         let s = sidecar((800, 1280));
         let rows = s.rows(all());
         let full = s.size.0 - MARGIN * 2.0;
-        for card in rows.graphs.into_iter().chain(rows.sliders.into_iter().flatten()) {
+        for card in rows
+            .graphs
+            .into_iter()
+            .chain(rows.sliders.into_iter().flatten())
+            .chain(rows.devices)
+        {
             assert!(
-                card.w < full * 0.6,
+                card.w < full * 0.4,
                 "a card is {} wide of a possible {full}",
                 card.w
             );
@@ -961,6 +1150,105 @@ mod tests {
         assert!(track.h > 0.0 && track.w > track.h, "a track should be a capsule, not a dot");
     }
 
+    fn some_audio() -> Audio {
+        let device = |id: u32, name: &str, is_default: bool| AudioDevice {
+            id,
+            name: name.into(),
+            is_default,
+        };
+        Audio {
+            outputs: vec![
+                device(62, "Deck Headphones", false),
+                device(66, "Deck Speaker", false),
+                device(81, "Glasses", true),
+            ],
+            inputs: vec![
+                device(50, "Glasses Microphone", true),
+                device(72, "Deck Microphone", false),
+            ],
+        }
+    }
+
+    #[test]
+    fn tapping_a_device_chooses_it() {
+        let mut s = sidecar((800, 1280));
+        let audio = some_audio();
+        let rows = s.rows(all());
+        let card = rows.device_card(Direction::Output);
+        // The second entry: Deck Speaker, id 66.
+        let row = Rows::device_rows(card, audio.outputs.len()).nth(1).expect("a second row");
+        let event = press(&s, 0, row.x + row.w * 0.5, row.y + row.h * 0.5);
+        assert_eq!(
+            s.touch(&[event], all(), &audio),
+            vec![Action::ChooseDevice(Direction::Output, 66)]
+        );
+    }
+
+    #[test]
+    fn the_two_device_lists_do_not_take_each_others_taps() {
+        // Output and Input sit in one column, one above the other, and their ids overlap with
+        // nothing to distinguish them but position. A row bleeding into the card below would
+        // silently change the microphone when the wearer asked for a speaker.
+        let s = sidecar((800, 1280));
+        let audio = some_audio();
+        let rows = s.rows(all());
+        for direction in Direction::ALL {
+            let card = rows.device_card(direction);
+            for row in Rows::device_rows(card, audio.list(direction).len()) {
+                assert!(
+                    row.y >= card.y && row.y + row.h <= card.y + card.h,
+                    "a {direction:?} row escapes its card"
+                );
+                let found = rows.device_at(row.x + 5.0, row.y + row.h * 0.5, &audio);
+                assert_eq!(found.map(|(d, _)| d), Some(direction));
+            }
+        }
+    }
+
+    #[test]
+    fn a_device_list_never_draws_past_its_card() {
+        // A machine with a dock, a headset and two Bluetooth speakers can offer more than
+        // there is room for. Overflow has to be dropped rather than drawn over the card
+        // below, which would also steal its touches.
+        let s = sidecar((800, 1280));
+        let card = s.rows(all()).device_card(Direction::Output);
+        let capacity = Rows::device_capacity(card);
+        assert!(capacity >= 3, "only room for {capacity} devices");
+        assert_eq!(Rows::device_rows(card, 99).count(), capacity);
+        for row in Rows::device_rows(card, 99) {
+            assert!(row.y + row.h <= card.y + card.h + 0.5);
+        }
+    }
+
+    #[test]
+    fn a_slider_and_a_device_are_never_both_under_one_finger() {
+        // The two live in adjacent columns and are hit-tested by different methods, so an
+        // overlap would fire both and set a volume while switching a speaker.
+        let s = sidecar((800, 1280));
+        let audio = some_audio();
+        let rows = s.rows(all());
+        for direction in Direction::ALL {
+            let card = rows.device_card(direction);
+            for row in Rows::device_rows(card, audio.list(direction).len()) {
+                let point = (row.x + row.w * 0.5, row.y + row.h * 0.5);
+                assert!(
+                    rows.knob_at(point.0, point.1).is_none(),
+                    "a device row at {point:?} also reads as a slider"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_list_is_not_a_panic() {
+        // No sound server, or a poll that happened before wireplumber was up.
+        let s = sidecar((800, 1280));
+        let rows = s.rows(all());
+        let empty = Audio::default();
+        assert!(rows.device_at(400.0, 400.0, &empty).is_none());
+        assert_eq!(Rows::device_rows(rows.device_card(Direction::Input), 0).count(), 0);
+    }
+
     #[test]
     fn a_landscape_panel_needs_no_turn() {
         let s = sidecar((1920, 1080));
@@ -974,7 +1262,12 @@ mod tests {
         // row past the bottom edge is simply invisible.
         let s = sidecar((800, 1280));
         let rows = s.rows(all());
-        for card in rows.graphs.into_iter().chain(rows.sliders.into_iter().flatten()) {
+        for card in rows
+            .graphs
+            .into_iter()
+            .chain(rows.sliders.into_iter().flatten())
+            .chain(rows.devices)
+        {
             assert!(
                 card.y + card.h <= s.size.1 - MARGIN + 0.5,
                 "a card runs to {} of {}",
@@ -995,6 +1288,7 @@ mod tests {
             .graphs
             .into_iter()
             .chain(rows.sliders.into_iter().flatten())
+            .chain(rows.devices)
             .collect();
         for (i, a) in cards.iter().enumerate() {
             for b in &cards[i + 1..] {
@@ -1030,19 +1324,32 @@ mod tests {
         let s = sidecar((800, 1280));
         let no_glasses = s.rows(Levels { glasses: None, ..all() });
         assert!(no_glasses.slider(Knob::Glasses).is_none());
-        // The two that remain close up rather than leaving a hole where the third was.
-        assert_eq!(no_glasses.slider(Knob::Screen), s.rows(all()).slider(Knob::Screen));
+        // The two that remain close up rather than leaving a hole where the third was. The
+        // glasses are drawn first, so with them gone everything below shifts up one slot.
+        let full = s.rows(all());
+        assert_eq!(
+            no_glasses.slider(Knob::Screen),
+            full.slider(Knob::Glasses),
+            "the deck slider should take the empty top slot"
+        );
         assert_eq!(
             no_glasses.slider(Knob::Volume),
-            s.rows(all()).slider(Knob::Glasses),
-            "volume should move up into the empty slot"
+            full.slider(Knob::Screen),
+            "and volume should follow it up"
         );
 
         let none = s.rows(Levels::default());
         assert!(Knob::ALL.into_iter().all(|k| none.slider(k).is_none()));
         // Graphs do not depend on any of this, so they must be untouched.
-        assert_eq!(none.graphs, s.rows(all()).graphs);
-        assert!(none.knob_at(900.0, 400.0).is_none());
+        assert_eq!(none.graphs, full.graphs);
+        // A point in the middle of the column the sliders would have occupied.
+        let where_sliders_were = full.slider(Knob::Screen).expect("a screen slider");
+        assert!(none
+            .knob_at(
+                where_sliders_were.x + where_sliders_were.w * 0.5,
+                where_sliders_were.y + where_sliders_were.h * 0.5
+            )
+            .is_none());
     }
 
     /// A press at a landscape point, as the decoder would report it.
@@ -1084,7 +1391,7 @@ mod tests {
         // same rectangle.
         let track = Rows::track(card);
         let event = press(&s, 0, track.x + track.w * 0.25, card.y + card.h * 0.5);
-        assert_eq!(s.touch(&[event], all()), vec![Knob::Volume]);
+        assert_eq!(s.touch(&[event], all(), &Audio::default()), vec![Action::Moved(Knob::Volume)]);
         let value = s.knob_value(Knob::Volume, all()).expect("a value");
         assert!((value - 0.25).abs() < 0.02, "got {value}");
     }
@@ -1097,10 +1404,10 @@ mod tests {
         let card = s.rows(all()).slider(Knob::Volume).expect("volume card");
         let track = Rows::track(card);
         let down = press(&s, 0, track.x + 10.0, card.y + card.h * 0.5);
-        s.touch(&[down], all());
+        s.touch(&[down], all(), &Audio::default());
         // Well clear of the card, and three quarters of the way across the track.
         let away = drag(&s, 0, track.x + track.w * 0.75, card.y - 120.0);
-        assert_eq!(s.touch(&[away], all()), vec![Knob::Volume]);
+        assert_eq!(s.touch(&[away], all(), &Audio::default()), vec![Action::Moved(Knob::Volume)]);
         let value = s.knob_value(Knob::Volume, all()).expect("still held");
         assert!((value - 0.75).abs() < 0.02, "got {value}");
     }
@@ -1109,8 +1416,8 @@ mod tests {
     fn lifting_releases_the_knob() {
         let mut s = sidecar((800, 1280));
         let volume = s.rows(all()).slider(Knob::Volume).expect("volume card");
-        s.touch(&[press(&s, 0, volume.x + 40.0, volume.y + 20.0)], all());
-        s.touch(&[spatiand_input::TouchEvent::Up { slot: 0 }], all());
+        s.touch(&[press(&s, 0, volume.x + 40.0, volume.y + 20.0)], all(), &Audio::default());
+        s.touch(&[spatiand_input::TouchEvent::Up { slot: 0 }], all(), &Audio::default());
         assert!(s.knob_value(Knob::Volume, all()).is_none());
         assert!(s.touches.is_empty(), "the dot should go with the finger");
     }
@@ -1121,9 +1428,9 @@ mod tests {
         // and jump the value to wherever it touched.
         let mut s = sidecar((800, 1280));
         let volume = s.rows(all()).slider(Knob::Volume).expect("volume card");
-        s.touch(&[press(&s, 0, volume.x + 10.0, volume.y + 20.0)], all());
+        s.touch(&[press(&s, 0, volume.x + 10.0, volume.y + 20.0)], all(), &Audio::default());
         let intruder = press(&s, 1, volume.x + volume.w - 10.0, volume.y + 20.0);
-        s.touch(&[intruder], all());
+        s.touch(&[intruder], all(), &Audio::default());
         let value = s.knob_value(Knob::Volume, all()).expect("still ours");
         assert!(value < 0.1, "the first finger should still own it, got {value}");
     }
@@ -1133,7 +1440,7 @@ mod tests {
         let mut s = sidecar((800, 1280));
         let graph = s.rows(all()).graphs[1];
         let event = press(&s, 0, graph.x + graph.w * 0.5, graph.y + graph.h * 0.5);
-        assert!(s.touch(&[event], all()).is_empty());
+        assert!(s.touch(&[event], all(), &Audio::default()).is_empty());
         assert_eq!(s.touches.len(), 1, "but it should still show a dot");
     }
 
@@ -1143,10 +1450,10 @@ mod tests {
         // on that panel.
         let mut s = sidecar((800, 1280));
         let bar = s.rows(all()).slider(Knob::Screen).expect("screen card");
-        s.touch(&[press(&s, 0, bar.x - 200.0, bar.y + 20.0)], all());
+        s.touch(&[press(&s, 0, bar.x - 200.0, bar.y + 20.0)], all(), &Audio::default());
         // Pressing left of the bar still grabs nothing; press on it, then drag off the left.
-        s.touch(&[press(&s, 1, bar.x + 40.0, bar.y + 20.0)], all());
-        s.touch(&[drag(&s, 1, bar.x - 500.0, bar.y + 20.0)], all());
+        s.touch(&[press(&s, 1, bar.x + 40.0, bar.y + 20.0)], all(), &Audio::default());
+        s.touch(&[drag(&s, 1, bar.x - 500.0, bar.y + 20.0)], all(), &Audio::default());
         let value = s.knob_value(Knob::Screen, all()).expect("held");
         assert!(value >= MINIMUM_BRIGHTNESS, "got {value}");
     }

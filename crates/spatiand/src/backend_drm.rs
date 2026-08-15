@@ -204,6 +204,7 @@ pub fn run(
         glasses: None,
         volume: crate::system::volume(),
     };
+    let mut audio = crate::sidecar::Audio::default();
     let mut slow_status = std::time::Instant::now();
 
     // The shell — what is on screen and what a button means. Deliberately built once, outside
@@ -1464,6 +1465,11 @@ pub fn run(
                     slow_status = std::time::Instant::now();
                     levels.volume = crate::system::volume();
                     levels.screen = backlight.as_ref().and_then(|b| b.level());
+                    // Re-read on the same tick, which is how a headset or a Bluetooth speaker
+                    // plugged in mid-session turns up in the list without anything having to
+                    // watch for it.
+                    audio.outputs = crate::system::audio_devices(crate::system::Direction::Output);
+                    audio.inputs = crate::system::audio_devices(crate::system::Direction::Input);
                     // Not re-read from the glasses on this timer. Every MCU exchange waits up
                     // to 1.5 s for an ack, and doing that twice a second on the render thread
                     // would stall the frame loop far worse than a stale reading ever shows.
@@ -1479,7 +1485,29 @@ pub fn run(
                 if let Some(touch) = touchscreen.as_mut() {
                     let events = touch.poll();
                     if !events.is_empty() {
-                        for knob in ui.touch(&events, levels) {
+                        for action in ui.touch(&events, levels, &audio) {
+                            let knob = match action {
+                                crate::sidecar::Action::Moved(knob) => knob,
+                                crate::sidecar::Action::ChooseDevice(direction, id) => {
+                                    crate::system::set_default_device(id);
+                                    // Move the tick's mark straight away rather than waiting
+                                    // up to two seconds for the next poll to confirm it. A
+                                    // list that does not respond until later reads as a tap
+                                    // that missed, and the wearer taps again.
+                                    for device in match direction {
+                                        crate::system::Direction::Output => &mut audio.outputs,
+                                        crate::system::Direction::Input => &mut audio.inputs,
+                                    } {
+                                        device.is_default = device.id == id;
+                                    }
+                                    // The volume shown belongs to whichever sink is default,
+                                    // so it has to follow the choice.
+                                    if direction == crate::system::Direction::Output {
+                                        levels.volume = crate::system::volume();
+                                    }
+                                    continue;
+                                }
+                            };
                             let Some(value) = ui.knob_value(knob, levels) else {
                                 continue;
                             };
@@ -1517,7 +1545,8 @@ pub fn run(
                         }
                     }
                 }
-                let prepared = ui.prepare(&mut renderer, &mut text, &monitors, &status_text, levels);
+                let prepared =
+                    ui.prepare(&mut renderer, &mut text, &monitors, &status_text, levels, &audio);
                 let (sw, sh) = (side.size.0 as i32, side.size.1 as i32);
                 let fbo = side.fbo;
                 let quads = scene.quads();
@@ -1528,7 +1557,7 @@ pub fn run(
                     gl.Viewport(0, 0, sw, sh);
                     gl.ClearColor(0.02, 0.03, 0.05, 1.0);
                     gl.Clear(ffi::COLOR_BUFFER_BIT);
-                    ui.draw(gl, quads, rounded, &monitors, levels, &prepared);
+                    ui.draw(gl, quads, rounded, &monitors, levels, &audio, &prepared);
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
                 })?;
 

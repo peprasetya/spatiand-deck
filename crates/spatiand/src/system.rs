@@ -320,3 +320,294 @@ mod tests {
         assert!(Series::new("x").is_empty());
     }
 }
+
+// --- audio devices ---
+
+/// Which end of the audio path a device sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Output,
+    Input,
+}
+
+impl Direction {
+    pub const ALL: [Direction; 2] = [Direction::Output, Direction::Input];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Direction::Output => "Output",
+            Direction::Input => "Input",
+        }
+    }
+
+    /// What `wpctl status` calls this section.
+    fn heading(self) -> &'static str {
+        match self {
+            Direction::Output => "Sinks:",
+            Direction::Input => "Sources:",
+        }
+    }
+}
+
+/// Somewhere sound can come from or go to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioDevice {
+    /// PipeWire's node id, which is what `wpctl` takes. Not stable across a replug, which is
+    /// why the list is re-read rather than cached.
+    pub id: u32,
+    /// Shortened for a panel read at arm's length. See [`friendly_name`].
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// Everything currently available, in both directions.
+///
+/// Re-read rather than watched. A proper subscription would mean speaking the PipeWire wire
+/// protocol, which is a large dependency for a list that changes when somebody plugs in a
+/// headset — and the sidecar already wakes on a timer for the other readings, so this costs
+/// one more process on a tick that was happening anyway. Plugging in a USB or Bluetooth device
+/// shows up on the next tick, which is what "updates when something is connected" needs to
+/// mean here.
+pub fn audio_devices(direction: Direction) -> Vec<AudioDevice> {
+    let Ok(out) = std::process::Command::new("wpctl").arg("status").output() else {
+        return Vec::new();
+    };
+    parse_devices(&String::from_utf8_lossy(&out.stdout), direction)
+}
+
+/// Make a device the default, and move anything already playing over to it.
+///
+/// Setting the default alone would leave whatever is currently making sound still pointed at
+/// the old device, so picking "Glasses" mid-video would do nothing audible until the next
+/// thing started. `wpctl` has no "move existing streams" of its own, so the default is set and
+/// the sound server's own rescan is relied on — which is what the desktop's own picker does.
+pub fn set_default_device(id: u32) {
+    let result = std::process::Command::new("wpctl")
+        .args(["set-default", &id.to_string()])
+        .status();
+    match result {
+        Ok(status) if !status.success() => log::warn!("wpctl set-default {id} failed: {status}"),
+        Err(e) => log::warn!("could not run wpctl: {e}"),
+        _ => {}
+    }
+}
+
+/// Pull one section out of `wpctl status`.
+///
+/// The output is a drawn tree meant for a person, so this is parsing a human-readable format,
+/// which is worth being uneasy about. The alternatives are worse: `pw-dump` is JSON but needs
+/// a JSON dependency and describes the whole graph rather than the two lists wanted here, and
+/// the wire protocol is an enormous amount of surface for a picker. So it is parsed
+/// defensively — anything that does not look like a numbered entry is skipped rather than
+/// guessed at — and pinned by tests against real captured output.
+///
+/// A section ends at the next line whose tree characters step back out, which is how a device
+/// list is told from the `Filters:` block that follows it. That block matters: on this machine
+/// the *default source* is a loopback filter rather than anything under `Sources:`, and
+/// treating filters as devices would offer the wearer a list of plumbing.
+pub fn parse_devices(text: &str, direction: Direction) -> Vec<AudioDevice> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start_matches(['│', '├', '└', '─', ' ']);
+        if trimmed.starts_with(direction.heading()) {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        // Any other section heading ends this one.
+        if trimmed.ends_with(':') && !trimmed.is_empty() {
+            break;
+        }
+        let Some(device) = parse_device_line(trimmed) else {
+            continue;
+        };
+        out.push(device);
+    }
+    out
+}
+
+/// One `  *   81. Air Analog Stereo   [vol: 0.32]` line.
+fn parse_device_line(text: &str) -> Option<AudioDevice> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    // The asterisk marks the default, and it sits before the id rather than after it.
+    let (is_default, rest) = match text.strip_prefix('*') {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, text),
+    };
+    let (id, name) = rest.split_once('.')?;
+    let id = id.trim().parse::<u32>().ok()?;
+    // Everything from `[vol:` onward is a reading, not a name.
+    let name = name.split('[').next().unwrap_or(name).trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(AudioDevice {
+        id,
+        name: friendly_name(name),
+        is_default,
+    })
+}
+
+/// Turn a driver's name for a device into one a person would use.
+///
+/// PipeWire reports what the kernel calls the hardware, which on this machine means
+/// "ACP/ACP3X/ACP6x Audio Coprocessor Speaker" — accurate, and useless on a panel four inches
+/// wide. The wearer asked for the glasses, the Deck and a headset to be recognisable, and
+/// these are the substitutions that make them so.
+///
+/// Substring rules rather than a lookup by id, because ids are not stable across a replug.
+/// Anything unmatched passes through with its whitespace tidied, so an unknown USB interface
+/// still appears — under an ugly name, which is better than not appearing.
+pub fn friendly_name(raw: &str) -> String {
+    // Longest first: "Internal Microphone" has to be replaced before "Microphone" would be.
+    const RULES: [(&str, &str); 8] = [
+        ("ACP/ACP3X/ACP6x Audio Coprocessor", "Deck"),
+        ("Internal Microphone", "Microphone"),
+        ("Analog Stereo", ""),
+        ("Digital Stereo", ""),
+        // The glasses present as an ALSA card called "Air". Matched on the word so it cannot
+        // eat the "air" inside another device's name.
+        ("Air Mono", "Glasses Microphone"),
+        ("Air", "Glasses"),
+        ("Headphones", "Headphones"),
+        ("Mono", ""),
+    ];
+    let mut name = raw.to_string();
+    for (from, to) in RULES {
+        if name.contains(from) {
+            name = name.replace(from, to);
+        }
+    }
+    // Collapse whatever runs of whitespace the substitutions left behind.
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        raw.trim().to_string()
+    } else {
+        name
+    }
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::*;
+
+    /// Captured verbatim from the Deck with the glasses plugged in, because a parser for a
+    /// human-readable format is only ever as good as the samples it was written against.
+    const REAL: &str = r#"PipeWire 'pipewire-0' [1.6.4, deck@steamdeck, cookie:727404770]
+ └─ Clients:
+        32. WirePlumber                         [1.6.4, deck@steamdeck, pid:1392]
+       106. wpctl                               [1.6.4, deck@steamdeck, pid:47032]
+
+Audio
+ ├─ Devices:
+ │      69. Rembrandt Radeon High Definition Audio Controller [alsa]
+ │      95. Air                                 [alsa]
+ │      99. ACP/ACP3X/ACP6x Audio Coprocessor   [alsa]
+ │  
+ ├─ Sinks:
+ │      62. ACP/ACP3X/ACP6x Audio Coprocessor Headphones [vol: 1.00]
+ │      66. ACP/ACP3X/ACP6x Audio Coprocessor Speaker [vol: 0.24]
+ │  *   81. Air Analog Stereo                   [vol: 0.32]
+ │  
+ ├─ Sources:
+ │      50. Air Mono                            [vol: 1.00]
+ │      72. ACP/ACP3X/ACP6x Audio Coprocessor Internal Microphone [vol: 0.78]
+ │  
+ ├─ Filters:
+ │    - loopback-1392-18                                            
+ │  *   60. alsa_loopback_device.alsa_input.usb-Vendor_Air_A00011_32_00-00.mono-fallback [Audio/Source]
+ │  
+ └─ Streams:
+
+Video
+ ├─ Devices:
+ │  
+ ├─ Sinks:
+ │  
+"#;
+
+    #[test]
+    fn finds_every_output_the_deck_actually_offers() {
+        let sinks = parse_devices(REAL, Direction::Output);
+        assert_eq!(sinks.len(), 3, "{sinks:#?}");
+        assert_eq!(sinks.iter().map(|d| d.id).collect::<Vec<_>>(), [62, 66, 81]);
+        assert_eq!(sinks[2].name, "Glasses");
+        assert!(sinks[2].is_default, "the asterisk marks the one in use");
+        assert!(!sinks[0].is_default && !sinks[1].is_default);
+    }
+
+    #[test]
+    fn finds_every_input() {
+        let sources = parse_devices(REAL, Direction::Input);
+        assert_eq!(sources.len(), 2, "{sources:#?}");
+        assert_eq!(sources[0].name, "Glasses Microphone");
+        assert_eq!(sources[1].name, "Deck Microphone");
+    }
+
+    #[test]
+    fn a_sections_devices_do_not_leak_into_the_next() {
+        // The failure this guards: `Sources:` is followed by `Filters:`, and on this machine
+        // the filter list contains an entry marked default. Running past the end of a section
+        // would offer the wearer a loopback node called
+        // "alsa_loopback_device.alsa_input.usb-Vendor_Air..." as though it were a microphone.
+        for direction in Direction::ALL {
+            for device in parse_devices(REAL, direction) {
+                assert!(
+                    !device.name.contains("loopback"),
+                    "{direction:?} picked up a filter: {device:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_deck_speakers_are_named_for_the_deck() {
+        // The wearer's requirement, quite literally: the glasses, the Deck and a headset have
+        // to be recognisable at a glance.
+        let sinks = parse_devices(REAL, Direction::Output);
+        let names: Vec<&str> = sinks.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Deck Headphones", "Deck Speaker", "Glasses"]);
+    }
+
+    #[test]
+    fn an_unknown_device_still_appears_under_its_own_name() {
+        // A USB interface or a Bluetooth speaker nobody wrote a rule for must still be
+        // offered. Hiding what we cannot prettify would make the picker silently incomplete,
+        // which is the one thing a picker must never be.
+        let text = " ├─ Sinks:\n │      90. Jabra Evolve2 65 \n │  \n ├─ Sources:\n";
+        let sinks = parse_devices(text, Direction::Output);
+        assert_eq!(sinks.len(), 1);
+        assert_eq!(sinks[0].name, "Jabra Evolve2 65");
+    }
+
+    #[test]
+    fn nothing_at_all_is_not_an_error() {
+        // No sound server, or a machine mid-boot. An empty list means the panel shows no
+        // devices; it must not mean a panic on a screen nobody can get back from.
+        assert!(parse_devices("", Direction::Output).is_empty());
+        assert!(parse_devices("Audio\n ├─ Sinks:\n │  \n", Direction::Output).is_empty());
+    }
+
+    #[test]
+    fn a_name_that_is_only_noise_keeps_its_original() {
+        // "Air Mono" maps to a real name, but a device called just "Mono" would be erased
+        // entirely by the tidying rules. Better an odd name than a blank row.
+        assert_eq!(friendly_name("Mono"), "Mono");
+        assert_eq!(friendly_name("Analog Stereo"), "Analog Stereo");
+    }
+
+    #[test]
+    fn tidying_does_not_leave_double_spaces_behind() {
+        // Removing a word from the middle of a name leaves two spaces where one belongs, and
+        // the gap is obvious in a proportional font.
+        let name = friendly_name("Air Analog Stereo");
+        assert!(!name.contains("  "), "{name:?}");
+        assert_eq!(name, "Glasses");
+    }
+}
