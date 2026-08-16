@@ -956,10 +956,9 @@ pub fn run(
             scene.sync_menu(
                 &mut renderer,
                 &mut text,
-                &menu_text(&shell),
-                &menu_detail(&shell),
+                crate::menu::model(&shell).as_ref(),
                 ppd,
-                stereo.per_eye.0.saturating_sub(160).max(64),
+                (stereo.h_fov_deg, stereo.v_fov_deg()),
             )?;
 
             // Import client buffers before the draw closure takes the context.
@@ -2116,83 +2115,6 @@ pub fn settle_axes(
             *calibration = Some(Calibration::new());
         }
         None => {}
-    }
-}
-
-/// The explanation under the menu, laid out separately so it cannot widen the panel.
-fn menu_detail(shell: &Shell) -> String {
-    match shell.mode() {
-        Mode::Hud => shell.hud().focused().detail.to_string(),
-        // Where you are, not what the row does. In a browser the question is always "which
-        // folder is this", and the answer does not fit in a row.
-        Mode::Files => shell.files().directory().to_string(),
-        _ => String::new(),
-    }
-}
-
-/// The text of whichever menu is open, or empty in the world.
-///
-/// The HUD is rendered as one text panel rather than as a row of separate textures. At the
-/// resolution one eye actually resolves, a settings list *is* text — giving each row its own
-/// quad would buy nothing and cost a dozen uploads every time the cursor moved.
-pub fn menu_text(shell: &Shell) -> String {
-    match shell.mode() {
-        Mode::World => String::new(),
-        Mode::Hud => {
-            let hud = shell.hud();
-            let mut out = String::from("Settings\n\n");
-            for (i, item) in hud.items().iter().enumerate() {
-                // A leading marker rather than a highlight rectangle: one texture, and it
-                // survives being read at an angle far better than a background tint.
-                out.push_str(if i == hud.cursor() { "\u{25b8} " } else { "   " });
-                out.push_str(item.label);
-                out.push('\n');
-            }
-            out.push_str("\nA select    B back");
-            out
-        }
-        Mode::Environment => {
-            let picker = shell.environments();
-            let mut out = String::from("Environment\n\n");
-            for (i, row) in picker.rows().iter().enumerate() {
-                out.push_str(if i == picker.cursor() { "\u{25b8} " } else { "   " });
-                out.push_str(row.label);
-                // Spelt out rather than marked with a glyph. A tick or a bullet has to
-                // survive being read through optics at an angle, and "in use" survives
-                // anything — including a font that has no tick in it.
-                if row.in_use {
-                    out.push_str("  (in use)");
-                }
-                out.push('\n');
-            }
-            out.push_str("\nA select    B back");
-            out
-        }
-        Mode::Files => {
-            let files = shell.files();
-            let rows = files.rows();
-            let mut out = String::from("Add an image\n\n");
-            for (i, row) in rows.iter().enumerate() {
-                out.push_str(if i == files.cursor() { "\u{25b8} " } else { "   " });
-                out.push_str(&row.name);
-                // A trailing slash marks a folder. Cheaper than an icon and unambiguous at
-                // this resolution, where the difference between two similar glyphs is not.
-                if row.is_directory && row.name != spatiand_shell::files::PARENT_LABEL {
-                    out.push('/');
-                }
-                out.push('\n');
-            }
-            if rows.len() == 1 {
-                // Otherwise an empty folder looks exactly like a folder that failed to open.
-                out.push_str("\nNo folders or images here.\n");
-            }
-            out.push_str("\nA open    B back");
-            out
-        }
-        Mode::Launcher if shell.launcher().is_empty() => {
-            "No applications\n\nNothing was found in the\nsystem's application folders.\n\nB back".into()
-        }
-        Mode::Launcher => String::new(),
     }
 }
 

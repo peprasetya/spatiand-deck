@@ -14,7 +14,8 @@
 //! SPATIAND_BACKEND=snapshot SPATIAND_SNAPSHOT=/tmp/hud.png SPATIAND_VIEW=hud spatiand
 //! ```
 //!
-//! `SPATIAND_VIEW` is `world`, `hud`, `launcher` or `calibrate`; `SPATIAND_SNAPSHOT_SIZE` is
+//! `SPATIAND_VIEW` is `world`, `hud`, `environment`, `files`, `launcher`, `keyboard` or
+//! `calibrate`; `SPATIAND_SNAPSHOT_SIZE` is
 //! `WIDTHxHEIGHT` and defaults to one eye of the glasses (1920x1080). `SPATIAND_SNAPSHOT_YAW`
 //! turns the head, in degrees, which is how the arc's edges get checked.
 //!
@@ -56,12 +57,16 @@ enum View {
     Launcher,
     Calibrate,
     Keyboard,
+    Environment,
+    Files,
 }
 
 impl View {
     fn from_env() -> Self {
         match std::env::var("SPATIAND_VIEW").as_deref() {
             Ok("hud") => Self::Hud,
+            Ok("environment") => Self::Environment,
+            Ok("files") => Self::Files,
             Ok("launcher") => Self::Launcher,
             Ok("calibrate") => Self::Calibrate,
             Ok("keyboard") => Self::Keyboard,
@@ -154,6 +159,30 @@ pub fn run(
         }
         View::Launcher => {
             shell.handle(Intent::ToggleLauncher);
+        }
+        // Both are reached by walking the real HUD rather than by setting a mode directly, so
+        // a snapshot cannot show a state the wearer could not get to.
+        View::Environment | View::Files => {
+            shell.handle(Intent::ToggleHud);
+            // Navigating never reports anything back, so the walk is bounded by the list's
+            // own length rather than by waiting for it to stop moving.
+            for _ in 0..shell.hud().items().len() {
+                if shell.hud().activate() == spatiand_shell::HudAction::OpenEnvironments {
+                    break;
+                }
+                shell.handle(Intent::Navigate(spatiand_shell::NavDirection::Down));
+            }
+            shell.handle(Intent::Accept);
+            shell.set_environments(environments.entries(), environments.choice());
+            if view == View::Files {
+                // The browse row is always the last one.
+                for _ in 0..shell.environments().rows().len() {
+                    shell.handle(Intent::Navigate(spatiand_shell::NavDirection::Down));
+                }
+                shell.handle(Intent::Accept);
+                let browser = crate::environment::Browser::new();
+                shell.show_directory(browser.label(), browser.entries());
+            }
         }
         _ => {}
     }
@@ -299,10 +328,9 @@ pub fn run(
     scene.sync_menu(
         &mut renderer,
         &mut text,
-        &crate::backend_drm::menu_text(&shell),
-        "",
+        crate::menu::model(&shell).as_ref(),
         ppd,
-        stereo.per_eye.0.saturating_sub(160).max(64),
+        (stereo.h_fov_deg, stereo.v_fov_deg()),
     )?;
 
     // The head-locked panel, when there is one to draw.

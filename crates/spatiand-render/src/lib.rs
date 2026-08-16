@@ -6,6 +6,7 @@
 //! live anyway.
 
 pub mod camera;
+pub mod panel;
 pub mod ray;
 pub mod sky;
 pub mod text;
@@ -13,4 +14,4 @@ pub mod text;
 pub use camera::{eye_for, eyes_for, sbs_viewport, Eye, EyeSide, StereoConfig};
 pub use ray::{intersect_quad, pick, Hit, PointerConfig, Quad, Ray};
 pub use sky::{Sky, SkyEye, SkyProjection, SkySource, SkyStereo};
-pub use text::{TextImage, TextRenderer};
+pub use text::{TextAlign, TextImage, TextRenderer};

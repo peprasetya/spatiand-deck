@@ -102,6 +102,86 @@ struct Texture {
     aspect: f32,
 }
 
+/// One row of a menu, rasterised.
+struct RowTextures {
+    label: Texture,
+    /// The status at the right of the row, where there is one.
+    trailing: Option<Texture>,
+}
+
+/// Everything a menu needs on the GPU.
+///
+/// All of it is rasterised **white** and coloured by the tint at draw time, so which row is
+/// selected — and therefore which row is bright — is decided while drawing rather than while
+/// rasterising. That is what makes moving the cursor free.
+struct MenuTextures {
+    title: Texture,
+    rows: Vec<RowTextures>,
+    detail: Option<Texture>,
+    /// The explanation's height in logical panel pixels, which the layout needs and only the
+    /// rasteriser knows, since it depends on how many lines the text wrapped onto.
+    detail_height: f32,
+    footer: Option<Texture>,
+    /// Device pixels per logical panel pixel when this was built. A different headset, or a
+    /// different eye resolution, means rasterising again rather than magnifying.
+    scale: f32,
+}
+
+impl MenuTextures {
+    /// # Safety
+    /// Context must be current.
+    unsafe fn destroy(&self, gl: &ffi::Gles2) {
+        let mut delete = |t: &Texture| gl.DeleteTextures(1, &t.id);
+        delete(&self.title);
+        for row in &self.rows {
+            delete(&row.label);
+            if let Some(t) = &row.trailing {
+                delete(t);
+            }
+        }
+        for t in [&self.detail, &self.footer].into_iter().flatten() {
+            delete(t);
+        }
+    }
+}
+
+/// The menu card's colours.
+///
+/// The same language as the sidecar: a near-black ground, one accent, and text in two weights.
+/// A card has to be legible against a bright panorama without becoming a solid rectangle
+/// hanging in the room, which is what sets the ground's alpha.
+const CARD_GROUND: [f32; 4] = [0.043, 0.05, 0.072, 0.93];
+/// A hairline of accent just outside the card, so it ends somewhere definite. Without it the
+/// card's edge is wherever the background happens to be dark, which reads as a smudge.
+const CARD_RIM: [f32; 4] = [0.55, 0.70, 1.0, 0.16];
+const ROW_SELECTED: [f32; 4] = [0.42, 0.68, 1.0, 0.20];
+/// The bar at the selected row's left edge. The wash alone is not enough against a bright
+/// environment; a saturated shape at full alpha is legible whatever is behind the card.
+const ROW_MARK: [f32; 4] = [0.45, 0.72, 1.0, 1.0];
+const INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+const INK_ROW: [f32; 4] = [0.78, 0.82, 0.90, 1.0];
+const INK_TRAILING: [f32; 4] = [0.50, 0.70, 1.0, 1.0];
+const INK_DETAIL: [f32; 4] = [0.70, 0.76, 0.87, 1.0];
+const INK_HINT: [f32; 4] = [0.50, 0.55, 0.66, 1.0];
+const SEPARATOR: [f32; 4] = [1.0, 1.0, 1.0, 0.10];
+const SCROLL_TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.08];
+const SCROLL_THUMB: [f32; 4] = [0.42, 0.68, 1.0, 0.70];
+
+/// Em size of a row's trailing status, in logical panel pixels. Smaller than the label it sits
+/// beside: it qualifies the row rather than naming it.
+const TRAILING_EM: f32 = 23.0;
+
+/// How much of the horizontal field the card spans, and how much of the vertical it may use.
+///
+/// The horizontal fraction is the card's *identity* — it is the same width in every menu, so
+/// moving between settings and the environment list does not resize the thing you are reading.
+/// The vertical fraction is a budget, not a size: the card is as tall as its contents need up
+/// to this, and rows past it scroll.
+const CARD_FOV_FRACTION: f64 = 0.62;
+const CARD_HEIGHT_FRACTION: f64 = 0.68;
+/// How far in front of the wearer a menu hangs, metres.
+const MENU_DISTANCE: f32 = 1.6;
+
 /// Textures and pipelines that live for the session.
 pub struct Scene {
     quads: QuadPipeline,
@@ -145,18 +225,20 @@ pub struct Scene {
     status: Option<Texture>,
     status_text: String,
 
-    /// The menu's list of rows, and its description, as separate textures.
+    /// The open menu, rasterised a piece at a time.
     ///
-    /// Separate because they are sized differently and the panel's width must come from the
-    /// **list**. Rendering them as one image makes the widest line win, and the description is
-    /// always the widest line — so a one-word row like "Recentre" produced a panel as wide as
-    /// its explanation, which then had to shrink to fit the field and took the readable part
-    /// down with it.
-    menu: Option<Texture>,
-    menu_detail: Option<Texture>,
-    /// Width of the description relative to the rows, so the two keep their measure.
-    menu_detail_ratio: f32,
-    menu_text: String,
+    /// A piece at a time rather than as one image, because the pieces have different lives.
+    /// The rows change when the *list* changes, which is rarely; the selection changes
+    /// constantly and is drawn as a shape, so it costs nothing; the explanation changes with
+    /// the cursor and is one small upload. Rendering the menu as a single block of text tied
+    /// all three together, so moving one row down re-rasterised and re-uploaded the lot.
+    menu: Option<MenuTextures>,
+    /// What was last rasterised, to tell a changed list from a moved cursor.
+    menu_model: crate::menu::MenuModel,
+    /// Where the list is scrolled to. Carried between frames so walking the rows moves the
+    /// list as little as possible — see [`spatiand_render::panel::Layout::new`].
+    menu_first: usize,
+    menu_layout: Option<spatiand_render::panel::Layout>,
 
     /// Yaw the open menu is pinned to.
     ///
@@ -247,9 +329,9 @@ impl Scene {
             status: None,
             status_text: String::new(),
             menu: None,
-            menu_detail: None,
-            menu_detail_ratio: 1.0,
-            menu_text: String::new(),
+            menu_model: Default::default(),
+            menu_first: 0,
+            menu_layout: None,
             anchor_yaw: 0.0,
             anchored_for: None,
             anchored_at: std::time::Instant::now(),
@@ -710,89 +792,136 @@ impl Scene {
         );
     }
 
-    /// Rebuild the menu panel if its text changed.
+    /// Rasterise the open menu, and work out where its pieces go.
+    ///
+    /// `model` is `None` in the world and in a launcher that has bubbles to show; the textures
+    /// are kept rather than dropped, because a menu that has just been dismissed carries on
+    /// being drawn for a moment after the shell has moved on.
+    ///
+    /// Nothing here depends on which row is selected. That is the point: the selection is a
+    /// shape drawn over the rows, so walking the list uploads at most the one line of
+    /// explanation that genuinely changed.
     pub fn sync_menu(
         &mut self,
         renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
         text: &mut TextRenderer,
-        list: &str,
-        detail: &str,
+        model: Option<&crate::menu::MenuModel>,
         px_per_degree: f32,
-        max_width: u32,
+        fov: (f64, f64),
     ) -> Result<(), String> {
-        let wanted = format!("{list}\u{1f}{detail}");
-        if wanted == self.menu_text && self.menu.is_some() {
-            return Ok(());
-        }
-        self.menu_text = wanted;
-        if list.is_empty() {
-            return Ok(());
-        }
+        use spatiand_render::panel;
 
-        // Measure the list as if *every* row were the selected one, then render the real list
-        // padded to that width.
-        //
-        // The marker is wider than the spaces standing in for it, so the widest line — and
-        // therefore the cropped image, and therefore the panel fitted to that image's aspect —
-        // changed as the cursor moved down the list. The panel grew when the selection reached
-        // the longest label and shrank again on the way past, which looks like the layout is
-        // unstable rather than like one glyph being wider than three spaces.
-        //
-        // Marking every line gives an upper bound that does not depend on the selection at
-        // all, so the panel is the same size whichever row is under the cursor.
-        let widest = list.replace("\n   ", "\n\u{25b8} ");
-        let measured = text.render(&widest, px_per_degree * 1.05, max_width, [255, 255, 255, 255]);
-        // A little air either side, so the longest label is not touching the panel edge.
-        let panel_width = ((measured.width as f32 * 1.06).ceil() as u32).clamp(64, max_width);
-        let rows = text.render_padded(
-            list,
-            px_per_degree * 1.05,
-            panel_width,
-            [236, 241, 255, 255],
-        );
-        // The description is wrapped to the *rows'* measure, not the panel's maximum, so it
-        // can never widen the panel -- and smaller, because it is reference material read once
-        // rather than the thing being chosen between.
-        // Padded to the same width as the rows, for the same reason they are.
-        //
-        // Fixing only the rows was half a fix: the description is a different length for every
-        // item, and the panel's height is computed from *both* images' aspects, so a shorter
-        // description still resized the panel — just less obviously than the marker did, and
-        // only when moving between items rather than within them.
-        let detail_image = (!detail.is_empty()).then(|| {
-            text.render_padded(detail, px_per_degree * 0.72, panel_width, [176, 190, 216, 255])
-        });
+        let Some(model) = model else {
+            return Ok(());
+        };
 
-        let old = (self.menu.take(), self.menu_detail.take());
-        let (rows_texture, detail_texture) = renderer
-            .with_context(|gl| unsafe {
-                if let Some(t) = old.0 {
-                    gl.DeleteTextures(1, &t.id);
-                }
-                if let Some(t) = old.1 {
-                    gl.DeleteTextures(1, &t.id);
-                }
-                let upload = |image: &TextImage| Texture {
-                    id: upload_rgba(gl, image),
-                    aspect: image.width as f32 / image.height.max(1) as f32,
-                };
-                (
-                    upload(&rows),
-                    detail_image.as_ref().map(|i| {
-                        (
-                            upload(i),
-                            // How much of the rows' width the description occupies, so the two
-                            // keep their relative measure once scaled into the world.
-                            i.width as f32 / rows.width.max(1) as f32,
-                        )
-                    }),
+        // Device pixels per logical panel pixel. Everything is laid out in logical pixels and
+        // rasterised at the resolution the wearer's eye actually gets, so the type is sharp
+        // rather than a small bitmap scaled up to fill the card.
+        let card_deg = (fov.0 * CARD_FOV_FRACTION) as f32;
+        let scale = (card_deg * px_per_degree / panel::WIDTH).max(0.05);
+        let content_logical = panel::WIDTH - panel::PAD_X * 2.0;
+
+        let stale = self
+            .menu
+            .as_ref()
+            .map(|m| (m.scale - scale).abs() > scale * 0.02)
+            .unwrap_or(true);
+        if stale || model.differs_from(&self.menu_model) {
+            let white = [255u8; 4];
+            let device = |logical: f32| (logical * scale).max(1.0);
+            let content_px = (content_logical * scale) as u32;
+            // One line, cropped to its ink, and given far more width than it can use so it
+            // never wraps. A row that wrapped would be drawn as two lines squeezed into the
+            // height of one; the renderer shrinks an overlong label instead, which keeps a long
+            // filename on its own line and readable.
+            let line = |t: &mut TextRenderer, s: &str, em: f32| {
+                t.render(s, device(em), content_px * 4, white)
+            };
+
+            let title = line(text, &model.title, panel::TITLE_EM);
+            let rows: Vec<(TextImage, Option<TextImage>)> = model
+                .rows
+                .iter()
+                .map(|row| {
+                    (
+                        line(text, &row.label, panel::ROW_EM),
+                        row.trailing
+                            .as_deref()
+                            .map(|t| line(text, t, TRAILING_EM)),
+                    )
+                })
+                .collect();
+            // Set left, under rows that are also set left. Centred text here reads as a
+            // caption floating under the card rather than as part of it.
+            let detail = (!model.detail.is_empty()).then(|| {
+                // The one thing that *should* wrap, so it gets exactly the content width and
+                // keeps it: the layout places it at that width, and its height is however
+                // many lines it took.
+                text.render_aligned(
+                    &model.detail,
+                    device(panel::DETAIL_EM),
+                    content_px,
+                    white,
+                    spatiand_render::TextAlign::Left,
                 )
-            })
-            .map_err(|e| format!("no GL context: {e}"))?;
+            });
+            let footer = (!model.footer.is_empty())
+                .then(|| line(text, &model.footer, panel::FOOTER_EM));
 
-        self.menu = Some(rows_texture);
-        self.menu_detail_ratio = detail_texture.map(|(_, ratio)| ratio).unwrap_or(1.0);
-        self.menu_detail = detail_texture.map(|(t, _)| t);
+            let old = self.menu.take();
+            let built = renderer
+                .with_context(|gl| unsafe {
+                    if let Some(old) = old {
+                        old.destroy(gl);
+                    }
+                    let upload = |image: &TextImage| Texture {
+                        id: upload_rgba(gl, image),
+                        aspect: image.width as f32 / image.height.max(1) as f32,
+                    };
+                    MenuTextures {
+                        title: upload(&title),
+                        rows: rows
+                            .iter()
+                            .map(|(label, trailing)| RowTextures {
+                                label: upload(label),
+                                trailing: trailing.as_ref().map(&upload),
+                            })
+                            .collect(),
+                        // The explanation is padded to the content width, so its height in
+                        // logical pixels follows from the image and is the one thing the
+                        // layout cannot work out for itself.
+                        detail_height: detail
+                            .as_ref()
+                            .map(|i| i.height as f32 / scale)
+                            .unwrap_or(0.0),
+                        detail: detail.as_ref().map(&upload),
+                        footer: footer.as_ref().map(&upload),
+                        scale,
+                    }
+                })
+                .map_err(|e| format!("no GL context: {e}"))?;
+            self.menu = Some(built);
+            self.menu_model = model.clone();
+        } else {
+            // The cursor moved and nothing else. Keep the textures, take the new position.
+            self.menu_model = model.clone();
+        }
+
+        // The card is as tall as its contents up to this, and scrolls beyond it.
+        let budget = (fov.1 * CARD_HEIGHT_FRACTION) as f32 * (panel::WIDTH / card_deg);
+        let layout = panel::Layout::new(
+            &panel::Menu {
+                rows: model.rows.len(),
+                cursor: model.cursor,
+                detail_height: self.menu.as_ref().map(|m| m.detail_height).unwrap_or(0.0),
+                footer: self.menu.as_ref().is_some_and(|m| m.footer.is_some()),
+                budget_height: budget,
+            },
+            self.menu_first,
+        );
+        self.menu_first = layout.first;
+        self.menu_layout = Some(layout);
         Ok(())
     }
 
@@ -907,83 +1036,166 @@ impl Scene {
         };
         match mode {
             Mode::World => {}
-            // All three are the same thing to draw: one text panel of rows with a cursor.
-            // The launcher is the odd one out because it is bubbles in space, not a list.
-            Mode::Hud | Mode::Environment | Mode::Files => self.draw_hud(gl, eye, fov),
+            // All three are the same thing to draw: a card of rows with one selected. The
+            // launcher is the odd one out because it is bubbles in space, not a list.
+            Mode::Hud | Mode::Environment | Mode::Files => self.draw_card(gl, eye, fov),
             Mode::Launcher => self.draw_launcher(gl, eye, shell, fov),
         }
     }
 
-    unsafe fn draw_hud(&self, gl: &ffi::Gles2, eye: &Eye, fov: (f64, f64)) {
-        let Some(rows) = self.menu else {
+    /// Draw a menu as a card: ground, selection, rows, explanation, hints.
+    ///
+    /// Every rectangle comes from the layout, in logical panel pixels, and is placed on the
+    /// card's plane by `place` below. Nothing here decides where anything goes — that is
+    /// deliberate, because layout arithmetic is testable and drawing is not.
+    unsafe fn draw_card(&self, gl: &ffi::Gles2, eye: &Eye, fov: (f64, f64)) {
+        use spatiand_render::panel;
+
+        let (Some(menu), Some(layout)) = (self.menu.as_ref(), self.menu_layout.as_ref()) else {
             return;
         };
-        let distance = 1.6f32;
-
-        // The panel's width comes from the ROWS, and the description is laid out inside it.
-        // Sizing from a combined image let the description -- always the longest line -- set
-        // the width, so the whole panel shrank to fit the field and took the rows with it.
-        let gap_fraction = 0.12f32;
-        // The width comes from the ROWS ALONE, and nothing else is allowed to influence it.
-        //
-        // Fitting the rows and the description together as one block meant the description's
-        // height fed back into the width: a longer description made the block taller, and
-        // fitting a taller block into the same field made it narrower. So the panel changed
-        // width when moving between items even after the rows themselves were a fixed size.
-        // Height may vary — a longer description is genuinely taller — but width must not,
-        // because width is what the eye reads as the panel's identity.
-        //
-        // Two thirds of the vertical field for the rows leaves room for the description
-        // underneath without the two competing for it.
-        let (width, rows_height) = fit_to_fov(rows.aspect.max(0.01), fov.0, fov.1 * 0.62, distance);
-
-        let mut total_height = rows_height;
-        if let Some(detail) = self.menu_detail {
-            // Both images are padded to the same width, so the description occupies the full
-            // panel and its height follows from its own aspect.
-            total_height += rows_height * gap_fraction;
-            total_height += width / detail.aspect.max(0.01);
+        let appear = self.appear_progress(0).clamp(0.0, 1.0);
+        if appear <= 0.001 {
+            return;
         }
-        let centre = self.menu_centre(distance);
+
+        // Metres per logical pixel. The card grows the last three percent as it arrives, which
+        // reads as it coming towards you rather than fading up out of nothing — small enough
+        // that nobody watching it a hundredth time has to wait for it.
+        let card_width =
+            2.0 * MENU_DISTANCE * ((fov.0 * CARD_FOV_FRACTION / 2.0).to_radians().tan() as f32);
+        let metres = (card_width / panel::WIDTH) * (0.97 + 0.03 * appear);
+
+        let centre = self.menu_centre(MENU_DISTANCE);
         let quat = self.anchor_quat();
+        let right = quat * -Vec3::Y;
         let up = quat * Vec3::Z;
+        let vp = eye.view_projection();
 
-        // A dimming plate behind the lot. Reading a list against a busy 360 photograph is
-        // otherwise genuinely hard, and no amount of text weight fixes it.
-        let backdrop = self.panel_model(centre, quat, width * 1.14, total_height * 1.18);
-        self.quads.draw(
-            gl,
-            self.white,
-            &(eye.view_projection() * backdrop),
-            [0.02, 0.03, 0.06, 0.72],
-            (0.0, 1.0),
+        // A logical rectangle, as a model matrix on the card's plane.
+        let place = |r: panel::Rect| {
+            let dx = (r.x + r.w * 0.5 - panel::WIDTH * 0.5) * metres;
+            let dy = (layout.height * 0.5 - (r.y + r.h * 0.5)) * metres;
+            self.panel_model(
+                centre + right * dx + up * dy,
+                quat,
+                r.w * metres,
+                r.h * metres,
+            )
+        };
+        let fade = |c: [f32; 4]| [c[0], c[1], c[2], c[3] * appear];
+        // Sizes go to the shader in logical pixels, so the corner radius and the one pixel of
+        // antialiasing along the edge are both in the units the layout is written in.
+        let panel_rect = |r: panel::Rect, tint: [f32; 4], radius: f32| {
+            self.rounded
+                .draw(gl, &(vp * place(r)), fade(tint), (r.w, r.h), radius);
+        };
+        let card = panel::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: panel::WIDTH,
+            h: layout.height,
+        };
+
+        panel_rect(
+            panel::Rect {
+                x: -panel::RIM,
+                y: -panel::RIM,
+                w: card.w + panel::RIM * 2.0,
+                h: card.h + panel::RIM * 2.0,
+            },
+            CARD_RIM,
+            panel::CARD_RADIUS + panel::RIM,
         );
+        panel_rect(card, CARD_GROUND, panel::CARD_RADIUS);
 
-        // Rows sit at the top of the block, description under them.
-        let rows_centre = centre + up * ((total_height - rows_height) * 0.5);
-        let model = self.panel_model(rows_centre, quat, width, rows_height);
-        self.quads.draw(
-            gl,
-            rows.id,
-            &(eye.view_projection() * model),
-            [1.0, 1.0, 1.0, 1.0],
-            (0.0, 1.0),
-        );
+        // One piece of text inside a band, at its left or right edge, vertically centred.
+        //
+        // A label wider than its band is scaled down rather than clipped or ellipsised. A long
+        // filename is the case: shrinking one row is ugly, and cutting a name off in the middle
+        // is worse, because the end of a filename is the part that says what it is.
+        let text_in = |band: panel::Rect, tex: &Texture, em: f32, tint: [f32; 4], right_edge: bool| {
+            let mut h = em * 1.4;
+            let mut w = h * tex.aspect.max(0.01);
+            if w > band.w {
+                h *= band.w / w;
+                w = band.w;
+            }
+            let r = panel::Rect {
+                x: if right_edge { band.x + band.w - w } else { band.x },
+                y: band.y + (band.h - h) * 0.5,
+                w,
+                h,
+            };
+            self.quads
+                .draw(gl, tex.id, &(vp * place(r)), fade(tint), (0.0, 1.0));
+        };
 
-        if let Some(detail) = self.menu_detail {
-            let detail_width = width;
-            let detail_height = detail_width / detail.aspect.max(0.01);
-            let detail_centre = centre + up * ((total_height * 0.5) - rows_height
-                - rows_height * gap_fraction
-                - detail_height * 0.5);
-            let model = self.panel_model(detail_centre, quat, detail_width, detail_height);
-            self.quads.draw(
-                gl,
-                detail.id,
-                &(eye.view_projection() * model),
-                [1.0, 1.0, 1.0, 0.92],
-                (0.0, 1.0),
+        text_in(layout.title, &menu.title, panel::TITLE_EM, INK, false);
+        if let (Some(band), Some(tex)) = (layout.footer, menu.footer.as_ref()) {
+            text_in(band, tex, panel::FOOTER_EM, INK_HINT, true);
+        }
+
+        for (offset, rect) in layout.rows.iter().enumerate() {
+            let index = layout.first + offset;
+            let Some(row) = menu.rows.get(index) else {
+                continue;
+            };
+            let selected = index == self.menu_model.cursor;
+            if selected {
+                panel_rect(*rect, ROW_SELECTED, panel::ROW_RADIUS);
+                panel_rect(
+                    panel::Rect {
+                        x: rect.x + 9.0,
+                        y: rect.y + rect.h * 0.26,
+                        w: 5.0,
+                        h: rect.h * 0.48,
+                    },
+                    ROW_MARK,
+                    2.5,
+                );
+            }
+
+            // The trailing status is placed first, because how much room it takes is what the
+            // label has left.
+            let mut label_width = rect.w - panel::ROW_INSET * 2.0;
+            if let Some(tex) = row.trailing.as_ref() {
+                let band = panel::Rect {
+                    x: rect.x + panel::ROW_INSET,
+                    w: rect.w - panel::ROW_INSET * 2.0,
+                    ..*rect
+                };
+                text_in(band, tex, TRAILING_EM, INK_TRAILING, true);
+                let taken = TRAILING_EM * 1.4 * tex.aspect.max(0.01);
+                label_width = (label_width - taken - panel::ROW_INSET).max(panel::ROW_INSET);
+            }
+            text_in(
+                panel::Rect {
+                    x: rect.x + panel::ROW_INSET,
+                    w: label_width,
+                    ..*rect
+                },
+                &row.label,
+                panel::ROW_EM,
+                if selected { INK } else { INK_ROW },
+                false,
             );
+        }
+
+        if let Some(track) = layout.scroll_track {
+            panel_rect(track, SCROLL_TRACK, track.w * 0.5);
+        }
+        if let Some(thumb) = layout.scroll_thumb {
+            panel_rect(thumb, SCROLL_THUMB, thumb.w * 0.5);
+        }
+
+        if let Some(sep) = layout.separator {
+            panel_rect(sep, SEPARATOR, sep.h * 0.5);
+        }
+        if let (Some(rect), Some(tex)) = (layout.detail, menu.detail.as_ref()) {
+            // Already padded to the content width, so it goes exactly where the layout says.
+            self.quads
+                .draw(gl, tex.id, &(vp * place(rect)), fade(INK_DETAIL), (0.0, 1.0));
         }
     }
 
@@ -991,7 +1203,7 @@ impl Scene {
         let launcher = shell.launcher();
         if launcher.is_empty() {
             // Say so, rather than showing an empty sky that looks like a failure to open.
-            self.draw_hud(gl, eye, fov);
+            self.draw_card(gl, eye, fov);
             return;
         }
 

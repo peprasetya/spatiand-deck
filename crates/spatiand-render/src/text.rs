@@ -12,6 +12,19 @@
 
 use cosmic_text::{Align, Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache};
 
+/// Where a line sits within the width it was given.
+///
+/// Centring is right for something floating in space with nothing around it — a prompt, a
+/// heading — where a ragged left edge reads as a fault because there is no margin for the eye
+/// to measure it against. Inside a panel there *is* an edge, and then centring is the thing
+/// that looks wrong: a wrapped explanation under a column of left-aligned rows wants to start
+/// where they start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlign {
+    Left,
+    Center,
+}
+
 /// An RGBA8 image, straight (non-premultiplied) alpha.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextImage {
@@ -58,7 +71,7 @@ impl TextRenderer {
     ///
     /// `size_px` is the em size; `color` is straight RGBA.
     pub fn render(&mut self, text: &str, size_px: f32, max_width: u32, color: [u8; 4]) -> TextImage {
-        self.render_inner(text, size_px, max_width, color, false)
+        self.render_inner(text, size_px, max_width, color, false, TextAlign::Center)
     }
 
     /// As [`Self::render`], but the image keeps the full `max_width` instead of being cropped
@@ -77,7 +90,23 @@ impl TextRenderer {
         max_width: u32,
         color: [u8; 4],
     ) -> TextImage {
-        self.render_inner(text, size_px, max_width, color, true)
+        self.render_inner(text, size_px, max_width, color, true, TextAlign::Center)
+    }
+
+    /// A block of text that keeps its full width and is aligned as asked.
+    ///
+    /// The alignment is the whole reason this exists alongside [`Self::render_padded`]: a
+    /// panel's explanation is set left, under rows that are also set left, and cropping it
+    /// would leave the caller unable to tell where the left edge of the text is.
+    pub fn render_aligned(
+        &mut self,
+        text: &str,
+        size_px: f32,
+        max_width: u32,
+        color: [u8; 4],
+        align: TextAlign,
+    ) -> TextImage {
+        self.render_inner(text, size_px, max_width, color, true, align)
     }
 
     fn render_inner(
@@ -87,6 +116,7 @@ impl TextRenderer {
         max_width: u32,
         color: [u8; 4],
         keep_full_width: bool,
+        align: TextAlign,
     ) -> TextImage {
         // Generous line spacing: at a 40 degree field the eye travels a long way between
         // lines, and tight leading reads as cramped in a way it does not on a monitor.
@@ -99,10 +129,12 @@ impl TextRenderer {
             // every call.
             let mut b = buffer.borrow_with(&mut self.font_system);
             b.set_size(Some(max_width as f32), None);
-            // Centred. Left-aligned prompts read badly floating in space: with nothing
-            // around them there is no margin for the eye to register as an edge, so ragged
-            // starts look like a layout fault rather than a choice.
-            b.set_text(text, &attrs, Shaping::Advanced, Some(Align::Center));
+            // See [`TextAlign`] for why this is a choice rather than always centred.
+            let align = match align {
+                TextAlign::Left => Align::Left,
+                TextAlign::Center => Align::Center,
+            };
+            b.set_text(text, &attrs, Shaping::Advanced, Some(align));
             b.shape_until_scroll(false);
         }
 

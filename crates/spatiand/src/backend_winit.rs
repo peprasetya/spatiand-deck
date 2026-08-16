@@ -388,10 +388,9 @@ pub fn run(
         scene.sync_menu(
             renderer,
             &mut text,
-            &crate::backend_drm::menu_text(&shell),
-            "",
+            crate::menu::model(&shell).as_ref(),
             ppd,
-            (eye_w as u32).saturating_sub(120).max(64),
+            (stereo.h_fov_deg, stereo.v_fov_deg()),
         )?;
 
         // Re-rasterise only when the words change. At 72 Hz, re-uploading an unchanged string
