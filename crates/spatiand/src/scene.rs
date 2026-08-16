@@ -131,7 +131,7 @@ impl MenuTextures {
     /// # Safety
     /// Context must be current.
     unsafe fn destroy(&self, gl: &ffi::Gles2) {
-        let mut delete = |t: &Texture| gl.DeleteTextures(1, &t.id);
+        let delete = |t: &Texture| gl.DeleteTextures(1, &t.id);
         delete(&self.title);
         for row in &self.rows {
             delete(&row.label);
@@ -820,7 +820,6 @@ impl Scene {
         // rather than a small bitmap scaled up to fill the card.
         let card_deg = (fov.0 * CARD_FOV_FRACTION) as f32;
         let scale = (card_deg * px_per_degree / panel::WIDTH).max(0.05);
-        let content_logical = panel::WIDTH - panel::PAD_X * 2.0;
 
         let stale = self
             .menu
@@ -830,7 +829,7 @@ impl Scene {
         if stale || model.differs_from(&self.menu_model) {
             let white = [255u8; 4];
             let device = |logical: f32| (logical * scale).max(1.0);
-            let content_px = (content_logical * scale) as u32;
+            let content_px = (panel::TEXT_WIDTH * scale) as u32;
             // One line, cropped to its ink, and given far more width than it can use so it
             // never wraps. A row that wrapped would be drawn as two lines squeezed into the
             // height of one; the renderer shrinks an overlong label instead, which keeps a long

@@ -36,6 +36,14 @@ pub const WIDTH: f32 = 1000.0;
 
 /// Padding between the card's edge and its contents.
 pub const PAD_X: f32 = 42.0;
+
+/// The width every line of text is set to.
+///
+/// Public because the explanation is *wrapped* to it before the layout runs — the layout needs
+/// its height, and its height is however many lines it took. Two places deriving this
+/// separately would put the text at one width and the box for it at another, which shows up as
+/// the explanation being subtly stretched.
+pub const TEXT_WIDTH: f32 = WIDTH - PAD_X * 2.0 - ROW_INSET * 2.0;
 const PAD_TOP: f32 = 30.0;
 const PAD_BOTTOM: f32 = 26.0;
 
@@ -120,17 +128,22 @@ impl Layout {
     /// much worse to use.
     pub fn new(menu: &Menu, first_hint: usize) -> Self {
         let content_width = WIDTH - PAD_X * 2.0;
+        // Text lines up with the *row labels*, not with the row's own edge, so the card has one
+        // left edge rather than two. The selection is what extends past it on both sides, which
+        // is what makes the highlight read as wrapping the row rather than as a stray band.
+        let text_x = PAD_X + ROW_INSET;
+        let text_width = TEXT_WIDTH;
         let title = Rect {
-            x: PAD_X,
+            x: text_x,
             y: PAD_TOP,
-            w: content_width,
+            w: text_width,
             h: HEADER_LINE,
         };
         // The right half of the header line. The title is short in every menu there is, so
         // sharing the line costs nothing and saves a row.
         let footer = menu.footer.then_some(Rect {
-            x: PAD_X + content_width * 0.45,
-            w: content_width * 0.55,
+            x: text_x + text_width * 0.45,
+            w: text_width * 0.55,
             ..title
         });
 
@@ -175,9 +188,9 @@ impl Layout {
             };
             y += SEPARATOR_HEIGHT + SEPARATOR_GAP;
             let det = Rect {
-                x: PAD_X,
+                x: text_x,
                 y,
-                w: content_width,
+                w: text_width,
                 h: menu.detail_height,
             };
             y += menu.detail_height;
