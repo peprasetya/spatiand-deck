@@ -18,6 +18,18 @@
 //! original. The cost is that moving or deleting the file breaks the entry — handled the same
 //! way as any other unreadable image, by falling back rather than by leaving a black void.
 //!
+//! ## Coming back to the same world
+//!
+//! Whichever environment is chosen is written to `environment` in the same folder, and the next
+//! session starts in it. Choosing one is a deliberate act that takes several presses through a
+//! headset, and having to repeat it every launch is the kind of small tax that makes a thing
+//! feel unfinished.
+//!
+//! What is stored is the **path**, not the position in the list, because that list changes
+//! whenever a file is added or removed — a remembered index would eventually name a different
+//! image, and being surrounded by the wrong one looks exactly like a bug. A path that has since
+//! gone falls back to the generated environment and says so in the log.
+//!
 //! ## Guessing the layout
 //!
 //! A panorama file does not say whether it is mono, stereo, 360 or 180, so it is inferred from
@@ -51,6 +63,13 @@ const GENERATED_SIZE: (u32, u32) = (2048, 1024);
 pub struct Environments {
     files: Vec<PathBuf>,
     choice: EnvironmentChoice,
+    /// The data directory this session writes to: the chosen environment, and the paths added
+    /// through the browser.
+    ///
+    /// Injected rather than looked up, so a test can point it at a temporary directory. A test
+    /// that wrote to the real one would quietly change the wearer's environment and add rows to
+    /// their picker, which is exactly the sort of thing nobody suspects until it happens.
+    data: Option<PathBuf>,
 }
 
 impl Environments {
@@ -61,22 +80,42 @@ impl Environments {
         } else {
             log::info!("{} environment image(s) available", files.len());
         }
-        // Start on a named one if asked. Useful for a snapshot of a particular background, and
-        // for anyone who wants the same world every time rather than whatever they left it on.
-        let choice = std::env::var("SPATIAND_ENVIRONMENT")
-            .ok()
-            .and_then(|wanted| {
-                let wanted = wanted.to_lowercase();
-                files
-                    .iter()
-                    .position(|p| p.to_string_lossy().to_lowercase().contains(&wanted))
+        Self::opening(files, data_dir())
+    }
+
+    /// Build from a known list and a known data directory, choosing what to start on.
+    ///
+    /// Precedence, most explicit first: the environment variable, then what was in use when the
+    /// last session ended, then the generated one. The variable wins because it exists to force
+    /// a particular world — for a snapshot, or for anyone who wants the same one every time —
+    /// and a remembered choice quietly overriding it would make it useless.
+    fn opening(files: Vec<PathBuf>, data: Option<PathBuf>) -> Self {
+        let named = std::env::var("SPATIAND_ENVIRONMENT").ok().and_then(|wanted| {
+            let wanted = wanted.to_lowercase();
+            files
+                .iter()
+                .position(|p| p.to_string_lossy().to_lowercase().contains(&wanted))
+                .map(EnvironmentChoice::File)
+        });
+        let choice = named
+            .or_else(|| {
+                data.as_ref()
+                    .and_then(|d| restore(&d.join(STATE_FILE), &files))
             })
-            .map(EnvironmentChoice::File)
             .unwrap_or(EnvironmentChoice::Studio);
         if let EnvironmentChoice::File(i) = choice {
             log::info!("starting on {}", files[i].display());
         }
-        Self { files, choice }
+        let opened = Self {
+            files,
+            choice,
+            data,
+        };
+        // Said for every kind, not only for files. Restoring "blank" is the case where the log
+        // is the only way to tell a remembered choice from a session that failed to draw
+        // anything, since both look like an empty room.
+        log::info!("environment: {}", opened.describe());
+        opened
     }
 
     /// Re-read the folders, keeping whatever is currently in use selected.
@@ -134,8 +173,15 @@ impl Environments {
         entries
     }
 
-    /// Select one. A file index that no longer exists falls back to the generated one rather
-    /// than to a black void the wearer did not ask for.
+    /// Select one, and remember it for next time.
+    ///
+    /// A file index that no longer exists falls back to the generated one rather than to a black
+    /// void the wearer did not ask for.
+    ///
+    /// Everything that changes the environment comes through here — the picker and the browser
+    /// both — so this is the one place that has to record anything. `refresh` deliberately does
+    /// not: re-reading the folder is not a decision, and a panorama on a drive that happens to
+    /// be unplugged should not lose its place permanently.
     pub fn select(&mut self, choice: EnvironmentChoice) {
         self.choice = match choice {
             EnvironmentChoice::File(i) if i >= self.files.len() => {
@@ -145,6 +191,38 @@ impl Environments {
             other => other,
         };
         log::info!("environment -> {}", self.describe());
+        self.save();
+    }
+
+    /// Write the current choice down, if there is anywhere to write it.
+    ///
+    /// Failure is logged and otherwise ignored: not being able to remember the environment is a
+    /// worse next session, not a broken one, and refusing to change it because a file could not
+    /// be written would be the wrong trade.
+    fn save(&self) {
+        let Some(path) = self.data.as_ref().map(|d| d.join(STATE_FILE)) else {
+            return;
+        };
+        let line = match self.choice {
+            EnvironmentChoice::Blank => BLANK.to_string(),
+            EnvironmentChoice::Studio => STUDIO.to_string(),
+            // The path, not the index. Indices are positions in a listing that changes whenever
+            // a file is added or removed, so a remembered index eventually names a different
+            // image — and being surrounded by the wrong one is indistinguishable from a bug.
+            EnvironmentChoice::File(i) => match self.files.get(i) {
+                Some(p) => p.display().to_string(),
+                None => return,
+            },
+        };
+        let write = |path: &Path| -> std::io::Result<()> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, format!("{STATE_HEADER}{line}\n"))
+        };
+        if let Err(e) = write(&path) {
+            log::warn!("could not record the environment in {}: {e}", path.display());
+        }
     }
 
     /// Add a file the browser found, and return the choice that now points at it.
@@ -156,7 +234,7 @@ impl Environments {
         if let Some(i) = self.files.iter().position(|p| *p == path) {
             return EnvironmentChoice::File(i);
         }
-        if let Err(e) = remember(&path) {
+        if let Err(e) = self.remember(&path) {
             // Worth using this session even if it will not survive a restart, and worth
             // saying so rather than appearing to have worked.
             log::warn!("could not record {} for next time: {e}", path.display());
@@ -170,6 +248,23 @@ impl Environments {
             Some(i) => EnvironmentChoice::File(i),
             None => EnvironmentChoice::Studio,
         }
+    }
+
+    /// Append a browser-chosen path to the list, so it is on offer next time.
+    fn remember(&self, path: &Path) -> std::io::Result<()> {
+        let Some(list) = self.data.as_ref().map(|d| d.join(LIST_FILE)) else {
+            return Err(std::io::Error::other("no data directory"));
+        };
+        if let Some(parent) = list.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut text = std::fs::read_to_string(&list).unwrap_or_default();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&path.display().to_string());
+        text.push('\n');
+        std::fs::write(&list, text)
     }
 
     /// Load whatever is currently selected.
@@ -333,10 +428,50 @@ fn data_dir() -> Option<PathBuf> {
         .map(|d| d.join("spatiand"))
 }
 
-/// Where paths added through the browser are recorded — one per line, `#` for comments, so it
-/// can be edited by hand on a machine where the headset is what is broken.
+/// The two files kept in the data directory.
+///
+/// `environments.list` holds paths added through the browser — one per line, `#` for comments,
+/// so it can be edited by hand on a machine where the headset is what is broken. `environment`
+/// holds the one currently chosen.
+const LIST_FILE: &str = "environments.list";
+const STATE_FILE: &str = "environment";
+
+/// Where paths added through the browser are recorded.
 fn remembered_path() -> Option<PathBuf> {
-    data_dir().map(|d| d.join("environments.list"))
+    data_dir().map(|d| d.join(LIST_FILE))
+}
+
+/// What the two generated choices are called in the state file.
+const BLANK: &str = "blank";
+const STUDIO: &str = "studio";
+/// Written above the value, since a bare path in a file called `environment` tells whoever
+/// finds it nothing about what it does or that deleting it is safe.
+const STATE_HEADER: &str = "# What Spatiand was last set to. Delete this to start on the \
+                            generated one.\n";
+
+/// Read back what [`Environments::save`] wrote, as an index into *this* session's list.
+///
+/// `None` for anything that cannot be honoured — no file, an unreadable one, or a path that is
+/// no longer on offer — and the caller falls back to the generated environment.
+fn restore(path: &Path, files: &[PathBuf]) -> Option<EnvironmentChoice> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))?;
+    match line {
+        BLANK => Some(EnvironmentChoice::Blank),
+        STUDIO => Some(EnvironmentChoice::Studio),
+        path => match files.iter().position(|p| p.as_os_str() == path) {
+            Some(i) => Some(EnvironmentChoice::File(i)),
+            None => {
+                // Deleted, renamed, or on a drive that is not plugged in. Worth saying out
+                // loud: the wearer asked for that image and is about to get a different one.
+                log::info!("last environment {path} is no longer available");
+                None
+            }
+        },
+    }
 }
 
 fn remembered() -> Vec<PathBuf> {
@@ -354,22 +489,6 @@ fn remembered() -> Vec<PathBuf> {
         // row that fails when chosen.
         .filter(|p| p.is_file())
         .collect()
-}
-
-fn remember(path: &Path) -> std::io::Result<()> {
-    let Some(list) = remembered_path() else {
-        return Err(std::io::Error::other("no data directory"));
-    };
-    if let Some(parent) = list.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut text = std::fs::read_to_string(&list).unwrap_or_default();
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(&path.display().to_string());
-    text.push('\n');
-    std::fs::write(&list, text)
 }
 
 fn search_directories() -> Vec<PathBuf> {
@@ -457,7 +576,42 @@ mod tests {
         Environments {
             files: files.iter().map(PathBuf::from).collect(),
             choice,
+            // No data directory: these tests are about the list, and none of them should be
+            // able to write to the machine they run on.
+            data: None,
         }
+    }
+
+    /// A directory of this test's own, removed on the way out.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "spatiand-env-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("could not make a scratch directory");
+            Self(dir)
+        }
+
+        fn state(&self) -> PathBuf {
+            self.0.join(STATE_FILE)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn reopen(scratch: &Scratch, files: &[&str]) -> Environments {
+        Environments::opening(
+            files.iter().map(PathBuf::from).collect(),
+            Some(scratch.0.clone()),
+        )
     }
 
     #[test]
@@ -557,6 +711,92 @@ mod tests {
         let choice = e.add(Path::new("/a/two.jpg"));
         assert_eq!(choice, EnvironmentChoice::File(1));
         assert_eq!(e.entries().len(), 4, "no new row");
+    }
+
+    #[test]
+    fn the_environment_you_chose_is_the_one_you_come_back_to() {
+        // The whole point: choosing a world takes several presses through a headset, and doing
+        // it again on every launch is what makes a thing feel unfinished.
+        let scratch = Scratch::new("comeback");
+        let files = ["/a/one.jpg", "/a/two.jpg"];
+        let mut session = reopen(&scratch, &files);
+        assert_eq!(session.choice(), EnvironmentChoice::Studio, "first run");
+        session.select(EnvironmentChoice::File(1));
+
+        let next = reopen(&scratch, &files);
+        assert_eq!(next.choice(), EnvironmentChoice::File(1));
+        assert_eq!(next.describe(), "two");
+    }
+
+    #[test]
+    fn what_is_remembered_is_the_file_rather_than_its_place_in_the_list() {
+        // The failure this prevents: an image is added, every index after it shifts by one, and
+        // the next session silently surrounds you with a different photograph. Nothing errors,
+        // which is what makes it hard to recognise as a bug.
+        let scratch = Scratch::new("by-path");
+        let mut session = reopen(&scratch, &["/a/two.jpg"]);
+        session.select(EnvironmentChoice::File(0));
+
+        // Someone drops a file in that sorts before it.
+        let next = reopen(&scratch, &["/a/one.jpg", "/a/two.jpg"]);
+        assert_eq!(next.choice(), EnvironmentChoice::File(1));
+        assert_eq!(next.describe(), "two", "same image, different index");
+    }
+
+    #[test]
+    fn blank_is_remembered_like_any_other_choice() {
+        // Easy to get wrong by treating blank as "nothing chosen" and starting on the studio,
+        // which would make the one choice that is hardest to re-find also the one that never
+        // sticks.
+        let scratch = Scratch::new("blank");
+        let mut session = reopen(&scratch, &["/a/one.jpg"]);
+        session.select(EnvironmentChoice::Blank);
+        assert_eq!(reopen(&scratch, &["/a/one.jpg"]).choice(), EnvironmentChoice::Blank);
+    }
+
+    #[test]
+    fn an_environment_that_has_gone_falls_back_instead_of_failing_to_start() {
+        // Deleted, renamed, or on a drive that is not plugged in. Starting on the generated one
+        // is recoverable; anything that refuses to start is not, on a machine whose only screen
+        // is the thing being debugged.
+        let scratch = Scratch::new("gone");
+        let mut session = reopen(&scratch, &["/a/one.jpg"]);
+        session.select(EnvironmentChoice::File(0));
+        assert_eq!(reopen(&scratch, &[]).choice(), EnvironmentChoice::Studio);
+    }
+
+    #[test]
+    fn a_state_file_nobody_can_parse_is_survivable() {
+        // It is a plain text file in the wearer's own data directory, so it can be edited, and
+        // half-written by a machine that lost power mid-save.
+        let scratch = Scratch::new("junk");
+        std::fs::write(scratch.state(), "\u{0}not a choice at all").unwrap();
+        assert_eq!(reopen(&scratch, &["/a/one.jpg"]).choice(), EnvironmentChoice::Studio);
+    }
+
+    #[test]
+    fn the_state_file_survives_being_read_by_a_person() {
+        // It carries a comment saying what it is and that deleting it is safe, which the reader
+        // has to skip past to find the value.
+        let scratch = Scratch::new("readable");
+        let mut session = reopen(&scratch, &["/a/one.jpg"]);
+        session.select(EnvironmentChoice::File(0));
+        let text = std::fs::read_to_string(scratch.state()).unwrap();
+        assert!(text.starts_with('#'), "no explanation for whoever finds it");
+        assert!(text.contains("/a/one.jpg"));
+        assert_eq!(reopen(&scratch, &["/a/one.jpg"]).choice(), EnvironmentChoice::File(0));
+    }
+
+    #[test]
+    fn adding_an_image_through_the_browser_also_remembers_it() {
+        // Adding selects, so it must persist too — otherwise the one environment the wearer
+        // went furthest out of their way to get is the one that does not come back.
+        let scratch = Scratch::new("added");
+        let mut session = reopen(&scratch, &["/a/one.jpg"]);
+        let choice = session.add(Path::new("/a/zebra.jpg"));
+        session.select(choice);
+        let next = reopen(&scratch, &["/a/one.jpg", "/a/zebra.jpg"]);
+        assert_eq!(next.describe(), "zebra");
     }
 
     #[test]
