@@ -11,7 +11,7 @@
 //! to press, only characters arranged in a grid.
 
 use spatiand_render::{TextImage, TextRenderer};
-use spatiand_shell::keyboard::{layout, Keyboard, KeyRect, Role};
+use spatiand_shell::keyboard::{layout, Key, Keyboard, KeyRect, Role};
 
 /// Gap between neighbouring keycaps, as a fraction of a cell's shorter side.
 ///
@@ -44,6 +44,24 @@ const INK: [u8; 4] = [236, 242, 255, 255];
 const INK_MODIFIER: [u8; 4] = [186, 199, 224, 255];
 const INK_LATCHED: [u8; 4] = [8, 14, 28, 255];
 
+/// How far a raised cap's picture extends past its cell on every side, as a fraction of the
+/// cell, to leave room for the shadow. The scene grows the quad by the same amount, so the cap
+/// drawn inside the image lands exactly on the key it stands for.
+pub const CAP_MARGIN: f32 = 0.20;
+
+/// How much brighter a raised cap is than one lying flat.
+///
+/// The *only* colour that changes: the legend stays the shade it is on the face. A raised key
+/// that also restyled its lettering read as a second key appearing rather than as one key
+/// coming up to meet the thumb.
+const RAISE: f32 = 1.85;
+
+/// The shadow under a raised cap: how far it falls and how far it fades, as fractions of the
+/// cap's shorter side.
+const SHADOW_DROP: f32 = 0.10;
+const SHADOW_BLUR: f32 = 0.26;
+const SHADOW: [f32; 4] = [0.0, 0.0, 0.02, 0.66];
+
 /// Rasterise the keyboard's face at `width_px` across.
 ///
 /// The height follows from the layout's own aspect rather than from the image, so the face is
@@ -66,12 +84,7 @@ pub fn face(text: &mut TextRenderer, keyboard: &Keyboard, width_px: u32) -> Text
 
     for (key, rect) in layout() {
         let cap = cap_rect(&rect, width, height);
-        let latched = keyboard.is_latched(key);
-        let (fill, ink) = match (latched, key.role) {
-            (true, _) => (CAP_LATCHED, INK_LATCHED),
-            (false, Role::Modifier(_)) => (CAP_MODIFIER, INK_MODIFIER),
-            (false, Role::Normal) => (CAP, if key.label.len() > 1 { INK_MODIFIER } else { INK }),
-        };
+        let (fill, ink) = appearance(keyboard, key);
         let radius = cap.2.min(cap.3) * RADIUS;
         rounded_rect(&mut rgba, width, height, cap, radius, fill);
 
@@ -83,6 +96,86 @@ pub fn face(text: &mut TextRenderer, keyboard: &Keyboard, width_px: u32) -> Text
     }
 
     TextImage { width, height, rgba }
+}
+
+/// Rasterise one key on its own, raised: brighter, with a shadow beneath it, and nothing but
+/// transparency around it.
+///
+/// Drawn by the same code as the face's own caps, at the same size within its cell and with the
+/// same legend, so the key under the pointer is *that* key standing up rather than a second
+/// drawing of it laid on top. The first attempt filled a plain quad grown past the cell and
+/// re-rendered the legend over it at its own size; what that produced was a square slab behind
+/// the key and a legend fractionally off the one underneath, which reads as a shadow on the
+/// lettering. Nothing here is drawn twice, so neither can happen.
+pub fn cap(text: &mut TextRenderer, keyboard: &Keyboard, key: &Key, width_px: u32) -> TextImage {
+    let Some((_, cell)) = layout().into_iter().find(|(k, _)| k.code == key.code) else {
+        return TextImage { width: 0, height: 0, rgba: Vec::new() };
+    };
+    // The cell's own shape, in pixels rather than in the face's units. Growing it by the margin
+    // on all four sides leaves the aspect alone, so this is the image's aspect too.
+    let cell_aspect =
+        (cell.half_u / cell.half_v) * spatiand_shell::keyboard::face_aspect();
+    let width = width_px.max(16);
+    let height = ((width as f64 / cell_aspect).round() as u32).max(16);
+
+    // Where the cell sits inside its own image, and the cap inside the cell -- inset by the
+    // same gap the face uses, which is what makes the two line up.
+    let margin = CAP_MARGIN / (1.0 + 2.0 * CAP_MARGIN);
+    let cell_w = width as f32 * (1.0 - 2.0 * margin);
+    let cell_h = height as f32 * (1.0 - 2.0 * margin);
+    let inset = cell_w.min(cell_h) * GAP * 0.5;
+    let rect = (
+        width as f32 * margin + inset,
+        height as f32 * margin + inset,
+        (cell_w - inset * 2.0).max(1.0),
+        (cell_h - inset * 2.0).max(1.0),
+    );
+
+    let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
+    let radius = rect.2.min(rect.3) * RADIUS;
+    let short = rect.2.min(rect.3);
+
+    // The shadow first, so the cap composites over it. It travels with the cap rather than
+    // being cast onto the face: at arm's length the two planes are six millimetres apart and
+    // the parallax between them is far below what the eye can pick out.
+    let under = (rect.0, rect.1 + short * SHADOW_DROP, rect.2, rect.3);
+    let (fill, ink) = appearance(keyboard, key);
+    rounded_rect_with(&mut rgba, width, height, under, radius, SHADOW, short * SHADOW_BLUR, false);
+
+    let raised = [
+        (fill[0] * RAISE).min(1.0),
+        (fill[1] * RAISE).min(1.0),
+        (fill[2] * RAISE).min(1.0),
+        fill[3],
+    ];
+    rounded_rect_with(&mut rgba, width, height, rect, radius, raised, 1.0, true);
+
+    let label = keyboard.label(key);
+    if !label.is_empty() {
+        let glyphs = fit_label(text, label, rect.2, rect.3, ink);
+        blit_centred(&mut rgba, width, height, &glyphs, rect);
+    }
+    TextImage { width, height, rgba }
+}
+
+/// What a raised cap's picture depends on: which key it is, what it currently reads, and
+/// whether it is latched. Anything agreeing on all three draws identically, so one texture
+/// serves both — and the cache and the drawing ask the same question, so a stale cap is not a
+/// thing that can happen.
+pub fn cap_id(keyboard: &Keyboard, key: &Key) -> String {
+    format!("{}|{}|{}", key.code, keyboard.label(key), keyboard.is_latched(key))
+}
+
+/// How a key is coloured: its cap and its ink.
+///
+/// Shared by the face and by a raised cap so that standing a key up cannot change what it is,
+/// only how high it sits.
+fn appearance(keyboard: &Keyboard, key: &Key) -> ([f32; 4], [u8; 4]) {
+    match (keyboard.is_latched(key), key.role) {
+        (true, _) => (CAP_LATCHED, INK_LATCHED),
+        (false, Role::Modifier(_)) => (CAP_MODIFIER, INK_MODIFIER),
+        (false, Role::Normal) => (CAP, if key.label.len() > 1 { INK_MODIFIER } else { INK }),
+    }
 }
 
 /// A key's drawn cap, as `(x, y, w, h)` in pixels — its cell inset by the gap.
@@ -133,12 +226,35 @@ fn rounded_rect(
     radius: f32,
     colour: [f32; 4],
 ) {
+    // One pixel of edge, enough to kill the jaggies at this angular size, and lit like a cap.
+    rounded_rect_with(rgba, width, height, rect, radius, colour, 1.0, true);
+}
+
+/// The same, with the edge and the shading spelled out.
+///
+/// `feather` is how many pixels the edge fades over — one for a keycap, many for the shadow a
+/// raised one casts, which is the whole difference between the two. `lit` adds the vertical
+/// gradient that makes a cap read as a surface; a shadow is not a surface and must not have it.
+#[allow(clippy::too_many_arguments)]
+fn rounded_rect_with(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: (f32, f32, f32, f32),
+    radius: f32,
+    colour: [f32; 4],
+    feather: f32,
+    lit: bool,
+) {
     let (rx, ry, rw, rh) = rect;
     let radius = radius.max(0.0).min(rw.min(rh) * 0.5);
-    let x0 = (rx.floor().max(0.0)) as u32;
-    let y0 = (ry.floor().max(0.0)) as u32;
-    let x1 = ((rx + rw).ceil().min(width as f32)) as u32;
-    let y1 = ((ry + rh).ceil().min(height as f32)) as u32;
+    let feather = feather.max(0.01);
+    // A soft edge reaches beyond the rectangle, so the pixels it touches have to be visited.
+    let reach = feather * 0.5 + 1.0;
+    let x0 = ((rx - reach).floor().max(0.0)) as u32;
+    let y0 = ((ry - reach).floor().max(0.0)) as u32;
+    let x1 = ((rx + rw + reach).ceil().clamp(0.0, width as f32)) as u32;
+    let y1 = ((ry + rh + reach).ceil().clamp(0.0, height as f32)) as u32;
 
     for y in y0..y1 {
         for x in x0..x1 {
@@ -147,16 +263,19 @@ fn rounded_rect(
             let dx = (rx + radius - fx).max(fx - (rx + rw - radius)).max(0.0);
             let dy = (ry + radius - fy).max(fy - (ry + rh - radius)).max(0.0);
             let outside = (dx * dx + dy * dy).sqrt() - radius;
-            // One pixel of feathering, enough to kill the jaggies at this angular size.
-            let coverage = (0.5 - outside).clamp(0.0, 1.0);
+            let coverage = ((feather * 0.5 - outside) / feather).clamp(0.0, 1.0);
             if coverage <= 0.0 {
                 continue;
             }
             // A gentle vertical lift, so a cap reads as a surface catching light rather than a
             // flat swatch. Subtle on purpose: at a degree across, a strong gradient just looks
             // like the texture is dirty.
-            let t = ((fy - ry) / rh.max(1.0)).clamp(0.0, 1.0);
-            let lift = 1.0 + (0.18 - 0.30 * t);
+            let lift = if lit {
+                let t = ((fy - ry) / rh.max(1.0)).clamp(0.0, 1.0);
+                1.0 + (0.18 - 0.30 * t)
+            } else {
+                1.0
+            };
             let src = [
                 (colour[0] * lift).min(1.0),
                 (colour[1] * lift).min(1.0),

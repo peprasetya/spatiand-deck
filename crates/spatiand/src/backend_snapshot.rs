@@ -429,12 +429,12 @@ pub fn run(
             _ => Vec::new(),
         };
     for key in &hovered_keys {
-        scene.sync_key_label(&mut renderer, &mut text, keyboard.label(key))?;
+        scene.sync_key_cap(&mut renderer, &mut text, &keyboard, key)?;
     }
     let shell_ref = &shell;
     let scene_ref = &scene;
     let keyboard_open = keyboard.open;
-    let keyboard_scale = keyboard.scale;
+    let keyboard_state = &keyboard;
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     renderer.with_context(|gl| unsafe {
         gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
@@ -460,10 +460,9 @@ pub fn run(
                 focus.map(|w| w.pixels).unwrap_or((16, 9)),
                 orientation,
                 (stereo.h_fov_deg, stereo.v_fov_deg()),
-                keyboard_scale,
+                keyboard_state,
                 false,
                 &hovered_keys,
-                keyboard.shift,
             );
         }
         scene_ref.draw_menu(gl, &eye, shell_ref, (stereo.h_fov_deg, stereo.v_fov_deg()));

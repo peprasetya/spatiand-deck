@@ -205,6 +205,14 @@ pub fn run(
     // Which keys the pointers are over, so they can be drawn raised. At most one per pad.
     use spatiand_shell::keyboard::Key;
     let mut keyboard_hover: Vec<&'static Key> = Vec::new();
+    // Where each ray meets the keyboard, as `[right, left]`, so the reticle can be put *on* it.
+    //
+    // The keyboard is not a window and so is not in the list the aim is cast against. Without
+    // this the pointer is drawn at whatever the ray found behind the keyboard, or at the parked
+    // distance when it found nothing — and while each eye's picture is separately right, the
+    // disparity between them places the cursor a good way behind the keys. Shut one eye and it
+    // looks correct, which is exactly what a depth error looks like.
+    let mut keyboard_reach: [Option<spatiand_render::ray::Hit>; 2] = [None, None];
     // Left thumb position while a window is being dragged, for the depth adjustment.
     let mut drag_left_y: Option<f32> = None;
     let mut monitors = crate::system::Monitors::new();
@@ -1049,11 +1057,10 @@ pub fn run(
             scene.sync_status(&mut renderer, &mut text, &status_text, ppd)?;
             if keyboard.open {
                 scene.sync_keyboard(&mut renderer, &mut text, &keyboard, ppd)?;
-                // A raised key is redrawn with its own legend, since the baked one is now
-                // underneath an opaque cap. Built here rather than in the draw closure, which
-                // holds the GL context and cannot also take the renderer.
+                // A picture of each raised key. Built here rather than in the draw closure,
+                // which holds the GL context and cannot also take the renderer.
                 for key in &keyboard_hover {
-                    scene.sync_key_label(&mut renderer, &mut text, keyboard.label(key))?;
+                    scene.sync_key_cap(&mut renderer, &mut text, &keyboard, key)?;
                 }
                 debug_assert!(keyboard_hover.len() <= 2, "at most one key per pad");
             }
@@ -1330,12 +1337,17 @@ pub fn run(
                     // that lights up under one thumb but not the other would make the left one
                     // feel broken right up until you pressed it.
                     keyboard_hover.clear();
+                    keyboard_reach = [None, None];
                     keyboard_border_hot = keyboard_resize.is_some();
                     if let Some(q) = keyboard_quad.as_ref() {
-                        for aim in [right_aim.as_ref(), left_aim.as_ref()].into_iter().flatten() {
+                        for (hand, aim) in [right_aim.as_ref(), left_aim.as_ref()].into_iter().enumerate() {
+                            let Some(aim) = aim else { continue };
                             let Some(hit) = spatiand_render::intersect_quad(&aim.ray, q) else {
                                 continue;
                             };
+                            // The whole plate, border included: the reticle belongs on the
+                            // surface wherever it lands on it, not only over a key.
+                            keyboard_reach[hand] = Some(hit);
                             match keyboard.target_at(hit.u, hit.v) {
                                 Some(spatiand_shell::keyboard::Target::Key(k)) => {
                                     if !keyboard_hover.iter().any(|e: &&Key| e.code == k.code) {
@@ -1566,9 +1578,8 @@ pub fn run(
                 let right_aim = &right_aim;
                 let left_aim = &left_aim;
                 let keyboard_open = keyboard.open;
-                let keyboard_scale = keyboard.scale;
+                let keyboard_state = &keyboard;
                 let keyboard_hot = keyboard_border_hot;
-                let keyboard_shift = keyboard.shift;
                 let keyboard_raised = &keyboard_hover;
                 renderer.with_context(|gl| unsafe {
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
@@ -1648,10 +1659,9 @@ pub fn run(
                                 focus.map(|w| w.pixels).unwrap_or((16, 9)),
                                 orientation,
                                 (stereo.h_fov_deg, stereo.v_fov_deg()),
-                                keyboard_scale,
+                                keyboard_state,
                                 keyboard_hot,
                                 keyboard_raised,
-                                keyboard_shift,
                             );
                         }
                         scene.draw_menu(gl, &eye, &shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
@@ -1674,9 +1684,10 @@ pub fn run(
                             .as_ref()
                             .map(|p| p.right_pad.clicked)
                             .unwrap_or(false);
-                        for (aim, right_hand) in
-                            [(right_aim.as_ref(), true), (left_aim.as_ref(), false)]
-                        {
+                        for (aim, right_hand, on_keys) in [
+                            (right_aim.as_ref(), true, keyboard_reach[0]),
+                            (left_aim.as_ref(), false, keyboard_reach[1]),
+                        ] {
                             let Some(a) = aim else { continue };
                             if !right_hand && right_owns && !pointers.is_dragging() {
                                 continue;
@@ -1691,7 +1702,7 @@ pub fn run(
                                 &eye,
                                 orientation,
                                 &a.ray,
-                                a.hit.map(|(_, h)| h),
+                                nearer(a.hit.map(|(_, h)| h), on_keys),
                                 right_hand,
                                 cursor,
                             );
@@ -2317,6 +2328,51 @@ fn any_button_held(state: &spatiand_input::ControllerState) -> bool {
 fn span(u: f64, v: f64) -> f64 {
     let (du, dv) = (u - 0.5, v - 0.5);
     (du * du + dv * dv).sqrt()
+}
+
+/// Whichever of two surfaces a ray reached first.
+///
+/// The pointer is drawn at its hit's distance, and that distance is the *only* thing setting how
+/// far away the two eyes agree it is. Every surface the ray can land on therefore has to be in
+/// this comparison, or the reticle is drawn at the depth of something else entirely — visibly
+/// on the right spot in each eye, and floating behind the thing it is pointing at in stereo.
+fn nearer(
+    a: Option<spatiand_render::ray::Hit>,
+    b: Option<spatiand_render::ray::Hit>,
+) -> Option<spatiand_render::ray::Hit> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if b.distance < a.distance { b } else { a }),
+        (a, b) => a.or(b),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::DVec3;
+    use spatiand_render::ray::Hit;
+
+    fn hit(distance: f64) -> Hit {
+        Hit { distance, u: 0.5, v: 0.5, point: DVec3::ZERO }
+    }
+
+    #[test]
+    fn the_pointer_lands_on_the_nearer_of_two_surfaces() {
+        // The keyboard hangs in front of whatever is behind it, so when a ray reaches both, the
+        // keyboard is what the wearer is pointing at.
+        assert_eq!(nearer(Some(hit(2.5)), Some(hit(1.3))), Some(hit(1.3)));
+        assert_eq!(nearer(Some(hit(1.0)), Some(hit(1.3))), Some(hit(1.0)));
+    }
+
+    #[test]
+    fn a_surface_reached_by_only_one_ray_still_counts() {
+        // The case that was actually broken: a ray passing under every window but across the
+        // keyboard used to find nothing at all and park the reticle at a fixed distance, well
+        // behind the keys it was sitting on.
+        assert_eq!(nearer(None, Some(hit(1.3))), Some(hit(1.3)));
+        assert_eq!(nearer(Some(hit(1.3)), None), Some(hit(1.3)));
+        assert_eq!(nearer(None, None), None);
+    }
 }
 
 /// Send one keystroke, wrapped in whatever modifiers were latched, to whatever has focus.
