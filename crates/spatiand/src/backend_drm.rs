@@ -514,7 +514,30 @@ pub fn run(
                     Ok(m) => log::info!("headset display mode -> {m:?}"),
                     Err(e) => log::warn!("could not switch to stereo ({e}); staying mono"),
                 }
-                if let Some(stereo_mode) = wait_for_stereo_mode(&drm, connector_info.handle(), w) {
+                // Ask the *headset* how wide one eye is, not the connector.
+                //
+                // This used to pass `w`, the mode we had just picked, which is the widest the
+                // connector advertises. That is right exactly once — on a cold start, where
+                // the glasses are in 2D and the widest mode is the mono one. After a hot
+                // reconnect it is wrong and self-defeating: the connector still lists the
+                // 3840x1080 it learned during the previous stereo session, so `w` came back as
+                // 3840 and this then waited for a mode at least 7680 wide. Nothing is ever that
+                // wide, so it timed out after ten seconds every single time, reported that the
+                // glasses "never advertised a double-width mode", and left the session in mono
+                // while the rebuild loop above started it all over again.
+                //
+                // `per_eye` is a fact about the hardware and does not drift with whatever the
+                // connector happens to be advertising right now.
+                let mono_width = x.info().per_eye.0 as u16;
+                log::info!(
+                    "looking for a stereo mode at least {}px wide (one eye is {}px; connector currently offers {}px)",
+                    mono_width.saturating_mul(2),
+                    mono_width,
+                    w
+                );
+                if let Some(stereo_mode) =
+                    wait_for_stereo_mode(&drm, connector_info.handle(), mono_width)
+                {
                     let (sw, sh) = stereo_mode.size();
                     log::info!("stereo mode {sw}x{sh}@{} appeared; adopting", stereo_mode.vrefresh());
                     match compositor.use_mode(stereo_mode) {
