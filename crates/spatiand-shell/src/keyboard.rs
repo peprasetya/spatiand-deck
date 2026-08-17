@@ -1,42 +1,73 @@
-//! An on-screen keyboard, laid out as a grid you point at.
+//! An on-screen keyboard: the layout, the latching modifiers, and the hit-testing.
 //!
 //! Opening an application you cannot type into is most of the way to useless, and there is no
-//! physical keyboard in a spatial session. This is the layout and the hit-testing; drawing it
-//! and delivering the keystrokes belong to the compositor.
+//! physical keyboard in a spatial session. This module owns the shape of the thing and what a
+//! point on it means; drawing it and delivering the keystrokes belong to the compositor.
 //!
-//! ## Why a grid and not a real keyboard shape
+//! ## Why a uniform grid and not a staggered one
 //!
 //! A staggered QWERTY has keys at fractional offsets, which means hit-testing has to know each
 //! row's indent. Pointing at it with a head-anchored ray at two metres, where a key is about a
 //! degree across, that precision buys nothing — what matters is that every key is the same
-//! size and that the gaps are predictable. So the rows are aligned and the keys are uniform.
+//! height and that the columns are predictable. So the rows are aligned and widths are whole
+//! numbers of a small unit.
+//!
+//! Widths are in **quarter-keys**: an ordinary letter is [`UNIT`] = 4, so a 1.5-wide tab is 6
+//! and a 2.25-wide enter is 9. Integers rather than floats because every row has to add up to
+//! exactly [`ROW_UNITS`], and that is an equality worth being able to assert.
 //!
 //! Codes are **evdev** keycodes, the same numbers `/usr/include/linux/input-event-codes.h`
 //! uses. Wayland wants them offset by 8; that offset is applied where the event is sent rather
 //! than baked in here, so this table can be read against the header directly.
 
+/// What pressing a key does besides typing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Sends its code.
+    Normal,
+    /// Latches a modifier instead of sending anything.
+    Modifier(Modifier),
+}
+
+/// The modifiers this keyboard can hold.
+///
+/// Ctrl and Alt earn their place: `Ctrl+L` is how you reach a browser's address bar, and
+/// without them the keyboard can type into a page but cannot drive the application around it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Modifier {
+    Shift,
+    Ctrl,
+    Alt,
+}
+
 /// One key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Key {
-    /// What to draw when shift is not held.
+    /// What to draw when shift is not latched.
     pub label: &'static str,
     /// What to draw when it is.
     pub shifted: &'static str,
     /// evdev keycode.
     pub code: u32,
-    /// How many normal keys wide.
+    /// Width in quarter-keys. An ordinary key is [`UNIT`].
     pub width: u8,
-    /// Toggles rather than types.
-    pub sticky: bool,
+    pub role: Role,
 }
+
+/// Width of an ordinary key, in the units [`Key::width`] is expressed in.
+pub const UNIT: u8 = 4;
+
+/// Every row is exactly this many units wide, so the columns line up and the face is a
+/// rectangle rather than a ragged stack.
+pub const ROW_UNITS: u16 = 60;
 
 const fn key(label: &'static str, shifted: &'static str, code: u32) -> Key {
     Key {
         label,
         shifted,
         code,
-        width: 1,
-        sticky: false,
+        width: UNIT,
+        role: Role::Normal,
     }
 }
 
@@ -46,21 +77,36 @@ const fn wide(label: &'static str, code: u32, width: u8) -> Key {
         shifted: label,
         code,
         width,
-        sticky: false,
+        role: Role::Normal,
+    }
+}
+
+const fn modifier(label: &'static str, code: u32, width: u8, which: Modifier) -> Key {
+    Key {
+        label,
+        shifted: label,
+        code,
+        width,
+        role: Role::Modifier(which),
     }
 }
 
 /// evdev codes used below, named so the table can be checked against the kernel header.
+pub const KEY_ESC: u32 = 1;
 pub const KEY_BACKSPACE: u32 = 14;
 pub const KEY_TAB: u32 = 15;
 pub const KEY_ENTER: u32 = 28;
+pub const KEY_LEFTCTRL: u32 = 29;
 pub const KEY_LEFTSHIFT: u32 = 42;
+pub const KEY_RIGHTSHIFT: u32 = 54;
+pub const KEY_LEFTALT: u32 = 56;
+pub const KEY_RIGHTALT: u32 = 100;
 pub const KEY_SPACE: u32 = 57;
-pub const KEY_ESC: u32 = 1;
 
 /// The rows, top to bottom.
 pub const ROWS: &[&[Key]] = &[
     &[
+        key("`", "~", 41),
         key("1", "!", 2),
         key("2", "@", 3),
         key("3", "#", 4),
@@ -71,9 +117,12 @@ pub const ROWS: &[&[Key]] = &[
         key("8", "*", 9),
         key("9", "(", 10),
         key("0", ")", 11),
-        wide("back", KEY_BACKSPACE, 2),
+        key("-", "_", 12),
+        key("=", "+", 13),
+        wide("back", KEY_BACKSPACE, 8),
     ],
     &[
+        wide("tab", KEY_TAB, 6),
         key("q", "Q", 16),
         key("w", "W", 17),
         key("e", "E", 18),
@@ -84,9 +133,12 @@ pub const ROWS: &[&[Key]] = &[
         key("i", "I", 23),
         key("o", "O", 24),
         key("p", "P", 25),
-        wide("tab", KEY_TAB, 2),
+        key("[", "{", 26),
+        key("]", "}", 27),
+        wide("\\", 43, 6),
     ],
     &[
+        wide("esc", KEY_ESC, 7),
         key("a", "A", 30),
         key("s", "S", 31),
         key("d", "D", 32),
@@ -97,16 +149,11 @@ pub const ROWS: &[&[Key]] = &[
         key("k", "K", 37),
         key("l", "L", 38),
         key(";", ":", 39),
-        wide("enter", KEY_ENTER, 2),
+        key("'", "\"", 40),
+        wide("enter", KEY_ENTER, 9),
     ],
     &[
-        Key {
-            label: "shift",
-            shifted: "shift",
-            code: KEY_LEFTSHIFT,
-            width: 2,
-            sticky: true,
-        },
+        modifier("shift", KEY_LEFTSHIFT, 11, Modifier::Shift),
         key("z", "Z", 44),
         key("x", "X", 45),
         key("c", "C", 46),
@@ -117,65 +164,213 @@ pub const ROWS: &[&[Key]] = &[
         key(",", "<", 51),
         key(".", ">", 52),
         key("/", "?", 53),
+        modifier("shift", KEY_RIGHTSHIFT, 9, Modifier::Shift),
     ],
     &[
-        wide("esc", KEY_ESC, 2),
-        wide("space", KEY_SPACE, 7),
-        key("-", "_", 12),
-        key("=", "+", 13),
+        modifier("ctrl", KEY_LEFTCTRL, 6, Modifier::Ctrl),
+        modifier("alt", KEY_LEFTALT, 6, Modifier::Alt),
+        wide("space", KEY_SPACE, 26),
+        modifier("alt", KEY_RIGHTALT, 6, Modifier::Alt),
+        wide("←", 105, 4),
+        wide("↑", 103, 4),
+        wide("↓", 108, 4),
+        wide("→", 106, 4),
     ],
 ];
 
-/// Widest row, in key units. Every row is drawn to this width so the columns line up.
-pub fn row_units() -> u8 {
-    ROWS.iter()
-        .map(|row| row.iter().map(|k| k.width).sum::<u8>())
-        .max()
-        .unwrap_or(1)
+/// How thick the resize border is, as a fraction of the **face's** height.
+///
+/// Deliberately thinner than a window's frame, which is 10% of its content. A window is
+/// furniture you arrange; the keyboard is a tool you point at, and a border heavy enough to
+/// look like a window's would compete with the keys for both attention and aim. At roughly 5%
+/// of a face about 9° tall this still lands near half a degree, which is grabbable because the
+/// border runs the whole way round rather than being a small target.
+pub const BORDER_FRACTION: f64 = 0.055;
+
+/// The smallest and largest the wearer may drag the keyboard, as a multiple of its natural
+/// size. Not unbounded: dragged to nothing it takes its own resize border with it, and there
+/// is then no way to get it back.
+pub const MIN_SCALE: f32 = 0.6;
+pub const MAX_SCALE: f32 = 1.9;
+
+/// A key's cell on the face, in the face's own 0..1 coordinates.
+///
+/// The cell, not the drawn keycap: the keycap is inset inside it so the keys have gaps between
+/// them, while the cells tile the face exactly. Hit-testing against the cells rather than the
+/// caps is what stops there being dead strips between keys that read as a missed click.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyRect {
+    pub u: f64,
+    pub v: f64,
+    pub half_u: f64,
+    pub half_v: f64,
+}
+
+/// Aspect ratio of the face alone — width over height.
+pub fn face_aspect() -> f64 {
+    // Rows are as tall as an ordinary key is wide, so the cells are square.
+    ROW_UNITS as f64 / (ROWS.len() as f64 * UNIT as f64)
+}
+
+/// Aspect ratio of the whole plate, border included.
+pub fn outer_aspect() -> f64 {
+    let face_h = 1.0;
+    let face_w = face_aspect();
+    let border = face_h * BORDER_FRACTION;
+    (face_w + border * 2.0) / (face_h + border * 2.0)
+}
+
+/// The face's size as a fraction of the plate's, as `(width, height)`.
+///
+/// The one place the border's thickness turns into a coordinate change. Both the hit test and
+/// the drawing go through this, so a border drawn at one thickness and aimed at another is not
+/// a thing that can happen.
+pub fn face_fraction() -> (f64, f64) {
+    let face_w = face_aspect();
+    let border = BORDER_FRACTION;
+    (
+        face_w / (face_w + border * 2.0),
+        1.0 / (1.0 + border * 2.0),
+    )
+}
+
+/// Every key with the cell it occupies.
+pub fn layout() -> Vec<(&'static Key, KeyRect)> {
+    let rows = ROWS.len() as f64;
+    let total = ROW_UNITS as f64;
+    let mut out = Vec::new();
+    for (row_index, row) in ROWS.iter().enumerate() {
+        let mut x = 0.0f64;
+        for k in row.iter() {
+            let w = k.width as f64 / total;
+            out.push((
+                k,
+                KeyRect {
+                    u: x + w * 0.5,
+                    v: (row_index as f64 + 0.5) / rows,
+                    half_u: w * 0.5,
+                    half_v: 0.5 / rows,
+                },
+            ));
+            x += w;
+        }
+    }
+    out
+}
+
+/// What a point on the plate is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Key(&'static Key),
+    /// The frame. Grab to resize.
+    Border,
+}
+
+/// One keystroke to deliver, with whatever modifiers were latched when it was pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stroke {
+    pub code: u32,
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
 }
 
 /// The keyboard's state.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Keyboard {
     pub open: bool,
-    /// Shift is a **latch**, not a hold: there is one pointer and it cannot press two keys at
-    /// once, so a shift you have to hold would make capitals impossible.
+    /// Modifiers **latch** rather than being held: there is one pointer and it cannot press two
+    /// keys at once, so a shift you have to hold would make a capital letter impossible.
     pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    /// How much the wearer has grown or shrunk it, as a multiple of its natural size.
+    pub scale: f32,
+}
+
+impl Default for Keyboard {
+    fn default() -> Self {
+        Self {
+            open: false,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            scale: 1.0,
+        }
+    }
 }
 
 impl Keyboard {
-    /// Which key is at a point on the keyboard's face, in 0..1 surface coordinates.
+    /// Which key is at a point on the **face**, in 0..1 face coordinates.
     pub fn key_at(&self, u: f64, v: f64) -> Option<&'static Key> {
         if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
             return None;
         }
-        let row_index = (v * ROWS.len() as f64) as usize;
-        let row = ROWS.get(row_index.min(ROWS.len() - 1))?;
-        let total = row_units() as f64;
+        let rows = ROWS.len();
+        let row_index = ((v * rows as f64) as usize).min(rows - 1);
+        let row = ROWS.get(row_index)?;
+        let total = ROW_UNITS as f64;
         let mut x = 0.0;
         for k in row.iter() {
-            let next = x + k.width as f64 / total;
-            if u < next {
+            x += k.width as f64 / total;
+            if u < x {
                 return Some(k);
             }
-            x = next;
         }
         row.last()
     }
 
-    /// Press a key. Returns the evdev code to send, or `None` if it only changed state.
-    pub fn press(&mut self, k: &Key) -> Option<u32> {
-        if k.sticky {
-            self.shift = !self.shift;
+    /// What is at a point on the **plate**, border included, in 0..1 plate coordinates.
+    pub fn target_at(&self, u: f64, v: f64) -> Option<Target> {
+        if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
             return None;
         }
-        Some(k.code)
+        let (fw, fh) = face_fraction();
+        let fu = (u - (1.0 - fw) * 0.5) / fw;
+        let fv = (v - (1.0 - fh) * 0.5) / fh;
+        match self.key_at(fu, fv) {
+            Some(k) => Some(Target::Key(k)),
+            None => Some(Target::Border),
+        }
     }
 
-    /// Called after a key has been sent, to drop a one-shot shift.
+    /// Press a key. Returns the keystroke to send, or `None` if it only latched a modifier.
+    pub fn press(&mut self, k: &Key) -> Option<Stroke> {
+        match k.role {
+            Role::Modifier(m) => {
+                let flag = match m {
+                    Modifier::Shift => &mut self.shift,
+                    Modifier::Ctrl => &mut self.ctrl,
+                    Modifier::Alt => &mut self.alt,
+                };
+                *flag = !*flag;
+                None
+            }
+            Role::Normal => Some(Stroke {
+                code: k.code,
+                shift: self.shift,
+                ctrl: self.ctrl,
+                alt: self.alt,
+            }),
+        }
+    }
+
+    /// Called after a key has been sent, to drop the one-shot latches.
     pub fn after_press(&mut self, k: &Key) {
-        if !k.sticky {
+        if k.role == Role::Normal {
             self.shift = false;
+            self.ctrl = false;
+            self.alt = false;
+        }
+    }
+
+    /// Whether a modifier key is currently lit.
+    pub fn is_latched(&self, k: &Key) -> bool {
+        match k.role {
+            Role::Modifier(Modifier::Shift) => self.shift,
+            Role::Modifier(Modifier::Ctrl) => self.ctrl,
+            Role::Modifier(Modifier::Alt) => self.alt,
+            Role::Normal => false,
         }
     }
 
@@ -187,6 +382,12 @@ impl Keyboard {
             k.label
         }
     }
+
+    /// Grow or shrink, clamped. Returns the scale actually adopted.
+    pub fn rescale(&mut self, factor: f32) -> f32 {
+        self.scale = (self.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
+        self.scale
+    }
 }
 
 #[cfg(test)]
@@ -194,22 +395,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_row_fits_the_same_width() {
-        // Rows that do not add up leave keys hanging past the edge of the panel, and the
-        // hit-test and the drawing disagree about where they are.
-        let units = row_units();
+    fn every_row_is_exactly_the_same_width() {
+        // Rows that do not add up leave keys hanging past the edge of the face, and the
+        // hit-test and the drawing then disagree about where they are.
         for (i, row) in ROWS.iter().enumerate() {
-            let sum: u8 = row.iter().map(|k| k.width).sum();
-            assert!(sum <= units, "row {i} is {sum} units against a width of {units}");
+            let sum: u16 = row.iter().map(|k| k.width as u16).sum();
+            assert_eq!(sum, ROW_UNITS, "row {i} is {sum} units, not {ROW_UNITS}");
         }
     }
 
     #[test]
     fn the_corners_land_on_the_expected_keys() {
         let kb = Keyboard::default();
-        assert_eq!(kb.key_at(0.01, 0.01).unwrap().label, "1");
-        assert_eq!(kb.key_at(0.01, 0.45).unwrap().label, "a");
-        assert_eq!(kb.key_at(0.01, 0.99).unwrap().label, "esc");
+        assert_eq!(kb.key_at(0.01, 0.01).unwrap().label, "`");
+        assert_eq!(kb.key_at(0.99, 0.01).unwrap().label, "back");
+        assert_eq!(kb.key_at(0.01, 0.45).unwrap().label, "esc");
+        assert_eq!(kb.key_at(0.01, 0.99).unwrap().label, "ctrl");
+        assert_eq!(kb.key_at(0.99, 0.99).unwrap().label, "→");
     }
 
     #[test]
@@ -224,30 +426,107 @@ mod tests {
         // A dead spot is indistinguishable from a missed click, and with a head-anchored ray
         // people will blame their aim.
         let kb = Keyboard::default();
-        for i in 0..40 {
-            for j in 0..20 {
-                let u = (i as f64 + 0.5) / 40.0;
-                let v = (j as f64 + 0.5) / 20.0;
+        for i in 0..120 {
+            for j in 0..40 {
+                let u = (i as f64 + 0.5) / 120.0;
+                let v = (j as f64 + 0.5) / 40.0;
                 assert!(kb.key_at(u, v).is_some(), "nothing at ({u}, {v})");
             }
         }
     }
 
     #[test]
-    fn shift_latches_rather_than_needing_to_be_held() {
+    fn the_cells_agree_with_the_hit_test() {
+        // The layout draws the keys and `key_at` decides what was pressed. If they disagree,
+        // every key is subtly the wrong one and it looks like a broken keymap.
+        let kb = Keyboard::default();
+        for (k, rect) in layout() {
+            let hit = kb.key_at(rect.u, rect.v).expect("a cell centre must hit");
+            assert_eq!(hit.code, k.code, "cell for {:?} hits {:?}", k.label, hit.label);
+        }
+    }
+
+    #[test]
+    fn the_cells_tile_the_face_without_gaps_or_overlap() {
+        let total: f64 = layout().iter().map(|(_, r)| r.half_u * 2.0 * r.half_v * 2.0).sum();
+        assert!((total - 1.0).abs() < 1e-9, "cells cover {total} of the face");
+    }
+
+    #[test]
+    fn the_border_is_outside_the_keys_and_the_keys_fill_the_rest() {
+        let kb = Keyboard::default();
+        // Dead centre is a key; the very edge of the plate is border.
+        assert!(matches!(kb.target_at(0.5, 0.5), Some(Target::Key(_))));
+        assert_eq!(kb.target_at(0.001, 0.5), Some(Target::Border));
+        assert_eq!(kb.target_at(0.5, 0.999), Some(Target::Border));
+        assert_eq!(kb.target_at(0.999, 0.001), Some(Target::Border));
+        // And off the plate entirely is neither.
+        assert!(kb.target_at(1.2, 0.5).is_none());
+    }
+
+    #[test]
+    fn the_border_is_thinner_than_a_window_frame() {
+        // The whole point of the keyboard's frame: grabbable, but not competing with the keys.
+        // A window's frame is 10% of its content height; this must stay visibly under that.
+        assert!(BORDER_FRACTION < 0.08, "border is {BORDER_FRACTION}");
+        // And not so thin it stops being a target at all.
+        assert!(BORDER_FRACTION > 0.02);
+    }
+
+    #[test]
+    fn the_face_is_about_three_times_as_wide_as_it_is_tall() {
+        // A real keyboard's proportions. Far from this and it stops reading as a keyboard.
+        let a = face_aspect();
+        assert!((2.5..3.5).contains(&a), "aspect {a}");
+        // The plate is a little squarer than the face, because the border is a bigger share of
+        // the short side.
+        assert!(outer_aspect() < a);
+    }
+
+    #[test]
+    fn modifiers_latch_rather_than_needing_to_be_held() {
         // There is one pointer. A shift you have to hold makes a capital letter impossible.
         let mut kb = Keyboard::default();
         let shift = ROWS[3][0];
-        assert!(shift.sticky);
-        assert_eq!(kb.press(&shift), None, "shift types nothing");
+        assert!(matches!(shift.role, Role::Modifier(Modifier::Shift)));
+        assert_eq!(kb.press(&shift), None, "shift types nothing on its own");
         assert!(kb.shift);
+        assert!(kb.is_latched(&shift));
 
-        let a = ROWS[2][0];
+        let a = ROWS[2][1];
         assert_eq!(kb.label(&a), "A");
-        assert_eq!(kb.press(&a), Some(30));
+        let stroke = kb.press(&a).expect("a letter types");
+        assert_eq!(stroke.code, 30);
+        assert!(stroke.shift, "the latch must reach the keystroke, not just the label");
         kb.after_press(&a);
-        assert!(!kb.shift, "a latched shift releases after one key");
+        assert!(!kb.shift, "a latch releases after one key");
         assert_eq!(kb.label(&a), "a");
+    }
+
+    #[test]
+    fn ctrl_and_alt_latch_together_so_combinations_are_possible() {
+        // Ctrl+L is how you reach a browser's address bar. Without carrying the latch into the
+        // stroke the keyboard can fill in a page but cannot drive the application.
+        let mut kb = Keyboard::default();
+        let ctrl = ROWS[4][0];
+        let alt = ROWS[4][1];
+        kb.press(&ctrl);
+        kb.press(&alt);
+        assert!(kb.ctrl && kb.alt);
+        let l = ROWS[2][10];
+        let stroke = kb.press(&l).unwrap();
+        assert!(stroke.ctrl && stroke.alt);
+        kb.after_press(&l);
+        assert!(!kb.ctrl && !kb.alt, "both latches release together");
+    }
+
+    #[test]
+    fn pressing_a_latched_modifier_again_releases_it() {
+        let mut kb = Keyboard::default();
+        let shift = ROWS[3][0];
+        kb.press(&shift);
+        kb.press(&shift);
+        assert!(!kb.shift, "a modifier must be escapable without typing something");
     }
 
     #[test]
@@ -265,6 +544,11 @@ mod tests {
         assert_eq!(find("z"), Some(44));
         assert_eq!(find("space"), Some(57));
         assert_eq!(find("enter"), Some(28));
+        assert_eq!(find("`"), Some(41));
+        assert_eq!(find("←"), Some(105));
+        assert_eq!(find("→"), Some(106));
+        assert_eq!(find("↑"), Some(103));
+        assert_eq!(find("↓"), Some(108));
     }
 
     #[test]
@@ -274,5 +558,45 @@ mod tests {
         let before = codes.len();
         codes.dedup();
         assert_eq!(before, codes.len(), "two keys share an evdev code");
+    }
+
+    #[test]
+    fn there_is_a_full_number_row() {
+        // Typing a password or a URL without digits is not typing.
+        let kb = Keyboard::default();
+        for (i, d) in "1234567890".chars().enumerate() {
+            let found = ROWS[0]
+                .iter()
+                .find(|k| k.label == d.to_string())
+                .unwrap_or_else(|| panic!("no {d} key"));
+            assert_eq!(found.code, 2 + i as u32);
+        }
+        // And the shifted symbols above them. The "1" is the second cell, so it starts one
+        // key-width in — aiming at 0.03 lands on the backtick.
+        let one = kb.key_at(UNIT as f64 * 1.5 / ROW_UNITS as f64, 0.1).unwrap();
+        assert_eq!(one.label, "1");
+        assert_eq!(one.shifted, "!");
+    }
+
+    #[test]
+    fn resizing_is_bounded_at_both_ends() {
+        // Dragged to nothing the keyboard takes its own resize border with it, and there is
+        // then no way to get hold of it again.
+        let mut kb = Keyboard::default();
+        for _ in 0..40 {
+            kb.rescale(0.5);
+        }
+        assert_eq!(kb.scale, MIN_SCALE);
+        for _ in 0..40 {
+            kb.rescale(2.0);
+        }
+        assert_eq!(kb.scale, MAX_SCALE);
+    }
+
+    #[test]
+    fn a_new_keyboard_is_its_natural_size_and_shut() {
+        let kb = Keyboard::default();
+        assert!(!kb.open);
+        assert_eq!(kb.scale, 1.0);
     }
 }

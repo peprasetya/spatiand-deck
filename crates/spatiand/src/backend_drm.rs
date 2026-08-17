@@ -186,6 +186,13 @@ pub fn run(
     // than jumping the moment it lands.
     let mut last_left_pad: Option<(f32, f32)> = None;
     let mut keyboard = spatiand_shell::Keyboard::default();
+    /// A keyboard resize in progress: the scale when the frame was grabbed, and how far from
+    /// the middle the pointer was at that moment. Held rather than recomputed so the drag
+    /// measures against where it started instead of against the size it is producing — which
+    /// would feed the result back into its own input and run away.
+    type KeyboardResize = (f32, f64);
+    let mut keyboard_resize: Option<KeyboardResize> = None;
+    let mut keyboard_border_hot = false;
     // Left thumb position while a window is being dragged, for the depth adjustment.
     let mut drag_left_y: Option<f32> = None;
     let mut monitors = crate::system::Monitors::new();
@@ -1200,32 +1207,93 @@ pub fn run(
                         }
                     }
 
+                    // Where the keyboard is this frame, if it is up at all. Worked out once:
+                    // the press, the resize drag and the drawing all have to agree, and three
+                    // copies of this arithmetic is three chances for the keys to be somewhere
+                    // other than where they are drawn.
+                    let keyboard_quad = keyboard.open.then(|| {
+                        let focus = windows.iter().find(|w| w.focused);
+                        let (centre, facing, width, height) = scene.keyboard_placement(
+                            focus.map(|w| &w.placement),
+                            focus.map(|w| w.pixels).unwrap_or((16, 9)),
+                            orientation,
+                            (stereo.h_fov_deg, stereo.v_fov_deg()),
+                            keyboard.scale,
+                        );
+                        spatiand_render::Quad {
+                            centre: centre.as_dvec3(),
+                            orientation: facing.as_dquat(),
+                            width: width as f64,
+                            height: height as f64,
+                        }
+                    });
+
+                    // Is the pointer over the keyboard's frame right now? Only for lighting it
+                    // up, so the wearer can tell the border is a thing that can be grabbed.
+                    keyboard_border_hot = keyboard_quad
+                        .as_ref()
+                        .zip(right_aim.as_ref())
+                        .and_then(|(q, a)| spatiand_render::intersect_quad(&a.ray, q))
+                        .map(|hit| {
+                            keyboard.target_at(hit.u, hit.v)
+                                == Some(spatiand_shell::keyboard::Target::Border)
+                        })
+                        .unwrap_or(false)
+                        || keyboard_resize.is_some();
+
+                    // A resize in progress owns the pointer until it is let go.
+                    if let (Some(start), Some(q)) = (keyboard_resize, keyboard_quad.as_ref()) {
+                        if right_click {
+                            if let Some(a) = right_aim.as_ref() {
+                                if let Some(hit) = spatiand_render::ray::intersect_plane(&a.ray, q) {
+                                    // How far out from the middle the pointer is now, against
+                                    // where it was when the frame was grabbed. Measured from
+                                    // the centre so the gesture is "pull it bigger" in any
+                                    // direction rather than a per-edge drag -- the keyboard
+                                    // keeps its aspect, so there is nothing a per-edge drag
+                                    // could mean that this does not.
+                                    let now = span(hit.u, hit.v);
+                                    if start.1 > 1e-4 {
+                                        keyboard.scale =
+                                            (start.0 * (now / start.1) as f32).clamp(
+                                                spatiand_shell::keyboard::MIN_SCALE,
+                                                spatiand_shell::keyboard::MAX_SCALE,
+                                            );
+                                    }
+                                }
+                            }
+                        } else {
+                            log::info!("keyboard resized to {:.2}x", keyboard.scale);
+                            keyboard_resize = None;
+                        }
+                    }
+
                     // The keyboard is tested before any window. It deliberately hangs in
                     // front, and a keystroke must never also click through to what is behind.
                     let mut typed = false;
-                    if keyboard.open && right_click && !right_was_down {
-                        if let Some(a) = right_aim.as_ref() {
-                            let (centre, facing, width, height) =
-                                scene.keyboard_placement(orientation, (stereo.h_fov_deg, stereo.v_fov_deg()));
-                            let quad = spatiand_render::Quad {
-                                centre: centre.as_dvec3(),
-                                orientation: facing.as_dquat(),
-                                width: width as f64,
-                                height: height as f64,
-                            };
-                            if let Some(hit) = spatiand_render::intersect_quad(&a.ray, &quad) {
-                                if let Some(key) = keyboard.key_at(hit.u, hit.v) {
-                                    typed = true;
-                                    if let Some(c) = controller.as_ref() {
-                                        c.pulse(
-                                            spatiand_input::HapticPad::Right,
-                                            spatiand_input::Feel::Click,
-                                        );
+                    if right_click && !right_was_down && keyboard_resize.is_none() {
+                        if let (Some(a), Some(q)) = (right_aim.as_ref(), keyboard_quad.as_ref()) {
+                            if let Some(hit) = spatiand_render::intersect_quad(&a.ray, q) {
+                                match keyboard.target_at(hit.u, hit.v) {
+                                    Some(spatiand_shell::keyboard::Target::Key(key)) => {
+                                        typed = true;
+                                        if let Some(c) = controller.as_ref() {
+                                            c.pulse(
+                                                spatiand_input::HapticPad::Right,
+                                                spatiand_input::Feel::Click,
+                                            );
+                                        }
+                                        if let Some(stroke) = keyboard.press(key) {
+                                            send_stroke(&mut runtime.state, stroke, time_ms);
+                                        }
+                                        keyboard.after_press(key);
                                     }
-                                    if let Some(code) = keyboard.press(key) {
-                                        send_key(&mut runtime.state, code, time_ms);
+                                    Some(spatiand_shell::keyboard::Target::Border) => {
+                                        typed = true;
+                                        keyboard_resize =
+                                            Some((keyboard.scale, span(hit.u, hit.v)));
                                     }
-                                    keyboard.after_press(key);
+                                    None => {}
                                 }
                             }
                         }
@@ -1371,6 +1439,8 @@ pub fn run(
                 let right_aim = &right_aim;
                 let left_aim = &left_aim;
                 let keyboard_open = keyboard.open;
+                let keyboard_scale = keyboard.scale;
+                let keyboard_hot = keyboard_border_hot;
                 renderer.with_context(|gl| unsafe {
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
                     gl.Disable(ffi::SCISSOR_TEST);
@@ -1437,6 +1507,21 @@ pub fn run(
                         if !waiting {
                             scene.draw_sky(gl, &eye);
                             scene.draw_windows(gl, &eye, &windows);
+                        }
+                        // Under the focused window, and drawn before the menus so a menu opened
+                        // over it still reads as being in front.
+                        if keyboard_open {
+                            let focus = windows.iter().find(|w| w.focused);
+                            scene.draw_keyboard(
+                                gl,
+                                &eye,
+                                focus.map(|w| &w.placement),
+                                focus.map(|w| w.pixels).unwrap_or((16, 9)),
+                                orientation,
+                                (stereo.h_fov_deg, stereo.v_fov_deg()),
+                                keyboard_scale,
+                                keyboard_hot,
+                            );
                         }
                         scene.draw_menu(gl, &eye, &shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
                         // While a resize is running the cursor keeps the edge's shape even
@@ -2048,33 +2133,72 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-/// Send one key press and release to whatever has keyboard focus.
+/// How far a point on a quad is from the quad's middle, in the quad's own units.
+///
+/// The measurement a keyboard resize is driven by: the ratio of this now to this when the frame
+/// was grabbed is how much bigger the keyboard should be.
+fn span(u: f64, v: f64) -> f64 {
+    let (du, dv) = (u - 0.5, v - 0.5);
+    (du * du + dv * dv).sqrt()
+}
+
+/// Send one keystroke, wrapped in whatever modifiers were latched, to whatever has focus.
+///
+/// The modifiers are pressed around the key rather than merely changing the label. Latching
+/// shift used to do nothing but redraw the face, so the keyboard showed `A` and typed `a` — a
+/// failure that looks like a broken keymap from the client's side and like a working keyboard
+/// from the wearer's.
 ///
 /// Press and release together: the on-screen keyboard has no notion of holding a key, and a
 /// press with no matching release leaves the client repeating that character for ever -- which
-/// is a spectacular way to discover the bug.
+/// is a spectacular way to discover the bug. The modifiers are released in the reverse order
+/// they were pressed, so the client never sees a stray one left down.
+fn send_stroke(state: &mut Spatiand, stroke: spatiand_shell::keyboard::Stroke, time_ms: u32) {
+    use spatiand_shell::keyboard as kb;
+    let mut held = Vec::new();
+    if stroke.ctrl {
+        held.push(kb::KEY_LEFTCTRL);
+    }
+    if stroke.alt {
+        held.push(kb::KEY_LEFTALT);
+    }
+    if stroke.shift {
+        held.push(kb::KEY_LEFTSHIFT);
+    }
+
+    for code in &held {
+        send_key_state(state, *code, true, time_ms);
+    }
+    send_key_state(state, stroke.code, true, time_ms);
+    send_key_state(state, stroke.code, false, time_ms);
+    for code in held.iter().rev() {
+        send_key_state(state, *code, false, time_ms);
+    }
+}
+
+/// One key transition.
 ///
 /// Wayland keycodes are evdev codes offset by 8, a historical debt from X11. The table in
 /// `spatiand_shell::keyboard` stores the evdev numbers so it can be read against the kernel
 /// header, and the offset is applied here, once.
-fn send_key(state: &mut Spatiand, evdev_code: u32, time_ms: u32) {
+fn send_key_state(state: &mut Spatiand, evdev_code: u32, pressed: bool, time_ms: u32) {
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };
     let code = smithay::input::keyboard::Keycode::new(evdev_code + 8);
-    for pressed in [
-        smithay::backend::input::KeyState::Pressed,
-        smithay::backend::input::KeyState::Released,
-    ] {
-        keyboard.input::<(), _>(
-            state,
-            code,
-            pressed,
-            smithay::utils::SERIAL_COUNTER.next_serial(),
-            time_ms,
-            |_, _, _| smithay::input::keyboard::FilterResult::Forward,
-        );
-    }
+    let key_state = if pressed {
+        smithay::backend::input::KeyState::Pressed
+    } else {
+        smithay::backend::input::KeyState::Released
+    };
+    keyboard.input::<(), _>(
+        state,
+        code,
+        key_state,
+        smithay::utils::SERIAL_COUNTER.next_serial(),
+        time_ms,
+        |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+    );
 }
 
 

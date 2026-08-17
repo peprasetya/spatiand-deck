@@ -22,6 +22,7 @@ mod environment;
 mod gl;
 mod icon;
 mod input_map;
+mod keyboard_face;
 mod menu;
 mod pointer;
 mod scene;

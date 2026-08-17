@@ -69,6 +69,12 @@ const WINDOW_ICON_PX: u32 = 128;
 /// keyboard gets half the vertical field and hangs just below the eye line.
 const KEYBOARD_GAP: f32 = 0.026;
 const KEYBOARD_DISTANCE: f32 = 1.3;
+/// Width the keyboard's face is rasterised at.
+///
+/// Fixed rather than derived from the wearer's pixel density, because the keyboard is
+/// resizable: deriving it would rebuild sixty labels on every frame of a resize drag. At a
+/// keyboard about 26 degrees across on a 48 px/degree panel this is comfortably oversampled.
+const KEYBOARD_FACE_PX: u32 = 1792;
 /// Half the width of a full launcher row, in degrees, for placing the page dots just outside
 /// it. Mirrors `spatiand_shell::launcher::COLUMN_SPACING_DEG` and is kept here so the scene
 /// does not have to reach into the shell's layout arithmetic.
@@ -231,9 +237,11 @@ pub struct Scene {
     /// nothing", so a window without an icon costs one lookup rather than one per frame.
     window_icons: std::collections::HashMap<String, Option<Texture>>,
 
-    /// The keyboard face, rebuilt when shift changes.
+    /// The keyboard face, rebuilt when a modifier latches or unlatches.
     keys: Option<Texture>,
-    keys_shifted: bool,
+    /// The latch state the face was drawn for, as `(shift, ctrl, alt)`. A modifier that is on
+    /// and drawn as off types the wrong character and reads as a broken keymap.
+    keys_latches: (bool, bool, bool),
     keys_built: bool,
 
     /// The status bar, rebuilt when its text changes.
@@ -345,7 +353,7 @@ impl Scene {
             titles: std::collections::HashMap::new(),
             window_icons: std::collections::HashMap::new(),
             keys: None,
-            keys_shifted: false,
+            keys_latches: (false, false, false),
             keys_built: false,
             status: None,
             status_text: String::new(),
@@ -639,38 +647,26 @@ impl Scene {
         Some(TitleTexture { id, aspect })
     }
 
-    /// Rebuild the keyboard face if the shift state changed.
+    /// Rebuild the keyboard face if a modifier latched or unlatched.
     ///
-    /// One texture for the whole keyboard rather than a quad per key. Eighty quads with eighty
-    /// labels would be eighty uploads every time shift is pressed, and at the size a key is
-    /// actually drawn the difference is invisible -- the hit-testing is arithmetic on the
-    /// pointer's UV either way.
+    /// Rasterised at a fixed width rather than at the wearer's pixel density: the keyboard can
+    /// be resized, and rebuilding the texture on every frame of a resize drag would rasterise
+    /// sixty labels per frame for a difference nobody can see at a degree per key.
     pub fn sync_keyboard(
         &mut self,
         renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
         text: &mut TextRenderer,
         keyboard: &spatiand_shell::Keyboard,
-        px_per_degree: f32,
+        _px_per_degree: f32,
     ) -> Result<(), String> {
-        if self.keys_built && self.keys_shifted == keyboard.shift {
+        let latches = (keyboard.shift, keyboard.ctrl, keyboard.alt);
+        if self.keys_built && self.keys_latches == latches {
             return Ok(());
         }
-        self.keys_shifted = keyboard.shift;
+        self.keys_latches = latches;
         self.keys_built = true;
 
-        // Rows padded so the columns line up under a monospaced rendering of the labels.
-        let mut face = String::new();
-        for row in spatiand_shell::keyboard::ROWS {
-            for k in row.iter() {
-                let label = keyboard.label(k);
-                face.push_str(&format!(" {label} "));
-            }
-            face.push('\n');
-        }
-        // Without this the trailing newline rasterises as a blank sixth row, and since the
-        // plate is sized from the image it grows a strip of empty glass along the bottom.
-        let face = face.trim_end().to_string();
-        let image = text.render(&face, px_per_degree * 0.9, 2048, [225, 233, 250, 255]);
+        let image = crate::keyboard_face::face(text, keyboard, KEYBOARD_FACE_PX);
         let old = self.keys.take();
         self.keys = Some(
             renderer
@@ -688,15 +684,64 @@ impl Scene {
         Ok(())
     }
 
-    /// Where the keyboard sits in the world.
+    /// Where the keyboard sits in the world, as the **whole plate** — border included.
     ///
-    /// Below the eye line and closer than a window, the way a real keyboard sits: you glance
-    /// down at it and back up at what you are typing into, rather than having it cover the
-    /// thing you are working on.
+    /// Hung under whatever window has focus, at that window's own distance and facing, so it
+    /// reads as belonging to the thing being typed into. Move the window and the keyboard goes
+    /// with it; focus another and the keyboard is already there when you look. A keyboard fixed
+    /// to the head instead stays put while the window it is feeding slides away, and you end up
+    /// typing into one place while looking at another.
+    ///
+    /// With nothing focused there is no window to hang from, so it falls back to just under the
+    /// eye line — which is also where it sits before the first application is opened.
     pub fn keyboard_placement(
         &self,
+        focus: Option<&crate::window::Placement>,
+        pixels: (u32, u32),
         orientation: glam::DQuat,
         fov: (f64, f64),
+        scale: f32,
+    ) -> (Vec3, Quat, f32, f32) {
+        let outer_aspect = spatiand_shell::keyboard::outer_aspect() as f32;
+
+        let Some(window) = focus else {
+            return self.floating_keyboard(outer_aspect, orientation, fov, scale);
+        };
+
+        // As wide as the window, within reason. A keyboard matched exactly to a narrow window
+        // is unusable and one matched to a very wide one runs past the edges of the field, so
+        // the window sets the intent and the field sets the limits.
+        let (fit_width, _) = fit_to_fov(outer_aspect, fov.0, fov.1, window.radius as f32);
+        let width = ((window.width as f32) * scale).clamp(fit_width * 0.55, fit_width);
+        let height = width / outer_aspect;
+
+        // Directly below the window's lower edge, with a gap. Both extents are angles about the
+        // viewer rather than metres, because that is what "below" means on a sphere.
+        let aspect = pixels.0 as f64 / pixels.1.max(1) as f64;
+        let window_height = window.width / aspect.max(0.01);
+        // The window's chrome hangs below its content by the frame's thickness.
+        let below = window_height * (0.5 + crate::pointer::BORDER_FRACTION);
+        let drop = (below / window.radius) + KEYBOARD_GAP as f64
+            + (height as f64 * 0.5 / window.radius);
+
+        let placement = crate::window::Placement {
+            yaw: window.yaw,
+            pitch: window.pitch - drop,
+            radius: window.radius,
+            width: width as f64,
+        };
+        let o = placement.orientation();
+        let facing = Quat::from_xyzw(o.x as f32, o.y as f32, o.z as f32, o.w as f32);
+        (placement.position().as_vec3(), facing, width, height)
+    }
+
+    /// The keyboard with no window to hang from: just under the eye line, body-locked.
+    fn floating_keyboard(
+        &self,
+        aspect: f32,
+        orientation: glam::DQuat,
+        fov: (f64, f64),
+        scale: f32,
     ) -> (Vec3, Quat, f32, f32) {
         let head = Quat::from_xyzw(
             orientation.x as f32,
@@ -706,17 +751,11 @@ impl Scene {
         );
         // Yaw follows the head; pitch is fixed downward so looking up does not drag it away.
         let (yaw, _, _) = head.to_euler(glam::EulerRot::ZYX);
+        // Half the vertical field, so there is still room for something above it.
+        let (fit, _) = fit_to_fov(aspect, fov.0, fov.1 * 0.5, KEYBOARD_DISTANCE);
+        let width = (fit * scale).min(fit * spatiand_shell::keyboard::MAX_SCALE);
+        let height = width / aspect;
 
-        // Size follows the rendered face and the field, not constants. A fixed width with a
-        // derived height turns the face's aspect ratio into the layout: the keyboard grew
-        // until its bottom row was outside the field, which looks like bad placement rather
-        // than a sizing rule with no upper bound.
-        let aspect = self.keys.map(|k| k.aspect).unwrap_or(2.6).max(0.01);
-        // Half the vertical field, so a window still has room above it.
-        let (width, height) = fit_to_fov(aspect, fov.0, fov.1 * 0.5, KEYBOARD_DISTANCE);
-
-        // Hang it just under the eye line: far enough down not to sit over what is being typed
-        // into, close enough up that its bottom row is still inside the field.
         let half_height = (height / 2.0 / KEYBOARD_DISTANCE).atan();
         let pitch = half_height + KEYBOARD_GAP;
         // POSITIVE rotation about +Y pitches DOWN in this frame, because +Y is left. Negating
@@ -730,30 +769,47 @@ impl Scene {
         (centre, facing, width, height)
     }
 
-    /// Draw the keyboard.
+    /// Draw the keyboard: a thin pane of glass with the face of keys on it.
     ///
     /// # Safety
     /// Context must be current.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn draw_keyboard(
         &self,
         gl: &ffi::Gles2,
         eye: &Eye,
+        focus: Option<&crate::window::Placement>,
+        pixels: (u32, u32),
         orientation: glam::DQuat,
         fov: (f64, f64),
+        scale: f32,
+        border_hot: bool,
     ) {
         let Some(face) = self.keys else {
             return;
         };
-        let (centre, facing, width, height) = self.keyboard_placement(orientation, fov);
-        let plate = self.panel_model(centre, facing, width * 1.05, height * 1.15);
+        let (centre, facing, width, height) =
+            self.keyboard_placement(focus, pixels, orientation, fov, scale);
+
+        // The plate is the border: the face sits inside it, and the margin left over is the
+        // thing you grab to resize. Drawn with the same glass as a window's frame so the two
+        // read as the same material, but far thinner -- see `keyboard::BORDER_FRACTION`.
+        let tint = if border_hot {
+            [0.72, 0.85, 1.0, 0.80]
+        } else {
+            [0.46, 0.56, 0.76, 0.52]
+        };
         self.quads.draw(
             gl,
-            self.white,
-            &(eye.view_projection() * plate),
-            [0.03, 0.04, 0.08, 0.88],
+            self.glass,
+            &(eye.view_projection() * self.panel_model(centre, facing, width, height)),
+            tint,
             (0.0, 1.0),
         );
-        let model = self.panel_model(centre, facing, width, height);
+
+        let (fw, fh) = spatiand_shell::keyboard::face_fraction();
+        let model =
+            self.panel_model(centre, facing, width * fw as f32, height * fh as f32);
         self.quads.draw(
             gl,
             face.id,

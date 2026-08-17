@@ -103,10 +103,18 @@ pub fn run(
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.0);
+    // Positive pitches the view DOWN, so anything that hangs below the eye line -- the
+    // keyboard especially -- can be looked at without a headset. Without this the only way to
+    // check something placed off the horizon is to put the glasses on, which is exactly the
+    // sort of thing this backend exists to avoid.
+    let pitch_deg: f64 = std::env::var("SPATIAND_SNAPSHOT_PITCH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
     // The Deck's own panel is portrait and its content is rolled a quarter turn, which is
     // exactly the case where panel sizing has gone wrong before.
     let portrait = std::env::var("SPATIAND_SNAPSHOT_PORTRAIT").is_ok();
-    log::info!("snapshot: {view:?} at {width}x{height}, yaw {yaw_deg}, portrait {portrait} -> {}", out.display());
+    log::info!("snapshot: {view:?} at {width}x{height}, yaw {yaw_deg}, pitch {pitch_deg}, portrait {portrait} -> {}", out.display());
 
     // --- a GL context with no display attached ---
     let node = std::env::var("SPATIAND_RENDER_NODE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
@@ -390,10 +398,14 @@ pub fn run(
     }
     let fbo = fbo.0;
 
-    let orientation = DQuat::from_axis_angle(DVec3::Z, yaw_deg.to_radians());
+    // Yaw about up, then pitch about the rotated left axis -- the same order `Placement`
+    // uses, so a snapshot frames things the way the world actually builds them.
+    let orientation = DQuat::from_axis_angle(DVec3::Z, yaw_deg.to_radians())
+        * DQuat::from_axis_angle(DVec3::Y, pitch_deg.to_radians());
     let shell_ref = &shell;
     let scene_ref = &scene;
     let keyboard_open = keyboard.open;
+    let keyboard_scale = keyboard.scale;
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     renderer.with_context(|gl| unsafe {
         gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
@@ -411,7 +423,17 @@ pub fn run(
             scene_ref.draw_status(gl, &eye, orientation);
         }
         if keyboard_open {
-            scene_ref.draw_keyboard(gl, &eye, orientation, (stereo.h_fov_deg, stereo.v_fov_deg()));
+            let focus = windows.iter().find(|w| w.focused);
+            scene_ref.draw_keyboard(
+                gl,
+                &eye,
+                focus.map(|w| &w.placement),
+                focus.map(|w| w.pixels).unwrap_or((16, 9)),
+                orientation,
+                (stereo.h_fov_deg, stereo.v_fov_deg()),
+                keyboard_scale,
+                false,
+            );
         }
         scene_ref.draw_menu(gl, &eye, shell_ref, (stereo.h_fov_deg, stereo.v_fov_deg()));
         if let Some((tex, aspect)) = panel {
