@@ -151,6 +151,15 @@ pub fn run(
     // replugging appeared to "fix" it only because that resets the device and leaves whichever
     // handle opened last as the only one.
     let mut hmd: Option<Box<dyn spatiand_hmd::Hmd>> = None;
+    // Has a headset ever been open in this session?
+    //
+    // The difference between "you started Spatiand without plugging the glasses in" and "your
+    // glasses blinked". The first has nothing to lose and any button should back out of it;
+    // the second has every open window to lose, and must not be ended by a stray press. See
+    // where this is read, below.
+    let mut had_headset = false;
+    // When the button now being held went down, while waiting with windows to lose.
+    let mut leave_held_since: Option<std::time::Instant> = None;
 
     // Persistent across output changes: these belong to the renderer or the wearer, not
     // to whichever screen is currently being driven.
@@ -186,10 +195,10 @@ pub fn run(
     // than jumping the moment it lands.
     let mut last_left_pad: Option<(f32, f32)> = None;
     let mut keyboard = spatiand_shell::Keyboard::default();
-    /// A keyboard resize in progress: the scale when the frame was grabbed, and how far from
-    /// the middle the pointer was at that moment. Held rather than recomputed so the drag
-    /// measures against where it started instead of against the size it is producing — which
-    /// would feed the result back into its own input and run away.
+    // A keyboard resize in progress: the scale when the frame was grabbed, and how far from
+    // the middle the pointer was at that moment. Held rather than recomputed so the drag
+    // measures against where it started instead of against the size it is producing — which
+    // would feed the result back into its own input and run away.
     type KeyboardResize = (f32, f64);
     let mut keyboard_resize: Option<KeyboardResize> = None;
     let mut keyboard_border_hot = false;
@@ -297,6 +306,7 @@ pub fn run(
                         None
                     }
                 };
+                had_headset = true;
                 Some(h)
             }
             Err(e) => {
@@ -608,15 +618,36 @@ pub fn run(
             let mut screenshot = false;
             if let Some(c) = controller.as_mut() {
                 c.poll();
-                if hmd.is_none() {
-                    // Any button returns to the desktop. Deliberately "any": the waiting
-                    // screen has nothing to collide with, and there is no headset on to read
-                    // a more specific instruction from.
+                if hmd.is_none() && !had_headset {
+                    // Nothing has ever been open, so there is nothing to lose and no headset to
+                    // read a more specific instruction from. Any button backs out.
                     if c.any_pressed() {
                         log::info!("button pressed while waiting — returning to the desktop");
                         leaving = true;
                     }
+                } else if hmd.is_none() {
+                    // The glasses were here and have gone. This is the dangerous case: every
+                    // open window is still alive and leaving would take the lot.
+                    //
+                    // A USB-C link that drops rarely stays dropped -- the observed case came
+                    // back nine seconds later on its own -- so the right behaviour while
+                    // waiting is to keep waiting. A single press used to end the session here,
+                    // which turned a blink of the cable into losing everything that was open,
+                    // and read as a crash rather than as a button doing what it said.
+                    if any_button_held(c.state()) {
+                        let since = leave_held_since.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= HOLD_TO_LEAVE {
+                            log::info!(
+                                "button held for {}s while waiting — returning to the desktop",
+                                HOLD_TO_LEAVE.as_secs()
+                            );
+                            leaving = true;
+                        }
+                    } else {
+                        leave_held_since = None;
+                    }
                 } else {
+                    leave_held_since = None;
                     let pointing = c.state().right_pad.touched && !shell.menu_is_open();
                     for control in c.pressed() {
                         // While a thumb is on the pad, A/B/X are mouse buttons rather than
@@ -888,14 +919,23 @@ pub fn run(
                     // there is rather than presenting a spatial world nobody can see. Creating a
                     // stereo desktop for absent glasses is how you end up with windows scattered
                     // across a display you cannot look at.
-                    let exit_hint = if controller.is_some() {
-                        "\n\nPress any button to\nreturn to the desktop."
-                    } else {
-                        ""
+                    let exit_hint = match (controller.is_some(), had_headset) {
+                        // Two different offers, because the stakes are different. With windows
+                        // open, saying "press any button to leave" next to a screen that has
+                        // just gone dark is an invitation to lose them.
+                        (true, true) => "\n\nHold any button for 2s\nto end the session.",
+                        (true, false) => "\n\nPress any button to\nreturn to the desktop.",
+                        (false, _) => "",
                     };
-                    format!(
-                        "Plug in your XR glasses\n\nSpatiand is waiting.\n\nConnect XREAL Air glasses\nover USB-C and this screen\nwill hand over to them.{exit_hint}"
-                    )
+                    if had_headset {
+                        format!(
+                            "Glasses disconnected\n\nYour windows are still open.\n\nSpatiand is waiting for the\nglasses to come back — plug\nthem in again and this screen\nwill hand over to them.{exit_hint}"
+                        )
+                    } else {
+                        format!(
+                            "Plug in your XR glasses\n\nSpatiand is waiting.\n\nConnect XREAL Air glasses\nover USB-C and this screen\nwill hand over to them.{exit_hint}"
+                        )
+                    }
                 }
                 Some(c) => {
                     let p = c.prompt();
@@ -1270,31 +1310,49 @@ pub fn run(
 
                     // The keyboard is tested before any window. It deliberately hangs in
                     // front, and a keystroke must never also click through to what is behind.
+                    //
+                    // **Either thumb types.** Both pads aim, so both should be able to press a
+                    // key -- one finger hunting across a whole keyboard is the slowest way to
+                    // type anything, and the two-thumb reach is the one thing this layout has
+                    // over a phone's. Only the right pad grabs the resize frame, because the
+                    // left one is also the scroll and depth control and a frame it could seize
+                    // would make those unpredictable near the keyboard's edge.
                     let mut typed = false;
-                    if right_click && !right_was_down && keyboard_resize.is_none() {
-                        if let (Some(a), Some(q)) = (right_aim.as_ref(), keyboard_quad.as_ref()) {
-                            if let Some(hit) = spatiand_render::intersect_quad(&a.ray, q) {
-                                match keyboard.target_at(hit.u, hit.v) {
-                                    Some(spatiand_shell::keyboard::Target::Key(key)) => {
+                    let mut left_typed = false;
+                    if keyboard_resize.is_none() {
+                        for (aim, went_down, right_hand) in [
+                            (right_aim.as_ref(), right_click && !right_was_down, true),
+                            (left_aim.as_ref(), left_click && !left_was_down, false),
+                        ] {
+                            if !went_down {
+                                continue;
+                            }
+                            let (Some(a), Some(q)) = (aim, keyboard_quad.as_ref()) else {
+                                continue;
+                            };
+                            let Some(hit) = spatiand_render::intersect_quad(&a.ray, q) else {
+                                continue;
+                            };
+                            match keyboard.target_at(hit.u, hit.v) {
+                                Some(spatiand_shell::keyboard::Target::Key(key)) => {
+                                    if right_hand {
                                         typed = true;
-                                        if let Some(c) = controller.as_ref() {
-                                            c.pulse(
-                                                spatiand_input::HapticPad::Right,
-                                                spatiand_input::Feel::Click,
-                                            );
-                                        }
-                                        if let Some(stroke) = keyboard.press(key) {
-                                            send_stroke(&mut runtime.state, stroke, time_ms);
-                                        }
-                                        keyboard.after_press(key);
+                                    } else {
+                                        left_typed = true;
                                     }
-                                    Some(spatiand_shell::keyboard::Target::Border) => {
-                                        typed = true;
-                                        keyboard_resize =
-                                            Some((keyboard.scale, span(hit.u, hit.v)));
+                                    // No pulse here: the block above already buzzed whichever
+                                    // pad was clicked, and a second one on the same press is
+                                    // felt as a rattle rather than as confirmation.
+                                    if let Some(stroke) = keyboard.press(key) {
+                                        send_stroke(&mut runtime.state, stroke, time_ms);
                                     }
-                                    None => {}
+                                    keyboard.after_press(key);
                                 }
+                                Some(spatiand_shell::keyboard::Target::Border) if right_hand => {
+                                    typed = true;
+                                    keyboard_resize = Some((keyboard.scale, span(hit.u, hit.v)));
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -1377,7 +1435,7 @@ pub fn run(
                         }
                     }
 
-                    if left_click && !left_was_down {
+                    if left_click && !left_was_down && !left_typed {
                         match right_aim.as_ref() {
                             // The left pad changes distance while the right one is holding a
                             // window's bar, which is the two-handed way to place something.
@@ -2144,6 +2202,29 @@ thread_local! {
     /// `runtime` through a function that has no other use for it.
     static GLOBAL_DISPLAY_HANDLE: RefCell<Option<smithay::reexports::wayland_server::DisplayHandle>> =
         const { RefCell::new(None) };
+}
+
+/// How long a button must be held to end a session whose glasses have dropped out.
+///
+/// Long enough that it cannot be done by accident while fumbling for a machine that has just
+/// gone dark, short enough that someone who means it does not think it is broken.
+const HOLD_TO_LEAVE: Duration = Duration::from_secs(2);
+
+/// Is any real button down?
+///
+/// Pad *touch* is excluded deliberately. A thumb resting on a pad is how the machine is held,
+/// so counting it would mean the hold never expires -- and, worse, that simply picking the Deck
+/// up starts a countdown to ending the session.
+fn any_button_held(state: &spatiand_input::ControllerState) -> bool {
+    spatiand_input::Control::ALL
+        .into_iter()
+        .filter(|c| {
+            !matches!(
+                c,
+                spatiand_input::Control::LPadTouch | spatiand_input::Control::RPadTouch
+            )
+        })
+        .any(|c| state.buttons.is_down(c))
 }
 
 /// How far a point on a quad is from the quad's middle, in the quad's own units.

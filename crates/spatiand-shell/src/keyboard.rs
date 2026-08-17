@@ -594,6 +594,26 @@ mod tests {
     }
 
     #[test]
+    fn two_thumbs_typing_at_the_same_key_do_not_confuse_the_latches() {
+        // Both pads can press keys, so two presses can arrive in one frame. A latch set by one
+        // thumb has to survive being read by the other, and clear exactly once.
+        let mut kb = Keyboard::default();
+        let shift = ROWS[3][0];
+        let a = ROWS[2][1];
+        let b = ROWS[3][5];
+
+        kb.press(&shift);
+        // Left thumb types A, which consumes the latch...
+        let first = kb.press(&a).unwrap();
+        kb.after_press(&a);
+        assert!(first.shift);
+        // ...so the right thumb, arriving in the same frame, gets a lower-case one.
+        let second = kb.press(&b).unwrap();
+        kb.after_press(&b);
+        assert!(!second.shift, "the latch must not apply twice");
+    }
+
+    #[test]
     fn a_new_keyboard_is_its_natural_size_and_shut() {
         let kb = Keyboard::default();
         assert!(!kb.open);

@@ -32,7 +32,7 @@ use smithay::backend::input::{Axis, AxisSource};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 
-use spatiand_render::ray::{intersect_plane, intersect_quad, pick, Quad, Ray};
+use spatiand_render::ray::{intersect_plane, pick, Quad, Ray};
 use spatiand_render::Hit;
 
 use crate::scene::WindowQuad;
@@ -647,6 +647,8 @@ mod tests {
     use super::*;
     use crate::window::Placement;
     use glam::DVec3;
+    // Only the tests cast a *bounded* ray; the module itself always wants the whole plane.
+    use spatiand_render::ray::intersect_quad;
 
     const PIXELS: (u32, u32) = (1280, 800);
 
