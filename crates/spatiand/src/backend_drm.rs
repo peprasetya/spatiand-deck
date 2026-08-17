@@ -599,8 +599,23 @@ pub fn run(
         let mut last_report = std::time::Instant::now();
 
         // What the output was built for. If reality diverges, rebuild.
-        let built_for_glasses = on_glasses;
+        //
+        // Presence, **not** `on_glasses`. Those are different questions and conflating them
+        // cost a session: `on_glasses` is true only once a double-width mode has actually been
+        // negotiated, while the presence check below asks whether the headset is on the USB
+        // bus at all. A headset that is plugged in but fails to advertise stereo — which is
+        // what a flapping cable produces, since the mode exchange needs the device to stay
+        // still for a couple of seconds — therefore read as "present != built_for_glasses"
+        // forever, and rebuilt the output every time round. Each rebuild tears down and
+        // recreates the surfaces for *both* connectors, so the Deck's own panel flickered once
+        // per cycle, and the session never settled long enough to draw anything.
+        let built_with_glasses = spatiand_hmd::is_present();
         let mut last_presence_check = std::time::Instant::now();
+        // When the output was last rebuilt, so a device that is flapping cannot drive a rebuild
+        // loop. A rebuild costs the better part of twenty seconds — mode forcing, link-up, and
+        // up to ten seconds waiting for a stereo mode to appear — so without a floor here a
+        // headset dropping every thirty seconds keeps the compositor permanently mid-rebuild.
+        let mut last_rebuild = std::time::Instant::now();
         // Reset per rebuild: a freshly opened headset has not sent anything yet, and counting
         // from before it existed would trip the watchdog immediately.
         let mut last_imu = std::time::Instant::now();
@@ -836,16 +851,26 @@ pub fn run(
             if last_presence_check.elapsed() >= Duration::from_secs(1) {
                 last_presence_check = std::time::Instant::now();
                 let present = spatiand_hmd::is_present();
-                if present != built_for_glasses {
-                    if present {
-                        log::info!("glasses connected — moving the world onto them");
+                if present != built_with_glasses {
+                    // Wait out a device that is coming and going. Rebuilding on every edge of a
+                    // flapping cable means never finishing one, and the wearer sees a machine
+                    // that flickers rather than one that is waiting for hardware to settle.
+                    if last_rebuild.elapsed() < REBUILD_COOLDOWN {
+                        log::debug!(
+                            "headset presence changed to {present} but the last rebuild was {:.1}s ago; waiting",
+                            last_rebuild.elapsed().as_secs_f32()
+                        );
                     } else {
-                        // Everything the wearer had open stays open. Only the output is
-                        // rebuilt, onto the Deck's own panel, showing the waiting screen.
-                        log::info!("glasses disconnected — holding the session on the panel");
+                        if present {
+                            log::info!("glasses connected — moving the world onto them");
+                        } else {
+                            // Everything the wearer had open stays open. Only the output is
+                            // rebuilt, onto the Deck's own panel, showing the waiting screen.
+                            log::info!("glasses disconnected — holding the session on the panel");
+                        }
+                        hmd = None;
+                        break;
                     }
-                    hmd = None;
-                    break;
                 }
             }
 
@@ -2203,6 +2228,16 @@ thread_local! {
     static GLOBAL_DISPLAY_HANDLE: RefCell<Option<smithay::reexports::wayland_server::DisplayHandle>> =
         const { RefCell::new(None) };
 }
+
+/// The least time between two output rebuilds.
+///
+/// A rebuild is expensive — forcing the display mode, waiting for the DP link, and up to ten
+/// seconds for a stereo mode to be advertised — so a headset that drops every thirty seconds
+/// can otherwise keep the compositor permanently mid-rebuild, flickering both screens and
+/// never settling long enough to draw. Waiting is strictly better than thrashing: the hardware
+/// either comes back, in which case nothing needed doing, or it does not, in which case the
+/// rebuild happens a few seconds later than it would have.
+const REBUILD_COOLDOWN: Duration = Duration::from_secs(8);
 
 /// How long a button must be held to end a session whose glasses have dropped out.
 ///
