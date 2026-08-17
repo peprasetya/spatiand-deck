@@ -95,6 +95,17 @@ pub struct Pad {
     pub y: f32,
     pub touched: bool,
     pub clicked: bool,
+    /// How hard the thumb is pressing, 0..32767, and exactly 0 when nothing is on the pad.
+    ///
+    /// Verified on hardware by `tools/probe-pad-pressure.py`: offset 56 moves over the full
+    /// range for the left pad and stays pinned at zero for the right, and 58 the other way
+    /// about. That mutual exclusion is what assigns the fields to sides — a single field that
+    /// merely "looks like pressure" would have been just as consistent with a shared reading.
+    ///
+    /// Still read as a *ratio* against its own recent value rather than against a threshold in
+    /// counts. What matters to a filter is that the thumb is arriving or leaving, and how hard
+    /// a given person presses is not something to hard-code. See [`crate::scroll`].
+    pub pressure: u16,
 }
 
 impl Pad {
@@ -143,18 +154,19 @@ impl ControllerState {
             data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]));
 
-        let pad = |x_at: usize, touch: Control, click: Control| Pad {
+        let pad = |x_at: usize, pressure_at: usize, touch: Control, click: Control| Pad {
             x: axis(x_at),
             y: axis(x_at + 2),
             touched: buttons.is_down(touch),
             clicked: buttons.is_down(click),
+            pressure: u16_at(pressure_at),
         };
 
         Some(Self {
             sequence: u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
             buttons,
-            left_pad: pad(16, Control::LPadTouch, Control::LPadClick),
-            right_pad: pad(20, Control::RPadTouch, Control::RPadClick),
+            left_pad: pad(16, 56, Control::LPadTouch, Control::LPadClick),
+            right_pad: pad(20, 58, Control::RPadTouch, Control::RPadClick),
             // Sticks share the pads' convention: +y is already up.
             left_stick: (axis(48), axis(50)),
             right_stick: (axis(52), axis(54)),

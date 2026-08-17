@@ -134,6 +134,9 @@ mod tests {
             y,
             touched: true,
             clicked: false,
+            // The gesture reads position only; a plausible resting weight keeps this honest
+            // without implying it matters here.
+            pressure: 12_000,
         }
     }
 

@@ -6,7 +6,7 @@
 //! this file stays comparable to any other Smithay compositor and can be read against
 //! upstream's examples when the API moves.
 
-use smithay::desktop::Space;
+use smithay::desktop::{PopupKind, PopupManager, Space};
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface};
@@ -75,6 +75,12 @@ pub struct Spatiand {
     pub space: Space<smithay::desktop::Window>,
     /// Where each window sits on the sphere, keyed alongside `space`.
     pub layout: WindowLayout,
+    /// Menus, dropdowns, tooltips — every surface a client hangs off one of its own windows.
+    ///
+    /// These are not toplevels and never appear in `space`, which is why they need their own
+    /// bookkeeping. Smithay's manager is what knows where each one sits relative to the window
+    /// it belongs to, including submenus hanging off other popups.
+    pub popups: PopupManager,
     /// Yaw the wearer is currently facing, radians, refreshed once a frame by the backend.
     ///
     /// Lives here because `new_toplevel` needs it and has no access to the tracker: a window
@@ -120,6 +126,7 @@ impl Spatiand {
             seat,
             space: Space::default(),
             layout: WindowLayout::default(),
+            popups: PopupManager::default(),
             spawn_yaw: 0.0,
         }
     }
@@ -242,6 +249,10 @@ impl CompositorHandler for Spatiand {
             }
         }
 
+        // Popup bookkeeping is keyed on the popup's own surface, not on the root found above:
+        // a menu's root is the toplevel it belongs to, and passing that would leave the popup
+        // itself never advancing its state.
+        self.popups.commit(surface);
         self.ensure_initial_configure(surface);
     }
 }
@@ -347,10 +358,34 @@ impl XdgShellHandler for Spatiand {
         );
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {
-        // Popups render as part of their parent's quad, so nothing spatial to decide.
+    /// A menu, a dropdown, a tooltip — anything a client hangs off one of its own surfaces.
+    ///
+    /// There is nothing spatial to decide: a popup is positioned relative to the window it
+    /// belongs to, and that window already has a place in the world. What there *is* to do is
+    /// take the positioner's word for where it goes and start tracking it, because a popup
+    /// nobody tracks is a popup nobody can configure, and an xdg_surface that has never been
+    /// configured may not attach a buffer. That is why menus were not merely invisible — they
+    /// were never mapped at all.
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+        });
+        if let Err(e) = self.popups.track_popup(PopupKind::Xdg(surface)) {
+            log::warn!("could not track a popup: {e}");
+        }
     }
 
+    /// A client asking to own the pointer and keyboard for the duration of a menu.
+    ///
+    /// Not honoured, and the choice is deliberate rather than unfinished. A grab is a promise
+    /// that every event goes to the menu until it is dismissed, and the only input here is a
+    /// ray cast through a room — one that can quite reasonably be pointing at another window,
+    /// at the keyboard, or at nothing. Enforcing an exclusive grab would mean a menu that ate
+    /// every click in the world until it closed, and the wearer's obvious escape (look
+    /// somewhere else and click) is exactly the thing a grab forbids.
+    ///
+    /// Instead a click that lands outside the popup dismisses it, which is what a grab is for
+    /// from the wearer's side. See the pointer's `dismiss_popups`.
     fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
 
     fn reposition_request(
@@ -379,6 +414,31 @@ impl XdgShellHandler for Spatiand {
 impl Spatiand {
     /// xdg_surface requires a configure before the client may attach a buffer.
     fn ensure_initial_configure(&mut self, surface: &WlSurface) {
+        // Popups first, and they need their own branch rather than falling through the
+        // toplevel search below: a popup is not in `space`, so looking for it there finds
+        // nothing and it is silently never configured. A client that has asked for a menu then
+        // waits for a configure that never comes, and the menu does not appear -- with no
+        // error anywhere, because nothing has gone wrong. It is simply still waiting.
+        if let Some(popup) = self.popups.find_popup(surface) {
+            let PopupKind::Xdg(ref popup) = popup else {
+                return;
+            };
+            let sent = smithay::wayland::compositor::with_states(surface, |states| {
+                states
+                    .data_map
+                    .get::<smithay::wayland::shell::xdg::XdgPopupSurfaceData>()
+                    .and_then(|data| data.lock().ok().map(|d| d.initial_configure_sent))
+            });
+            if sent == Some(false) {
+                // Cannot fail on a live surface with an unsent initial configure, but a client
+                // that raced its own destroy can still get here.
+                if let Err(e) = popup.send_configure() {
+                    log::debug!("could not configure a popup: {e}");
+                }
+            }
+            return;
+        }
+
         if let Some(window) = self
             .space
             .elements()

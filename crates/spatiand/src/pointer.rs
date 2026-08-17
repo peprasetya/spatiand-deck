@@ -419,10 +419,24 @@ pub struct PointerState {
 pub struct Aim {
     pub ray: Ray,
     pub hit: Option<(usize, Hit)>,
+    /// An open menu the ray landed on: which window owns it, which of its popups, and where.
+    ///
+    /// Separate from `hit` rather than folded into it because a popup is not part of its
+    /// window's quad and must not be treated as one. A menu item is not a title bar, is not a
+    /// resize edge, and must not start a drag — keeping it in its own field means every one of
+    /// those tests below simply never sees it, instead of each having to remember to exclude it.
+    pub popup: Option<(usize, usize, Hit)>,
     /// True when the hit landed in the window's title bar rather than its content.
     pub on_title: bool,
     /// Which part of the window the ray is over, if any.
     pub zone: Option<Zone>,
+}
+
+impl Aim {
+    /// True while the ray is on an open menu.
+    pub fn on_popup(&self) -> bool {
+        self.popup.is_some()
+    }
 }
 
 /// Cast a ray and work out what it means.
@@ -432,15 +446,84 @@ pub fn aim(ray: Ray, windows: &[WindowQuad]) -> Aim {
         .map(|w| quad_of(w.pixels, &w.placement))
         .collect();
     let hit = pick(&ray, &quads);
+
+    // Menus are tested separately and win outright.
+    //
+    // They need their own quads because a popup routinely hangs off the edge of the window
+    // that opened it — a context menu near the bottom of a page, a dropdown wider than the
+    // control it belongs to — and those parts are outside the window's quad entirely. Testing
+    // only the window would leave the overhanging half of every menu visible and dead.
+    //
+    // Nearest wins among popups, which is what makes a submenu sitting on top of its parent
+    // menu take the click: each nesting level is drawn a step closer to the viewer.
+    let mut popup: Option<(usize, usize, Hit)> = None;
+    for (w, window) in windows.iter().enumerate() {
+        for (p, quad) in window.popups.iter().enumerate() {
+            let Some(h) = spatiand_render::ray::intersect_quad(
+                &ray,
+                &popup_quad(window.pixels, &window.placement, quad.offset, quad.pixels),
+            ) else {
+                continue;
+            };
+            if popup.as_ref().map_or(true, |(_, _, best)| h.distance < best.distance) {
+                popup = Some((w, p, h));
+            }
+        }
+    }
+
     // The bar and the frame occupy the edges of the same quad rather than quads of their own:
     // a second quad would need its own intersection test and could disagree with the first
     // about which window is in front.
-    let zone = hit.and_then(|(index, h)| Some(Frame::of(windows.get(index)?.pixels).zone(h.u, h.v)));
+    let zone = match popup {
+        // A menu covers whatever chrome is behind it. Reporting the zone underneath would let
+        // a click on the top row of a menu grab the title bar it happens to be sitting over.
+        Some(_) => Some(Zone::Content),
+        None => hit.and_then(|(index, h)| Some(Frame::of(windows.get(index)?.pixels).zone(h.u, h.v))),
+    };
     Aim {
         ray,
         hit,
+        popup,
         on_title: zone == Some(Zone::Title),
         zone,
+    }
+}
+
+/// The quad an open popup occupies, on its parent window's plane.
+///
+/// Takes plain geometry rather than the `WindowQuad` so it can be tested without a compositor,
+/// and mirrors the arithmetic in `Scene::draw_windows` exactly — these two must agree, or a
+/// menu is drawn in one place and pressed in another.
+///
+/// The forward lift the drawing applies is deliberately *not* included: it is a millimetre, it
+/// exists only to keep two coplanar quads from fighting over pixels, and folding it in here
+/// would couple the hit test to a rendering detail for no measurable change in where the ray
+/// lands.
+pub fn popup_quad(
+    pixels: (u32, u32),
+    placement: &crate::window::Placement,
+    offset: (i32, i32),
+    popup_pixels: (u32, u32),
+) -> Quad {
+    let aspect = pixels.0 as f64 / pixels.1.max(1) as f64;
+    let content_width = placement.width;
+    let content_height = content_width / aspect.max(0.01);
+    let (w, h) = (pixels.0.max(1) as f64, pixels.1.max(1) as f64);
+    // Centre of the popup as a fraction across the parent's surface. `v` runs down from the
+    // top while the world's z runs up, which is where the sign comes from.
+    let u = (offset.0 as f64 + popup_pixels.0 as f64 * 0.5) / w;
+    let v = (offset.1 as f64 + popup_pixels.1 as f64 * 0.5) / h;
+    let orientation = placement.orientation();
+    let local = glam::DVec3::new(
+        0.0,
+        -(u - 0.5) * content_width,
+        (0.5 - v) * content_height,
+    );
+    Quad {
+        centre: placement.position() + orientation * local,
+        orientation,
+        width: popup_pixels.0 as f64 * content_width / w,
+        height: popup_pixels.1 as f64 * content_height / h,
     }
 }
 
@@ -509,16 +592,35 @@ impl PointerState {
         // for ever. Motion looked like it was working; nothing was ever under the cursor.
         //
         // Our "global" space is one surface at a time, so the origin is simply zero.
-        let focus = aim.hit.and_then(|(index, hit)| {
-            let window = windows.get(index)?;
-            let _ = surface_position(&hit, window.pixels)?;
-            // Straight off the quad, rather than looked up by position -- see the note on
-            // WindowQuad::window for why an index cannot be trusted between frames.
-            Some((window.surface.clone(), Point::from((0.0, 0.0))))
+        // A menu takes the pointer whenever the ray is on one, and its coordinates are its
+        // own: a client positions a popup itself and expects events in the popup's surface,
+        // not in the window's. Sending window-local coordinates to a menu would highlight the
+        // wrong row -- or, where the menu overhangs the window, no row at all.
+        let on_popup = aim.popup.and_then(|(w, p, hit)| {
+            let popup = windows.get(w)?.popups.get(p)?;
+            let position = Point::from((
+                hit.u * popup.pixels.0 as f64,
+                hit.v * popup.pixels.1 as f64,
+            ));
+            Some((popup.surface.clone(), position))
         });
-        let local = aim
-            .hit
-            .and_then(|(index, hit)| surface_position(&hit, windows.get(index)?.pixels));
+
+        let focus = match on_popup.clone() {
+            Some((surface, _)) => Some((surface, Point::from((0.0, 0.0)))),
+            None => aim.hit.and_then(|(index, hit)| {
+                let window = windows.get(index)?;
+                let _ = surface_position(&hit, window.pixels)?;
+                // Straight off the quad, rather than looked up by position -- see the note on
+                // WindowQuad::window for why an index cannot be trusted between frames.
+                Some((window.surface.clone(), Point::from((0.0, 0.0))))
+            }),
+        };
+        let local = match on_popup {
+            Some((_, position)) => Some(position),
+            None => aim
+                .hit
+                .and_then(|(index, hit)| surface_position(&hit, windows.get(index)?.pixels)),
+        };
 
         // Leaving a window has to be reported, or it keeps its hover state for ever.
         let index_now = aim.hit.map(|(i, _)| i);
@@ -537,6 +639,32 @@ impl PointerState {
             },
         );
         pointer.frame(state);
+    }
+
+    /// Close every open menu.
+    ///
+    /// Ordinarily a client does this itself when its popup grab is broken. Spatiand does not
+    /// hand out grabs — see `XdgShellHandler::grab` for why a ray through a room is a bad fit
+    /// for a promise that all input goes to one surface — so the compositor has to say so
+    /// explicitly, or a menu dismissed by looking away stays on screen for ever.
+    ///
+    /// Innermost first: dismissing a parent destroys its children, and a client told about a
+    /// popup whose parent has already gone is a protocol error on our side.
+    pub fn dismiss_popups(&mut self, state: &mut Spatiand) {
+        let open: Vec<smithay::desktop::PopupKind> = state
+            .space
+            .elements()
+            .filter_map(|w| w.toplevel())
+            .flat_map(|t| {
+                smithay::desktop::PopupManager::popups_for_surface(t.wl_surface())
+                    .map(|(popup, _)| popup)
+            })
+            .collect();
+        for popup in open.into_iter().rev() {
+            if let smithay::desktop::PopupKind::Xdg(popup) = popup {
+                popup.send_popup_done();
+            }
+        }
     }
 
     /// Press or release a mouse button.
@@ -656,6 +784,61 @@ mod tests {
             origin: DVec3::ZERO,
             direction: direction.normalize(),
         }
+    }
+
+    #[test]
+    fn a_popup_covering_the_whole_surface_lands_exactly_on_it() {
+        // The calibration check for the whole popup coordinate system. A popup the size of its
+        // parent, at the origin, must come out as the parent's content quad -- same centre,
+        // same size. Anything wrong with the sign of v, the aspect, or the pixel scale shows
+        // up here rather than as a menu that is slightly off in a headset.
+        let p = placement(0.0);
+        let quad = popup_quad(PIXELS, &p, (0, 0), PIXELS);
+        let aspect = PIXELS.0 as f64 / PIXELS.1 as f64;
+        assert!((quad.width - p.width).abs() < 1e-9, "width {}", quad.width);
+        assert!(
+            (quad.height - p.width / aspect).abs() < 1e-9,
+            "height {}",
+            quad.height
+        );
+        assert!(
+            quad.centre.distance(p.position()) < 1e-9,
+            "centre {:?} vs {:?}",
+            quad.centre,
+            p.position()
+        );
+    }
+
+    #[test]
+    fn a_popup_in_the_top_left_of_a_window_is_up_and_to_the_left() {
+        // The frame is X forward, Y left, Z up. A menu in the top-left quarter of a surface
+        // must therefore sit at +Y and +Z of the window's centre. Getting v's sign backwards
+        // is the easy mistake -- it puts every menu the same distance below where it belongs,
+        // which reads as a placement bug rather than an inverted axis.
+        let p = placement(0.0);
+        let quarter = (PIXELS.0 / 2, PIXELS.1 / 2);
+        let quad = popup_quad(PIXELS, &p, (0, 0), quarter);
+        let offset = quad.centre - p.position();
+        assert!(offset.y > 0.0, "should be to the left, got {offset:?}");
+        assert!(offset.z > 0.0, "should be above, got {offset:?}");
+        // A quarter-sized popup is a quarter of the surface in each axis.
+        assert!((quad.width - p.width * 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_menu_may_hang_off_the_edge_of_its_window() {
+        // Popups routinely overhang -- a context menu near the bottom of a page, a dropdown
+        // wider than the control that opened it. That is why they are hit-tested as quads of
+        // their own rather than as a region of the parent: the overhanging part is outside the
+        // window entirely, and testing only the window would leave it visible and dead.
+        let p = placement(0.0);
+        let overhanging = popup_quad(PIXELS, &p, (PIXELS.0 as i32 - 40, 0), (400, 300));
+        let centre_offset = (overhanging.centre - p.position()).y;
+        // Its centre is past the window's right edge, which in this frame is -Y.
+        assert!(
+            centre_offset < -p.width * 0.5,
+            "expected the centre beyond the right edge, got {centre_offset}"
+        );
     }
 
     #[test]

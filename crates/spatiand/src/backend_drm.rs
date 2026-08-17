@@ -1418,6 +1418,12 @@ pub fn run(
                     }
 
                     if !typed && right_click && pointers.drag.is_none() && !right_was_down {
+                        // Anything but a click on the menu itself closes the menus -- the title
+                        // bar, another window, empty sky. Spatiand hands out no popup grabs, so
+                        // this is the only thing that ever tells a client its menu is over.
+                        if !right_aim.as_ref().map(|a| a.on_popup()).unwrap_or(false) {
+                            pointers.dismiss_popups(&mut runtime.state);
+                        }
                         match right_aim.as_ref() {
                             // Before the title bar: the button sits inside the bar, so testing
                             // the bar first would start a drag and never reach this.
@@ -1513,6 +1519,9 @@ pub fn run(
                         // cursor was left on, which is the same reason the face buttons below
                         // wait for an aim.
                         if let Some(a) = right_aim.as_ref().or(left_aim.as_ref()) {
+                            if !a.on_popup() {
+                                pointers.dismiss_popups(&mut runtime.state);
+                            }
                             // Put the cursor under the ray *first*. Motion is skipped on any
                             // frame the two-thumb gesture claimed the pads, and pressing the
                             // left pad while the right thumb rests on its own is exactly that

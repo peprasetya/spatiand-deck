@@ -105,23 +105,33 @@ zeroing `RPAD_MARGIN`, setting both click pressures to `0xFFFF`, then sending
 | 24 | 6 | accelerometer X, Y, Z — 3 × i16 | **[verified]** |
 | 30 | 6 | gyroscope X, Y, Z — 3 × i16 | **[verified]** |
 | 44 | 4 | triggers L, R — 2 × u16 | **[kernel]** |
+| 56 | 2 | left pad pressure, u16 | **[verified]** — 0 untouched, 0..32767 with a thumb |
+| 58 | 2 | right pad pressure, u16 | **[verified]** — as above |
 
 **Accelerometer scale is `0x4000` = 16384 counts per g.** Resting on a desk the raw vector
 read `(-716, 298, 16664)`, magnitude `16682` = **1.018 g**. That is what confirms the layout:
 gravity is a known quantity, so an offset error would destroy it. **[verified]**
 
 Byte offsets seen changing on an untouched, stationary controller were `4–5` (sequence),
-`24–35` (accel + gyro noise), `48`, `50`, `52`, `54–55` and `60–63`. The last two groups are
-unidentified — plausibly a fused orientation quaternion and battery/pressure — and are not
-needed yet. **[inferred]**
+`24–35` (accel + gyro noise), `48`, `50`, `52`, `54–55` and `60–63`. `56–58` sat perfectly
+still in that capture, which turned out to be the clue: those are the pad pressures, and a pad
+nobody is touching reads exactly zero.
+
+**Pad pressure is at 56 (left) and 58 (right), u16, full scale 32767.** Confirmed by
+`tools/probe-pad-pressure.py`, which watches every unidentified 16-bit field at once across
+three phases — hands off, left pad only, right pad only — and assigns a field to a side only
+when it moves for that pad *and stays at zero for the other*. That mutual exclusion is the
+part that matters: a single field that merely looks like pressure would have been equally
+consistent with one shared reading, and the probe is written to fail rather than guess.
+`60–63` remain unidentified; they range over the full u16 in every phase, touched or not,
+which is consistent with the fused orientation quaternion and rules them out as pressure.
+**[verified]**
 
 ---
 
 ## 6. Still open
 
-1. **Pad coordinates and pressure** — offsets 16–23 are the kernel's layout but were never
-   exercised, because confirming them requires someone to touch the pads. The 3D pointer
-   depends on this, so it is the next thing to nail down.
-2. **Button bitfield** — same reason.
-3. Offsets 48–55 and 60–63.
+1. **Button bitfield** — the kernel's layout, exercised only where the shell happens to use a
+   control; see `layout.rs` for which bits are confirmed and which are inherited on trust.
+2. Offsets 48–55 and 60–63.
 4. **Haptics.** The pads can buzz, which the pointer wants for edge and click feedback.

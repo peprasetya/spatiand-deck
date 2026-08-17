@@ -81,6 +81,13 @@ const KEYBOARD_FACE_PX: u32 = 1792;
 /// the cap to cast itself clear of its neighbours and be seen as raised without the letters
 /// swimming as the pointer moves between keys.
 const HOVER_LIFT_M: f32 = 0.006;
+/// How far a popup stands off the window it belongs to, metres, per level of nesting.
+///
+/// There is no depth buffer — the scene is flat quads sorted back to front — so a menu drawn
+/// exactly on its window's plane is two coplanar surfaces arguing over every pixel, which
+/// reads as the menu flickering whenever the head moves. This is a millimetre: invisible as a
+/// gap at arm's length, decisive as a separation.
+const POPUP_LIFT_M: f32 = 0.001;
 /// Width one raised keycap is rasterised at.
 ///
 /// Several times the ~120 px a cell gets on the baked face. This is the one key being looked at
@@ -114,6 +121,25 @@ pub struct WindowQuad {
     pub icon: Option<TitleTexture>,
     /// True while a pointer is over the close button, which is the only thing that colours it.
     pub close_hot: bool,
+    /// Menus and dropdowns this window has open, innermost last.
+    pub popups: Vec<PopupQuad>,
+}
+
+/// A popup, already imported, placed in its parent window's own pixels.
+///
+/// Deliberately *not* a quad in its own right. A popup is positioned by the client against the
+/// surface it belongs to and has no independent existence in the room — giving it its own
+/// placement would mean a menu that could drift away from its window. Keeping it in the
+/// parent's pixel space means it is drawn, hit-tested and dismissed as part of that window,
+/// and one ray test serves both because they are coplanar.
+#[derive(Clone)]
+pub struct PopupQuad {
+    pub surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    pub texture: u32,
+    /// Top-left corner in the parent surface's pixels. May be negative: a menu is allowed to
+    /// hang off the edge of the window that opened it, and frequently does.
+    pub offset: (i32, i32),
+    pub pixels: (u32, u32),
 }
 
 /// A window title, already on the GPU.
@@ -1320,6 +1346,46 @@ impl Scene {
             // let the environment through, and a half-transparent terminal floating in a room
             // is unreadable.
             self.quads.draw(gl, window.texture, &mvp, [1.0, 1.0, 1.0, 1.0], (0.0, 1.0));
+
+            // Menus and dropdowns, on the window's own plane and a hair in front of it.
+            //
+            // There is no depth buffer here -- everything is a flat quad sorted by distance --
+            // so "in front" has to be a real displacement along the normal rather than a
+            // depth test. A millimetre is far too little to see as a gap at arm's length and
+            // far more than enough to stop the two coplanar quads fighting over which pixel
+            // belongs to whom, which shows up as the menu flickering as the head moves.
+            let normal = orientation * Vec3::X;
+            let per_pixel = (
+                width / window.pixels.0.max(1) as f32,
+                height / window.pixels.1.max(1) as f32,
+            );
+            for (depth, popup) in window.popups.iter().enumerate() {
+                let popup_w = popup.pixels.0 as f32 * per_pixel.0;
+                let popup_h = popup.pixels.1 as f32 * per_pixel.1;
+                // Centre of the popup in the parent's pixels, as a fraction across it. `v`
+                // runs down from the top and the world's z runs up, hence the sign -- the same
+                // arithmetic as the title bar's furniture, and for the same reason: what is
+                // drawn and what can be pressed must not be able to drift apart.
+                let u = (popup.offset.0 as f32 + popup.pixels.0 as f32 * 0.5) / window.pixels.0.max(1) as f32;
+                let v = (popup.offset.1 as f32 + popup.pixels.1 as f32 * 0.5) / window.pixels.1.max(1) as f32;
+                let offset = orientation
+                    * Vec3::new(0.0, -(u - 0.5) * width, (0.5 - v) * height);
+                // Submenus stack, so each one steps a little further forward than the last.
+                let lift = normal * (POPUP_LIFT_M * (depth as f32 + 1.0));
+                let model = self.panel_model(centre + offset + lift, orientation, popup_w, popup_h);
+                gl.BindTexture(ffi::TEXTURE_2D, popup.texture);
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
+                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
+                self.quads.draw(
+                    gl,
+                    popup.texture,
+                    &(eye.view_projection() * model),
+                    [1.0, 1.0, 1.0, 1.0],
+                    (0.0, 1.0),
+                );
+            }
         }
     }
 
@@ -2092,6 +2158,36 @@ pub fn collect_windows(
         let Some(placement) = state.layout.get(&window) else {
             continue;
         };
+
+        // Menus, dropdowns and submenus, in the order the client stacked them. Each is its own
+        // surface with its own buffer -- importing the toplevel's tree does not reach them,
+        // which is why a window whose menu was open still drew as if it were not.
+        let mut popups = Vec::new();
+        for (popup, offset) in
+            smithay::desktop::PopupManager::popups_for_surface(&surface)
+        {
+            let popup_surface = popup.wl_surface().clone();
+            if import_surface_tree(renderer, &popup_surface).is_err() {
+                continue;
+            }
+            let imported = with_renderer_surface_state(&popup_surface, |st| {
+                st.texture::<smithay::backend::renderer::gles::GlesTexture>(
+                    renderer.context_id(),
+                )
+                .map(|t| (t.tex_id(), t.width(), t.height()))
+            })
+            .flatten();
+            let Some((texture, pw, ph)) = imported else {
+                continue;
+            };
+            popups.push(PopupQuad {
+                surface: popup_surface,
+                texture,
+                offset: (offset.x, offset.y),
+                pixels: (pw, ph),
+            });
+        }
+
         out.push(WindowQuad {
             window: window.clone(),
             surface: surface.clone(),
@@ -2104,6 +2200,7 @@ pub fn collect_windows(
             title: None,
             icon: None,
             close_hot: false,
+            popups,
         });
     }
     out
