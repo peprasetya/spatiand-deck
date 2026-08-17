@@ -350,12 +350,6 @@ pub enum Drag {
         yaw_offset: f64,
         pitch_offset: f64,
     },
-    /// Pushing it away or pulling it closer.
-    Depth {
-        window: smithay::desktop::Window,
-        start_radius: f64,
-        start_y: f32,
-    },
     /// Dragging an edge or a corner of the frame.
     Resize {
         window: smithay::desktop::Window,
@@ -378,9 +372,7 @@ impl Drag {
     /// The window this drag is about, whichever kind it is.
     pub fn window(&self) -> &smithay::desktop::Window {
         match self {
-            Drag::Move { window, .. } | Drag::Depth { window, .. } | Drag::Resize { window, .. } => {
-                window
-            }
+            Drag::Move { window, .. } | Drag::Resize { window, .. } => window,
         }
     }
 

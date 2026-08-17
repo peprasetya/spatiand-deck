@@ -10,6 +10,9 @@
 //! * [`layout`] — which bit is which, as data.
 //! * [`report`] — bytes to [`ControllerState`], a pure function.
 //! * [`gesture`] — two-thumb pan and scale, a pure state machine.
+//! * [`scroll`] — an absolute pad read as a wheel, including what to do about the thumb
+//!   leaving it. Also a pure state machine.
+//! * [`trigger`] — an analogue trigger read as a button.
 //! * [`takeover`] — the feature reports that claim the device. The only part that must talk
 //!   to a real controller.
 //! * [`touch`] — a touchscreen, via evdev. The one device here the kernel already decodes
@@ -25,14 +28,18 @@ pub mod gesture;
 pub mod haptics;
 pub mod layout;
 pub mod report;
+pub mod scroll;
 pub mod takeover;
 pub mod touch;
+pub mod trigger;
 
 pub use gesture::{GestureDelta, TwoPadGesture};
 pub use haptics::{Feel, Pad as HapticPad};
 pub use layout::{Confidence, Control};
 pub use report::{Buttons, ControllerState, Pad};
+pub use scroll::{PadScroll, Scroll};
 pub use touch::{Contact, TouchEvent, Touchscreen};
+pub use trigger::Trigger;
 
 /// Valve's vendor/product for the Deck's built-in controls.
 const VALVE_VID: u16 = 0x28DE;

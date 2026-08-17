@@ -67,14 +67,6 @@ const PANEL_DISTANCE: f32 = 1.4;
 /// of a text document, which is the same ballpark as a laptop touchpad.
 const SCROLL_SCALE: f64 = 260.0;
 
-/// The largest single-frame pad movement treated as real, in pad units (−1..1).
-///
-/// The pads are absolute, so a scroll is the difference between two samples. That is fine
-/// while a thumb is down and nonsense across the moment it lifts: the contact's last reported
-/// position is not where the thumb was, and the difference can be the entire width of the pad.
-/// A real thumb moves a few hundredths of that in one 14 ms frame, so anything past a quarter
-/// of the pad is a report artefact and is dropped rather than scrolled.
-const MAX_PAD_STEP: f64 = 0.25;
 /// How long the headset may stay silent before it is reopened.
 ///
 /// The glasses stream at about a kilohertz, so a second of nothing is already thousands of
@@ -191,9 +183,13 @@ pub fn run(
     let mut right_was_down = false;
     let mut left_was_down = false;
     let mut face_down: Vec<u32> = Vec::new();
-    // Where the left thumb was last frame, so an absolute pad reads as a scroll delta rather
-    // than jumping the moment it lands.
-    let mut last_left_pad: Option<(f32, f32)> = None;
+    // The left pad read as a wheel. Absolute positions in, deltas out, and the samples taken
+    // across the moment the thumb lifts thrown away rather than scrolled.
+    let mut left_scroll = spatiand_input::PadScroll::default();
+    // The triggers read as mouse buttons, the way they are on the desktop: right pulls the left
+    // button, left pulls the right one.
+    let mut right_trigger = spatiand_input::Trigger::default();
+    let mut left_trigger = spatiand_input::Trigger::default();
     let mut keyboard = spatiand_shell::Keyboard::default();
     // A keyboard resize in progress: the scale when the frame was grabbed, and how far from
     // the middle the pointer was at that moment. Held rather than recomputed so the drag
@@ -1116,6 +1112,14 @@ pub fn run(
                 }
             }
 
+            // The left thumb is only a wheel while nothing else is claiming it: a menu takes the
+            // pads entirely, and a drag uses that same thumb to set the window's distance. The
+            // ground it covers meanwhile has to be forgotten rather than saved up, or it all
+            // arrives as one scroll the moment the thumb is handed back.
+            if shell.menu_is_open() || pointers.drag.is_some() {
+                left_scroll.forget();
+            }
+
             if shell.menu_is_open() {
                 // A menu takes the pointer away. Anything held has to be let go, or the client
                 // underneath is left believing a drag is still running.
@@ -1159,23 +1163,6 @@ pub fn run(
                             }
                         }
                     }
-                    Some(Drag::Depth {
-                        ref window,
-                        start_radius,
-                        start_y,
-                    }) => {
-                        if let Some(p) = pads.as_ref() {
-                            {
-                                if let Some(mut placement) = runtime.state.layout.get(window) {
-                                    // Thumb up pushes it away. Clamped so a window can never
-                                    // end up inside your head or so far off it is unreadable.
-                                    let delta = (p.left_pad.y - start_y) as f64;
-                                    placement.radius = (start_radius + delta * 2.0).clamp(0.8, 8.0);
-                                    runtime.state.layout.set(window, placement);
-                                }
-                            }
-                        }
-                    }
                     Some(Drag::Resize { ref window, .. }) => {
                         if let Some(a) = right_aim.as_ref() {
                             if let Some(out) =
@@ -1209,12 +1196,8 @@ pub fn run(
                             .map(|d| !d.is_negligible())
                             .unwrap_or(false);
                         if gesturing {
-                            // A gesture is not a scroll. Forgetting where the left thumb was
-                            // means the first frame after the gesture ends measures nothing,
-                            // instead of measuring the whole distance the thumb travelled
-                            // while it was busy moving a window -- which arrived as one
-                            // enormous scroll the moment you let go.
-                            last_left_pad = None;
+                            // A gesture is not a scroll.
+                            left_scroll.forget();
                             if let Some(delta) = two_handed {
                                 let focused = runtime
                                     .state
@@ -1256,36 +1239,19 @@ pub fn run(
                             // The left pad is the wheel, and it turns whatever the cursor is
                             // on -- which is the right pad's target when that thumb is down.
                             if let Some(p) = pads.as_ref() {
-                                if p.left_pad.touched && !p.left_pad.clicked {
-                                    if let Some((px, py)) = last_left_pad {
-                                        let step = |now: f32, then: f32| {
-                                            let d = (now - then) as f64;
-                                            // A thumb cannot cross the pad inside one frame.
-                                            // The pads report a stray sample as a contact ends,
-                                            // and unguarded that arrives as the full width of
-                                            // the pad in 14 ms -- a scroll of hundreds of
-                                            // lines from a thumb that was merely lifting off.
-                                            // This is the jumpiness that was impossible to
-                                            // describe because it had nothing to do with what
-                                            // the thumb was doing.
-                                            if d.abs() > MAX_PAD_STEP {
-                                                0.0
-                                            } else {
-                                                d * SCROLL_SCALE
-                                            }
-                                        };
-                                        let dx = step(p.left_pad.x, px);
-                                        let dy = step(p.left_pad.y, py);
-                                        // Natural direction: dragging the thumb up sends the
-                                        // content up, which is what every touchpad does.
-                                        pointers.scroll(&mut runtime.state, -dx, dy, time_ms);
+                                match left_scroll.update(&p.left_pad) {
+                                    // Natural direction: dragging the thumb up sends the
+                                    // content up, which is what every touchpad does.
+                                    spatiand_input::Scroll::By { dx, dy } => pointers.scroll(
+                                        &mut runtime.state,
+                                        -(dx as f64) * SCROLL_SCALE,
+                                        dy as f64 * SCROLL_SCALE,
+                                        time_ms,
+                                    ),
+                                    spatiand_input::Scroll::Stop => {
+                                        pointers.scroll_stop(&mut runtime.state, time_ms)
                                     }
-                                    last_left_pad = Some((p.left_pad.x, p.left_pad.y));
-                                } else {
-                                    if last_left_pad.is_some() {
-                                        pointers.scroll_stop(&mut runtime.state, time_ms);
-                                    }
-                                    last_left_pad = None;
+                                    spatiand_input::Scroll::Idle => {}
                                 }
                             }
                         }
@@ -1296,8 +1262,21 @@ pub fn run(
                 // moves the thumb slightly as it goes down -- fine for a button, bad for a
                 // precise click on something small.
                 if let Some(p) = pads.as_ref() {
-                    let right_click = p.right_pad.clicked;
-                    let left_click = p.left_pad.clicked;
+                    // The triggers are the same two buttons as the pad clicks, not a third and
+                    // fourth thing to learn: R2 is the left button and L2 the right one, as
+                    // they are everywhere else on this machine. Folding them in here rather
+                    // than handling them separately is what makes that true without exception
+                    // -- a trigger types on the keyboard, grabs a title bar and drags an edge,
+                    // because as far as everything below is concerned the pad was clicked.
+                    //
+                    // Updated unconditionally: hysteresis is state, and `||` would skip the
+                    // call on any frame the pad was already down and strand it there.
+                    let r2 = right_trigger
+                        .update(p.right_trigger, p.buttons.is_down(spatiand_input::Control::R2));
+                    let l2 = left_trigger
+                        .update(p.left_trigger, p.buttons.is_down(spatiand_input::Control::L2));
+                    let right_click = p.right_pad.clicked || r2;
+                    let left_click = p.left_pad.clicked || l2;
 
                     // Confirm the press under the thumb that made it. Without this the pads
                     // feel dead: the click registers, the world responds, and the hand is
@@ -1499,6 +1478,10 @@ pub fn run(
                                 }
                             }
                             Some(a) => {
+                                // Same reason as the right button below: the cursor is not
+                                // moved on a frame the two-thumb gesture owns the pads, so a
+                                // click on one of those frames would land wherever it was left.
+                                pointers.motion(&mut runtime.state, a, &windows, time_ms);
                                 if let Some((index, _)) = a.hit {
                                     if let Some(quad) = windows.get(index) {
                                         runtime.state.focus_window(&quad.window);
@@ -1516,33 +1499,33 @@ pub fn run(
                         }
                     }
 
+                    // The left pad and the left trigger are the right mouse button, and nothing
+                    // else. There used to be a second job here -- clicking left while the right
+                    // pad was over a title bar pushed the window away or pulled it closer --
+                    // and it had to go: it fired on the right pad merely *hovering* a bar
+                    // rather than holding one, so pointing anywhere near the top of a window
+                    // silently swallowed the context menu. Distance is already set by sliding
+                    // the left thumb during a move, with no click at all (see Drag::Move
+                    // above), so nothing was lost by taking the click back.
                     if left_click && !left_was_down && !left_typed {
-                        match right_aim.as_ref() {
-                            // The left pad changes distance while the right one is holding a
-                            // window's bar, which is the two-handed way to place something.
-                            Some(a) if a.on_title => {
-                                if let Some(quad) = a.hit.and_then(|(i, _)| windows.get(i)) {
-                                    let radius = runtime
-                                        .state
-                                        .layout
-                                        .get(&quad.window)
-                                        .map(|pl| pl.radius)
-                                        .unwrap_or(2.2);
-                                    pointers.drag = Some(Drag::Depth {
-                                        window: quad.window.clone(),
-                                        start_radius: radius,
-                                        start_y: p.left_pad.y,
-                                    });
-                                }
+                        // Aimed where the visible laser is, and only if there is one. A click
+                        // with no thumb on either pad has no target but the stale one the
+                        // cursor was left on, which is the same reason the face buttons below
+                        // wait for an aim.
+                        if let Some(a) = right_aim.as_ref().or(left_aim.as_ref()) {
+                            // Put the cursor under the ray *first*. Motion is skipped on any
+                            // frame the two-thumb gesture claimed the pads, and pressing the
+                            // left pad while the right thumb rests on its own is exactly that
+                            // frame -- so without this the menu opens wherever the cursor was
+                            // stranded rather than where the laser is pointing.
+                            pointers.motion(&mut runtime.state, a, &windows, time_ms);
+                            if let Some(quad) = a.hit.and_then(|(i, _)| windows.get(i)) {
+                                runtime.state.focus_window(&quad.window);
                             }
-                            _ => pointers.button(&mut runtime.state, BTN_RIGHT, true, time_ms),
+                            pointers.button(&mut runtime.state, BTN_RIGHT, true, time_ms);
                         }
                     } else if !left_click && left_was_down {
-                        if matches!(pointers.drag, Some(Drag::Depth { .. })) {
-                            pointers.drag = None;
-                        } else {
-                            pointers.button(&mut runtime.state, BTN_RIGHT, false, time_ms);
-                        }
+                        pointers.button(&mut runtime.state, BTN_RIGHT, false, time_ms);
                     }
                     right_was_down = right_click;
                     left_was_down = left_click;
