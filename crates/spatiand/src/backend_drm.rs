@@ -202,6 +202,9 @@ pub fn run(
     type KeyboardResize = (f32, f64);
     let mut keyboard_resize: Option<KeyboardResize> = None;
     let mut keyboard_border_hot = false;
+    // Which keys the pointers are over, so they can be drawn raised. At most one per pad.
+    use spatiand_shell::keyboard::Key;
+    let mut keyboard_hover: Vec<&'static Key> = Vec::new();
     // Left thumb position while a window is being dragged, for the depth adjustment.
     let mut drag_left_y: Option<f32> = None;
     let mut monitors = crate::system::Monitors::new();
@@ -638,7 +641,7 @@ pub fn run(
         // loop. A rebuild costs the better part of twenty seconds — mode forcing, link-up, and
         // up to ten seconds waiting for a stereo mode to appear — so without a floor here a
         // headset dropping every thirty seconds keeps the compositor permanently mid-rebuild.
-        let mut last_rebuild = std::time::Instant::now();
+        let last_rebuild = std::time::Instant::now();
         // Reset per rebuild: a freshly opened headset has not sent anything yet, and counting
         // from before it existed would trip the watchdog immediately.
         let mut last_imu = std::time::Instant::now();
@@ -1046,6 +1049,13 @@ pub fn run(
             scene.sync_status(&mut renderer, &mut text, &status_text, ppd)?;
             if keyboard.open {
                 scene.sync_keyboard(&mut renderer, &mut text, &keyboard, ppd)?;
+                // A raised key is redrawn with its own legend, since the baked one is now
+                // underneath an opaque cap. Built here rather than in the draw closure, which
+                // holds the GL context and cannot also take the renderer.
+                for key in &keyboard_hover {
+                    scene.sync_key_label(&mut renderer, &mut text, keyboard.label(key))?;
+                }
+                debug_assert!(keyboard_hover.len() <= 2, "at most one key per pad");
             }
             scene.sync_apps(&mut renderer, &mut text, &shell, ppd)?;
             scene.sync_menu(
@@ -1316,18 +1326,29 @@ pub fn run(
                         }
                     });
 
-                    // Is the pointer over the keyboard's frame right now? Only for lighting it
-                    // up, so the wearer can tell the border is a thing that can be grabbed.
-                    keyboard_border_hot = keyboard_quad
-                        .as_ref()
-                        .zip(right_aim.as_ref())
-                        .and_then(|(q, a)| spatiand_render::intersect_quad(&a.ray, q))
-                        .map(|hit| {
-                            keyboard.target_at(hit.u, hit.v)
-                                == Some(spatiand_shell::keyboard::Target::Border)
-                        })
-                        .unwrap_or(false)
-                        || keyboard_resize.is_some();
+                    // What each pointer is over. Both pads, because both can type, and a key
+                    // that lights up under one thumb but not the other would make the left one
+                    // feel broken right up until you pressed it.
+                    keyboard_hover.clear();
+                    keyboard_border_hot = keyboard_resize.is_some();
+                    if let Some(q) = keyboard_quad.as_ref() {
+                        for aim in [right_aim.as_ref(), left_aim.as_ref()].into_iter().flatten() {
+                            let Some(hit) = spatiand_render::intersect_quad(&aim.ray, q) else {
+                                continue;
+                            };
+                            match keyboard.target_at(hit.u, hit.v) {
+                                Some(spatiand_shell::keyboard::Target::Key(k)) => {
+                                    if !keyboard_hover.iter().any(|e: &&Key| e.code == k.code) {
+                                        keyboard_hover.push(k);
+                                    }
+                                }
+                                Some(spatiand_shell::keyboard::Target::Border) => {
+                                    keyboard_border_hot = true
+                                }
+                                None => {}
+                            }
+                        }
+                    }
 
                     // A resize in progress owns the pointer until it is let go.
                     if let (Some(start), Some(q)) = (keyboard_resize, keyboard_quad.as_ref()) {
@@ -1547,6 +1568,8 @@ pub fn run(
                 let keyboard_open = keyboard.open;
                 let keyboard_scale = keyboard.scale;
                 let keyboard_hot = keyboard_border_hot;
+                let keyboard_shift = keyboard.shift;
+                let keyboard_raised = &keyboard_hover;
                 renderer.with_context(|gl| unsafe {
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
                     gl.Disable(ffi::SCISSOR_TEST);
@@ -1627,6 +1650,8 @@ pub fn run(
                                 (stereo.h_fov_deg, stereo.v_fov_deg()),
                                 keyboard_scale,
                                 keyboard_hot,
+                                keyboard_raised,
+                                keyboard_shift,
                             );
                         }
                         scene.draw_menu(gl, &eye, &shell, (stereo.h_fov_deg, stereo.v_fov_deg()));

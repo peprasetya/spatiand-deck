@@ -23,14 +23,22 @@ const GAP: f32 = 0.13;
 /// Keycap corner radius, as a fraction of the cap's shorter side.
 const RADIUS: f32 = 0.24;
 
-/// An ordinary keycap: a pane of the same glass everything else here is made of.
-const CAP: [f32; 4] = [0.78, 0.85, 1.0, 0.13];
+/// The face's own ground, behind the caps.
+///
+/// Opaque, like everything else here. A keyboard is a thing you read glyphs off while typing
+/// into something else, and a translucent one has whatever is behind it — a bright web page,
+/// most likely — showing through the gaps between the keys and competing with the labels. The
+/// rest of the shell is glass because glass is furniture; this is an instrument.
+const GROUND: [f32; 4] = [0.055, 0.065, 0.095, 1.0];
+
+/// An ordinary keycap.
+const CAP: [f32; 4] = [0.20, 0.23, 0.30, 1.0];
 /// Modifiers and the named keys, held back so the letters are what the eye lands on.
-const CAP_MODIFIER: [f32; 4] = [0.60, 0.70, 0.92, 0.09];
+const CAP_MODIFIER: [f32; 4] = [0.13, 0.15, 0.21, 1.0];
 /// A latched modifier. The one saturated thing on the face, because it is the one piece of
 /// state the wearer cannot otherwise see — a shift that is on and looks off types the wrong
 /// character and looks like a broken keymap.
-const CAP_LATCHED: [f32; 4] = [0.42, 0.68, 1.0, 0.72];
+const CAP_LATCHED: [f32; 4] = [0.42, 0.68, 1.0, 1.0];
 
 const INK: [u8; 4] = [236, 242, 255, 255];
 const INK_MODIFIER: [u8; 4] = [186, 199, 224, 255];
@@ -44,7 +52,17 @@ pub fn face(text: &mut TextRenderer, keyboard: &Keyboard, width_px: u32) -> Text
     let aspect = spatiand_shell::keyboard::face_aspect();
     let width = width_px.max(64);
     let height = ((width as f64 / aspect).round() as u32).max(32);
-    let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
+    // Filled rather than cleared to transparent: the face is opaque, so the gaps between the
+    // caps are its own ground rather than a window onto whatever is behind the keyboard.
+    let mut rgba = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    for _ in 0..(width as usize) * (height as usize) {
+        rgba.extend_from_slice(&[
+            (GROUND[0] * 255.0) as u8,
+            (GROUND[1] * 255.0) as u8,
+            (GROUND[2] * 255.0) as u8,
+            255,
+        ]);
+    }
 
     for (key, rect) in layout() {
         let cap = cap_rect(&rect, width, height);
@@ -230,15 +248,36 @@ mod tests {
     }
 
     #[test]
-    fn the_face_actually_has_keys_on_it() {
-        // The failure this catches is a face that rasterises to nothing and hangs in the world
-        // as an empty pane -- which looks like a placement bug rather than an empty texture.
+    fn the_face_is_opaque_everywhere() {
+        // Nothing behind the keyboard may show through it. A translucent face puts whatever is
+        // being typed into -- a bright page, usually -- in among the labels.
         let mut text = TextRenderer::new();
-        let image = face(&mut text, &Keyboard::default(), 1200);
-        let inked = ink_fraction(&image);
-        assert!(inked > 0.5, "only {:.1}% of the face has anything on it", inked * 100.0);
-        // And gaps between the caps, so it reads as keys rather than as one slab.
-        assert!(inked < 0.98, "the caps have no gaps between them");
+        let image = face(&mut text, &Keyboard::default(), 900);
+        assert_eq!(ink_fraction(&image), 1.0, "part of the face is see-through");
+    }
+
+    #[test]
+    fn the_caps_stand_out_from_the_ground_between_them() {
+        // With everything opaque, "are there keys on this" is a question about colour rather
+        // than about alpha. The failure it guards is a face that rasterises to a flat slab,
+        // which in the world reads as a placement bug rather than as an empty texture.
+        let mut text = TextRenderer::new();
+        let image = face(&mut text, &Keyboard::default(), 900);
+        let ground = [
+            (GROUND[0] * 255.0) as u8,
+            (GROUND[1] * 255.0) as u8,
+            (GROUND[2] * 255.0) as u8,
+        ];
+        let on_ground = image
+            .rgba
+            .chunks_exact(4)
+            .filter(|p| p[0] == ground[0] && p[1] == ground[1] && p[2] == ground[2])
+            .count() as f32
+            / (image.rgba.len() / 4) as f32;
+        // Gaps exist, so it reads as keys...
+        assert!(on_ground > 0.05, "only {:.1}% is gap; the caps have run together", on_ground * 100.0);
+        // ...but the caps are most of it.
+        assert!(on_ground < 0.6, "{:.1}% is bare ground; the caps are too small", on_ground * 100.0);
     }
 
     #[test]

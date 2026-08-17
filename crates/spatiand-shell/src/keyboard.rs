@@ -54,6 +54,22 @@ pub struct Key {
     pub role: Role,
 }
 
+impl Key {
+    /// What this key shows, given whether shift is latched.
+    ///
+    /// One definition, because two places need it: the keyboard itself, for the baked face, and
+    /// the renderer, for redrawing a raised key's legend on top of it. A second copy of this
+    /// would drift, and the symptom would be a key that changes what it says when you point at
+    /// it — which reads as the wrong key being under the pointer.
+    pub fn face(&self, shift: bool) -> &'static str {
+        if shift {
+            self.shifted
+        } else {
+            self.label
+        }
+    }
+}
+
 /// Width of an ordinary key, in the units [`Key::width`] is expressed in.
 pub const UNIT: u8 = 4;
 
@@ -376,11 +392,7 @@ impl Keyboard {
 
     /// The label a key should currently show.
     pub fn label(&self, k: &Key) -> &'static str {
-        if self.shift {
-            k.shifted
-        } else {
-            k.label
-        }
+        k.face(self.shift)
     }
 
     /// Grow or shrink, clamped. Returns the scale actually adopted.

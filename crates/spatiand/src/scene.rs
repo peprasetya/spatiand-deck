@@ -75,6 +75,20 @@ const KEYBOARD_DISTANCE: f32 = 1.3;
 /// resizable: deriving it would rebuild sixty labels on every frame of a resize drag. At a
 /// keyboard about 26 degrees across on a 48 px/degree panel this is comfortably oversampled.
 const KEYBOARD_FACE_PX: u32 = 1792;
+/// How far a hovered key stands off the face, metres.
+///
+/// Small: at a keyboard about 1.3 m away this is a couple of millimetres, which is enough for
+/// the cap to cast itself clear of its neighbours and be seen as raised without the letters
+/// swimming as the pointer moves between keys.
+const HOVER_LIFT_M: f32 = 0.006;
+/// How much bigger a hovered key is drawn than its cell.
+///
+/// Slightly over its own cell rather than well over: a key that grows a lot overlaps the ones
+/// beside it, and then the thing you are aiming at is covering the thing you might have meant.
+const HOVER_GROW: f32 = 1.10;
+/// The raised cap's colour. Bright and fully opaque — this is the one element on the face whose
+/// whole job is to be unmistakable.
+const HOVER_CAP: [f32; 4] = [0.86, 0.91, 1.0, 1.0];
 /// Half the width of a full launcher row, in degrees, for placing the page dots just outside
 /// it. Mirrors `spatiand_shell::launcher::COLUMN_SPACING_DEG` and is kept here so the scene
 /// does not have to reach into the shell's layout arithmetic.
@@ -237,6 +251,14 @@ pub struct Scene {
     /// nothing", so a window without an icon costs one lookup rather than one per frame.
     window_icons: std::collections::HashMap<String, Option<Texture>>,
 
+    /// One key's label on its own, for redrawing it on top of a raised keycap.
+    ///
+    /// Separate from the baked face because hover changes as fast as the pointer moves, and
+    /// rebuilding a 1792-pixel face with sixty labels on it every time the ray crosses a key
+    /// would be a visible hitch for something that has to feel immediate. Keyed by the label's
+    /// text, so the whole board costs at most a few dozen small textures and shift's alternates
+    /// are simply more of them.
+    key_labels: std::collections::HashMap<String, Texture>,
     /// The keyboard face, rebuilt when a modifier latches or unlatches.
     keys: Option<Texture>,
     /// The latch state the face was drawn for, as `(shift, ctrl, alt)`. A modifier that is on
@@ -352,6 +374,7 @@ impl Scene {
             labels_built_for: usize::MAX,
             titles: std::collections::HashMap::new(),
             window_icons: std::collections::HashMap::new(),
+            key_labels: std::collections::HashMap::new(),
             keys: None,
             keys_latches: (false, false, false),
             keys_built: false,
@@ -689,6 +712,33 @@ impl Scene {
         Ok(())
     }
 
+    /// Make sure a raised key's label exists as a texture of its own.
+    ///
+    /// Called for whatever the pointers are over, before the frame is drawn — building a
+    /// texture needs the renderer, and the draw closure holds the GL context.
+    pub fn sync_key_label(
+        &mut self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        text: &mut TextRenderer,
+        label: &str,
+    ) -> Result<(), String> {
+        if label.is_empty() || self.key_labels.contains_key(label) {
+            return Ok(());
+        }
+        // Rendered dark, because a raised key is drawn on a bright plate.
+        let image = text.render(label, 96.0, 512, [12, 18, 32, 255]);
+        let texture = renderer
+            .with_context(|gl| unsafe {
+                Texture {
+                    id: upload_rgba(gl, &image),
+                    aspect: image.width as f32 / image.height.max(1) as f32,
+                }
+            })
+            .map_err(|e| format!("no GL context: {e}"))?;
+        self.key_labels.insert(label.to_string(), texture);
+        Ok(())
+    }
+
     /// Where the keyboard sits in the world, as the **whole plate** — border included.
     ///
     /// Hung under whatever window has focus, at that window's own distance and facing, so it
@@ -789,6 +839,8 @@ impl Scene {
         fov: (f64, f64),
         scale: f32,
         border_hot: bool,
+        hovered: &[&'static spatiand_shell::keyboard::Key],
+        shift: bool,
     ) {
         let Some(face) = self.keys else {
             return;
@@ -800,9 +852,9 @@ impl Scene {
         // thing you grab to resize. Drawn with the same glass as a window's frame so the two
         // read as the same material, but far thinner -- see `keyboard::BORDER_FRACTION`.
         let tint = if border_hot {
-            [0.72, 0.85, 1.0, 0.80]
+            [0.72, 0.85, 1.0, 0.95]
         } else {
-            [0.46, 0.56, 0.76, 0.52]
+            [0.46, 0.56, 0.76, 0.85]
         };
         self.quads.draw(
             gl,
@@ -813,8 +865,8 @@ impl Scene {
         );
 
         let (fw, fh) = spatiand_shell::keyboard::face_fraction();
-        let model =
-            self.panel_model(centre, facing, width * fw as f32, height * fh as f32);
+        let (face_w, face_h) = (width * fw as f32, height * fh as f32);
+        let model = self.panel_model(centre, facing, face_w, face_h);
         self.quads.draw(
             gl,
             face.id,
@@ -822,6 +874,58 @@ impl Scene {
             [1.0, 1.0, 1.0, 1.0],
             (0.0, 1.0),
         );
+
+        if hovered.is_empty() {
+            return;
+        }
+        // The key under a pointer, drawn again on top and lifted off the face.
+        //
+        // Lifted *in the world*, along the face's own normal, rather than merely tinted: this
+        // is a 3D keyboard and the obvious way for a key to say "you are about to press me" is
+        // to stand proud of the ones around it. A flat highlight has to be read; a raised cap
+        // is seen. It also survives the face being any colour, which a tint does not.
+        let normal = facing * Vec3::X;
+        for (key, rect) in spatiand_shell::keyboard::layout() {
+            if !hovered.iter().any(|k| k.code == key.code) {
+                continue;
+            }
+            // The cell's middle, in the face's plane. `v` runs down and the world's z runs up.
+            let offset = facing
+                * Vec3::new(
+                    0.0,
+                    -((rect.u as f32 - 0.5) * face_w),
+                    (0.5 - rect.v as f32) * face_h,
+                );
+            let cap_centre = centre + offset + normal * HOVER_LIFT_M;
+            let cap_w = (rect.half_u * 2.0) as f32 * face_w * HOVER_GROW;
+            let cap_h = (rect.half_v * 2.0) as f32 * face_h * HOVER_GROW;
+
+            self.rounded.draw(
+                gl,
+                &(eye.view_projection() * self.panel_model(cap_centre, facing, cap_w, cap_h)),
+                HOVER_CAP,
+                (cap_w, cap_h),
+                cap_h.min(cap_w) * 0.26,
+            );
+
+            // The label again, on top of the raised cap. The one baked into the face is now
+            // underneath an opaque plate, so without this the key you are aiming at is the one
+            // key whose legend you cannot read.
+            if let Some(label) = self.key_labels.get(key.face(shift)) {
+                let text_h = cap_h * 0.46;
+                let text_w = text_h * label.aspect.max(0.01);
+                // Fractionally proud of the cap, so it cannot z-fight with it.
+                let at = cap_centre + normal * (HOVER_LIFT_M * 0.25);
+                self.quads.draw(
+                    gl,
+                    label.id,
+                    &(eye.view_projection()
+                        * self.panel_model(at, facing, text_w.min(cap_w * 0.86), text_h)),
+                    [1.0, 1.0, 1.0, 1.0],
+                    (0.0, 1.0),
+                );
+            }
+        }
     }
 
     /// Rebuild the status bar if its text changed.

@@ -416,6 +416,21 @@ pub fn run(
     // uses, so a snapshot frames things the way the world actually builds them.
     let orientation = DQuat::from_axis_angle(DVec3::Z, yaw_deg.to_radians())
         * DQuat::from_axis_angle(DVec3::Y, pitch_deg.to_radians());
+    // `SPATIAND_VIEW_HOVER=g` draws that key raised, which is the only way to check the
+    // hover state without a controller in hand.
+    let hovered_keys: Vec<&'static spatiand_shell::keyboard::Key> =
+        match std::env::var("SPATIAND_VIEW_HOVER") {
+            Ok(want) if !want.is_empty() => spatiand_shell::keyboard::ROWS
+                .iter()
+                .flat_map(|r| r.iter())
+                .find(|k| k.label == want)
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
+    for key in &hovered_keys {
+        scene.sync_key_label(&mut renderer, &mut text, keyboard.label(key))?;
+    }
     let shell_ref = &shell;
     let scene_ref = &scene;
     let keyboard_open = keyboard.open;
@@ -447,6 +462,8 @@ pub fn run(
                 (stereo.h_fov_deg, stereo.v_fov_deg()),
                 keyboard_scale,
                 false,
+                &hovered_keys,
+                keyboard.shift,
             );
         }
         scene_ref.draw_menu(gl, &eye, shell_ref, (stereo.h_fov_deg, stereo.v_fov_deg()));
