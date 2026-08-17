@@ -386,16 +386,23 @@ impl Spatiand {
             .cloned()
         {
             if let Some(toplevel) = window.toplevel() {
-                let initial_configure_sent = smithay::wayland::compositor::with_states(surface, |states| {
-                    states
-                        .data_map
-                        .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                        .unwrap()
-                        .lock()
-                        .unwrap()
-                        .initial_configure_sent
-                });
-                if !initial_configure_sent {
+                // Read defensively rather than unwrapping, even though the `find` above means
+                // the role data should always be there. This runs inside a Wayland request
+                // handler, and a panic in one of those does not fail a request — it unwinds
+                // through the dispatch loop and takes the compositor with it, which costs
+                // every window belonging to every client. A misjudged invariant here would be
+                // indistinguishable from a crash, and the price of being wrong is far higher
+                // than the price of an `if let`.
+                let initial_configure_sent =
+                    smithay::wayland::compositor::with_states(surface, |states| {
+                        states
+                            .data_map
+                            .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                            .and_then(|data| data.lock().ok().map(|d| d.initial_configure_sent))
+                    });
+                // `None` means the surface has no toplevel role data, or another thread
+                // panicked holding that lock. Neither is a reason to configure it again.
+                if initial_configure_sent == Some(false) {
                     toplevel.send_configure();
                 }
             }

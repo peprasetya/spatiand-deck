@@ -126,12 +126,46 @@ pub fn launch(exec: &str, wayland_display: &str) -> Result<u32, String> {
         .map_err(|e| format!("could not start {program}: {e}"))?;
 
     let pid = child.id();
+    prefer_as_oom_victim(pid);
     // Deliberately dropped rather than waited on. `Child`'s own drop does not reap, so the
     // process is left to init — which is what we want for something that should outlive the
     // launcher, and avoids a wait() that would block the render loop.
     std::mem::forget(child);
     log::info!("launched {program} (pid {pid})");
     Ok(pid)
+}
+
+/// How much more willing the kernel should be to kill a launched application than the
+/// compositor that launched it.
+///
+/// The scale runs -1000..1000 and is added to a badness score that is already roughly
+/// proportional to how much memory a process is using. A browser is the heaviest thing most
+/// people will run in here — several processes, video decode, a GPU cache — so it is already
+/// the natural candidate; this makes it a decisive one.
+const OOM_PREFERENCE: i32 = 300;
+
+/// Ask the kernel to kill this process before it kills us.
+///
+/// The compositor and its clients share one machine, and under real memory pressure the OOM
+/// killer picks by badness score alone. It has no idea that killing the browser costs a tab
+/// while killing the compositor costs the whole session — every window, on every desktop, at
+/// once. Left alone that is a coin toss, and the wrong side of it is indistinguishable from a
+/// crash.
+///
+/// **Raising** another process's score is unprivileged; lowering it needs `CAP_SYS_RESOURCE`,
+/// which a session started by SDDM as an ordinary user does not have. So the compositor cannot
+/// protect itself directly, and this — pushing everything it launches up instead — is the one
+/// version of this that works without root.
+///
+/// Best-effort by design. A failure here means the ordinary kernel behaviour, which is what
+/// would have happened anyway, so it is a debug line rather than something a caller handles.
+fn prefer_as_oom_victim(pid: u32) {
+    let path = format!("/proc/{pid}/oom_score_adj");
+    match std::fs::write(&path, OOM_PREFERENCE.to_string()) {
+        Ok(()) => log::debug!("pid {pid} set to oom_score_adj {OOM_PREFERENCE}"),
+        // Racing a program that exited immediately is the common case and not interesting.
+        Err(e) => log::debug!("could not set oom_score_adj for pid {pid}: {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +271,23 @@ mod tests {
         let result = launch("/nonexistent/program/xyzzy", "wayland-1");
         assert!(result.is_err(), "should have failed to start");
         assert!(result.unwrap_err().contains("xyzzy"));
+    }
+
+    #[test]
+    fn a_launched_application_is_offered_to_the_oom_killer_first() {
+        // The whole point: under memory pressure the kernel picks by badness score, and it has
+        // no idea that killing a browser costs a tab while killing the compositor costs every
+        // window on every desktop at once.
+        let pid = launch("/bin/sleep 2", "wayland-test").expect("sleep should start");
+        let adjusted = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
+            .expect("the child should still be alive to read");
+        assert_eq!(
+            adjusted.trim().parse::<i32>().unwrap(),
+            OOM_PREFERENCE,
+            "a launched app must be a likelier victim than its compositor"
+        );
+        // Left to exit on its own -- it is a two-second sleep, and reaping it here would mean
+        // the wait() this module deliberately never does.
     }
 
     #[test]
