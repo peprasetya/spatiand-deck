@@ -26,9 +26,11 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::socket::ListeningSocketSource;
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
+use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use crate::window::WindowLayout;
@@ -58,6 +60,8 @@ pub struct Spatiand {
     // --- wayland globals ---
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    /// Advertised only so it can be answered with "server side" — see [`XdgDecorationHandler`].
+    pub xdg_decoration_state: XdgDecorationState,
     pub shm_state: ShmState,
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<Self>,
@@ -87,6 +91,7 @@ impl Spatiand {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, Vec::new());
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
@@ -107,6 +112,7 @@ impl Spatiand {
             socket_name,
             compositor_state,
             xdg_shell_state,
+            xdg_decoration_state,
             shm_state,
             output_manager_state,
             seat_state,
@@ -148,6 +154,33 @@ impl Spatiand {
                 .and_then(|d| d.lock().ok())
                 .and_then(|d| d.title.clone())
         })
+    }
+
+    /// The window's application id, which is what an icon can be looked up by.
+    ///
+    /// Not the title: a title is whatever the application decided to write there this second,
+    /// and changes with the open document. The app id is stable for the window's whole life,
+    /// which is what a texture cache needs as a key.
+    pub fn app_id_of(&self, window: &smithay::desktop::Window) -> Option<String> {
+        let surface = window.toplevel()?.wl_surface().clone();
+        smithay::wayland::compositor::with_states(&surface, |states| {
+            states
+                .data_map
+                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                .and_then(|d| d.lock().ok())
+                .and_then(|d| d.app_id.clone())
+        })
+    }
+
+    /// Ask a window to close itself.
+    ///
+    /// A request, not an order — that is the whole protocol. An application with unsaved work
+    /// puts up its own dialog and stays, which is right, and is why this cannot report whether
+    /// anything happened.
+    pub fn close_window(&self, window: &smithay::desktop::Window) {
+        if let Some(toplevel) = window.toplevel() {
+            toplevel.send_close();
+        }
     }
 
     /// Give a window focus, and bring it to the front.
@@ -225,6 +258,52 @@ impl ShmHandler for Spatiand {
     }
 }
 
+// --- decorations ---
+
+/// Every window is decorated by Spatiand, and no client is allowed to decorate itself.
+///
+/// A client drawing its own header is right on a desktop and wrong here. The frame in this
+/// world is a pane of glass with the title on it, drawn *around* the surface at a size and
+/// distance the wearer set, and a second bar drawn *inside* the surface duplicates the title
+/// and puts a close button somewhere the 3D chrome does not know about. That is what KDE's
+/// applications do by default, because they see no decoration protocol and reasonably conclude
+/// they are on their own.
+///
+/// So the mode is not negotiated. `request_mode` ignores what was asked for and answers
+/// `ServerSide` regardless, which the protocol explicitly allows — the compositor's mode is
+/// final. There is nothing to be gained by honouring a request for client-side decorations in
+/// a compositor that has no flat screen to draw them on.
+///
+/// Minimise and maximise are not answered anywhere, and that is deliberate rather than
+/// unfinished: neither means anything in a room. A window is moved, pushed away or closed.
+impl XdgDecorationHandler for Spatiand {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        Self::decorate(&toplevel);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        Self::decorate(&toplevel);
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        Self::decorate(&toplevel);
+    }
+}
+
+impl Spatiand {
+    fn decorate(toplevel: &ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        // Only once the client has had its initial configure. Sending one before that is a
+        // protocol error, and it is reachable here: a client may create its decoration object
+        // in the same batch as the toplevel itself.
+        if toplevel.is_initial_configure_sent() {
+            toplevel.send_pending_configure();
+        }
+    }
+}
+
 // --- xdg shell ---
 
 impl XdgShellHandler for Spatiand {
@@ -233,6 +312,12 @@ impl XdgShellHandler for Spatiand {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        // Say up front that this compositor decorates, whether or not the client asks. A
+        // toolkit that never binds the decoration protocol still reads this out of the
+        // toplevel's state, and it is the difference between one title bar and two.
+        surface.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
         // Propose a size before anything else. A toplevel configured with 0x0 is telling the
         // client "pick your own", and while most do, several toolkits wait for a real size and
         // never commit a buffer -- which presents as an app that launches, appears in the
@@ -356,6 +441,7 @@ impl ServerDndGrabHandler for Spatiand {}
 delegate_compositor!(Spatiand);
 delegate_shm!(Spatiand);
 delegate_xdg_shell!(Spatiand);
+delegate_xdg_decoration!(Spatiand);
 delegate_seat!(Spatiand);
 delegate_output!(Spatiand);
 delegate_data_device!(Spatiand);

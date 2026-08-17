@@ -61,6 +61,14 @@ pub const TITLE_BAR_FRACTION: f64 = 0.11;
 /// is what holds that.
 pub const BORDER_FRACTION: f64 = 0.10;
 
+/// How much of the bar's height the icon and the close button occupy.
+///
+/// Comfortably under the whole bar, so both sit *in* it with glass showing around them rather
+/// than filling it edge to edge. At the bar's ~1.5° this leaves a target of about 1°, which is
+/// the smallest thing on the window anyone is asked to hit — and the reason the close button is
+/// at the end of the bar, where overshooting lands on the bar rather than on the surface.
+const FURNITURE_FRACTION: f64 = 0.66;
+
 /// How far along the bottom edge counts as a corner rather than a side, in border widths.
 ///
 /// Two, so a corner is roughly a 3.6° square. Smaller and it is a target you hit by luck;
@@ -93,10 +101,33 @@ pub enum Edge {
 pub enum Zone {
     /// The bar along the top. Grab to move.
     Title,
+    /// The button at the right of the bar. Press to ask the window to close.
+    Close,
     /// The client's own surface. Everything here is forwarded.
     Content,
     /// The frame. Grab to resize.
     Resize(Edge),
+}
+
+/// A box on a window's quad, in the quad's own 0..1 coordinates.
+///
+/// Expressed in quad fractions rather than in metres so that one definition serves both the
+/// hit test, which has `(u, v)` from the ray, and the drawing, which has the quad's size. A
+/// close button drawn from one set of numbers and aimed at from another is the specific bug
+/// this shape exists to make impossible — and it is not a bug anyone finds by reading, only by
+/// pressing a thing and having nothing happen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Box2 {
+    pub u: f64,
+    pub v: f64,
+    pub half_u: f64,
+    pub half_v: f64,
+}
+
+impl Box2 {
+    fn contains(&self, u: f64, v: f64) -> bool {
+        (u - self.u).abs() <= self.half_u && (v - self.v).abs() <= self.half_v
+    }
 }
 
 /// A window's quad broken into its parts, in units of the content's height.
@@ -151,6 +182,40 @@ impl Frame {
         )
     }
 
+    /// Where the title bar's furniture sits, in quad fractions.
+    ///
+    /// Both are square, sized against the bar's height, and inset from the chrome's outer edge
+    /// by the border — so they sit over the glass rather than over the surface, whatever the
+    /// window's aspect ratio.
+    fn furniture(&self, from_right: bool) -> Box2 {
+        let side = self.bar * FURNITURE_FRACTION;
+        let (w, h) = (self.width(), self.height());
+        // The bar's centre is half a content-height above the quad's centre — the chrome
+        // reaches further above the content than below it, so the two centres do not coincide.
+        let v = 0.5 - 0.5 / h;
+        let inset = (self.border + side * 0.5) / w;
+        Box2 {
+            u: if from_right { 1.0 - inset } else { inset },
+            v,
+            half_u: side * 0.5 / w,
+            half_v: side * 0.5 / h,
+        }
+    }
+
+    /// The application's icon, at the left of the bar. Decoration only — nothing to press.
+    pub fn icon(&self) -> Box2 {
+        self.furniture(false)
+    }
+
+    /// The close button, at the right of the bar.
+    ///
+    /// There is no minimise and no maximise, and that is a statement rather than an omission:
+    /// neither means anything in a room. A window that is in the way is moved or pushed
+    /// further off, and one you are finished with is closed.
+    pub fn close(&self) -> Box2 {
+        self.furniture(true)
+    }
+
     /// What the wearer is pointing at.
     pub fn zone(&self, u: f64, v: f64) -> Zone {
         let (x, y) = self.content_at(u, v);
@@ -158,7 +223,13 @@ impl Frame {
         // border one degree tall that behaves differently from the bar it touches would be
         // impossible to aim at and pointless if you could.
         if y < 0.0 {
-            return Zone::Title;
+            // Except the close button, which is inside the bar and has to be tested first or
+            // it is simply a piece of the bar that happens to have a cross drawn on it.
+            return if self.close().contains(u, v) {
+                Zone::Close
+            } else {
+                Zone::Title
+            };
         }
         let left = x < 0.0;
         let right = x > 1.0;
@@ -610,6 +681,62 @@ mod tests {
             local.x > 1.0 && local.y > 1.0,
             "a centre hit must not be the origin: {local:?}"
         );
+    }
+
+    #[test]
+    fn the_close_button_is_in_the_bar_at_the_right_and_the_icon_at_the_left() {
+        let f = Frame::of(PIXELS);
+        let (icon, close) = (f.icon(), f.close());
+        assert!(icon.u < 0.5 && close.u > 0.5, "{icon:?} {close:?}");
+        // Both inside the quad rather than half off its edge.
+        assert!(icon.u - icon.half_u > 0.0);
+        assert!(close.u + close.half_u < 1.0);
+        // And both in the bar: the lowest point of each is still above the content.
+        let below = |b: Box2| f.content_at(b.u, b.v + b.half_v).1;
+        assert!(below(icon) < 0.0, "the icon overlaps the surface");
+        assert!(below(close) < 0.0, "the close button overlaps the surface");
+    }
+
+    #[test]
+    fn pressing_the_close_button_is_not_pressing_the_bar() {
+        // The distinction the whole zone exists for. If this ever collapses, pressing close
+        // starts dragging the window instead, which looks like the button being dead.
+        let f = Frame::of(PIXELS);
+        let close = f.close();
+        assert_eq!(f.zone(close.u, close.v), Zone::Close);
+        // A little to the left of it is ordinary bar.
+        assert_eq!(f.zone(close.u - close.half_u * 3.0, close.v), Zone::Title);
+    }
+
+    #[test]
+    fn the_icon_is_not_a_button() {
+        // It is there to say which application this is, and a target that does nothing is
+        // worse than no target: it gets pressed, and the window does not move.
+        let f = Frame::of(PIXELS);
+        let icon = f.icon();
+        assert_eq!(f.zone(icon.u, icon.v), Zone::Title);
+    }
+
+    #[test]
+    fn the_furniture_is_square_in_the_world_whatever_the_window_shape() {
+        // u and v are fractions of different lengths, so equal fractions are not a square. A
+        // wide window would otherwise get a close button stretched into a letterbox.
+        for pixels in [(1280u32, 800u32), (800, 1280), (2560, 720)] {
+            let f = Frame::of(pixels);
+            let c = f.close();
+            let (w, h) = (c.half_u * f.width(), c.half_v * f.height());
+            assert!((w - h).abs() < 1e-9, "{pixels:?} gave {w} by {h}");
+        }
+    }
+
+    #[test]
+    fn aiming_at_the_close_button_does_not_offer_to_move_the_window() {
+        // `on_title` is what starts a drag, so it has to be false here even though the button
+        // is geometrically part of the bar.
+        let f = Frame::of(PIXELS);
+        let close = f.close();
+        assert!(matches!(f.zone(close.u, close.v), Zone::Close));
+        assert_ne!(f.zone(close.u, close.v), Zone::Title);
     }
 
     #[test]

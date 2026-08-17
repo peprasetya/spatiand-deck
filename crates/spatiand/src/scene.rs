@@ -52,6 +52,12 @@ const LIGHT_DIR: Vec3 = Vec3::new(0.55, 0.6, 0.58);
 /// occupies roughly 140 px. 256 leaves room for the focused bubble's scale-up and for a
 /// headset with better optics, without being wasteful across forty apps.
 const ICON_TEXTURE_PX: u32 = 256;
+/// Resolution a window's title-bar icon is loaded at.
+///
+/// Far smaller than a launcher bubble's: the bar is about 2 degrees tall and the icon a little
+/// under that, so it lands on roughly 80 display pixels. 128 leaves room for a window dragged
+/// close to the face without being forty icons' worth of memory.
+const WINDOW_ICON_PX: u32 = 128;
 /// How far below level the keyboard hangs, radians, and how far away.
 ///
 /// The first attempt put it where a real keyboard sits -- 30 degrees down and close -- which
@@ -86,6 +92,10 @@ pub struct WindowQuad {
     pub focused: bool,
     /// Rasterised title, if one has been built for this window.
     pub title: Option<TitleTexture>,
+    /// The application's own icon, for the left of the title bar.
+    pub icon: Option<TitleTexture>,
+    /// True while a pointer is over the close button, which is the only thing that colours it.
+    pub close_hot: bool,
 }
 
 /// A window title, already on the GPU.
@@ -195,6 +205,8 @@ pub struct Scene {
     reticle: u32,
     /// A double-headed arrow, turned in the plane to suit whichever edge is under the pointer.
     resize_cursor: u32,
+    /// The cross on a window's close button.
+    close_glyph: u32,
     /// A second cursor shape for the left pad. Different in outline as well as colour, so the
     /// two are distinguishable to someone who cannot rely on hue.
     reticle_left: u32,
@@ -215,6 +227,9 @@ pub struct Scene {
     /// lives (a browser tab, a file being edited) and two windows often share one. Bounded
     /// below so a client that rewrites its title every frame cannot grow this without limit.
     titles: std::collections::HashMap<String, Texture>,
+    /// Application icons for window title bars, by app id. `None` records "looked, found
+    /// nothing", so a window without an icon costs one lookup rather than one per frame.
+    window_icons: std::collections::HashMap<String, Option<Texture>>,
 
     /// The keyboard face, rebuilt when shift changes.
     keys: Option<Texture>,
@@ -278,7 +293,7 @@ impl Scene {
         let bubbles = BubblePipeline::new(renderer, &quads)?;
         let rounded = RoundedPipeline::new(renderer, &quads)?;
 
-        let (sky, white, reticle, reticle_left, resize_cursor, glass) = renderer
+        let (sky, white, reticle, reticle_left, resize_cursor, close_glyph, glass) = renderer
             .with_context(|gl| unsafe {
                 (
                     // Wrapping horizontally: an equirectangular image joins itself, and
@@ -296,6 +311,10 @@ impl Scene {
                     {
                         let r = resize_cursor_image(64);
                         upload_raw(gl, 64, 64, &r, false)
+                    },
+                    {
+                        let c = close_glyph_image(64);
+                        upload_raw(gl, 64, 64, &c, false)
                     },
                     {
                         // Wide and short: it is stretched across frames of every proportion,
@@ -318,11 +337,13 @@ impl Scene {
             reticle,
             reticle_left,
             resize_cursor,
+            close_glyph,
             glass,
             app_labels: Vec::new(),
             app_glyphs: Vec::new(),
             labels_built_for: usize::MAX,
             titles: std::collections::HashMap::new(),
+            window_icons: std::collections::HashMap::new(),
             keys: None,
             keys_shifted: false,
             keys_built: false,
@@ -536,6 +557,47 @@ impl Scene {
         self.app_glyphs = new_glyphs;
         self.labels_built_for = fingerprint;
         Ok(())
+    }
+
+    /// A texture for a window's application icon, loading it on first sight.
+    ///
+    /// Cached by application id and never evicted, unlike the title cache: there are as many
+    /// entries as there are distinct applications ever opened in a session, which is a number
+    /// bounded by patience. Titles need eviction because a clock in a title bar would add one
+    /// per second.
+    ///
+    /// A `None` answer is cached too, as an absent texture. Plenty of windows have an app id
+    /// that matches no desktop entry — a dialog, something started from a terminal — and
+    /// re-reading the icon theme every frame to fail again would be the expensive way to draw
+    /// nothing.
+    pub fn window_icon(
+        &mut self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        app_id: &str,
+    ) -> Option<TitleTexture> {
+        if app_id.is_empty() {
+            return None;
+        }
+        if let Some(cached) = self.window_icons.get(app_id) {
+            return cached.map(|t| TitleTexture {
+                id: t.id,
+                aspect: t.aspect,
+            });
+        }
+        let loaded = spatiand_platform::icon_for_app(app_id)
+            .and_then(|path| crate::icon::load(&path, WINDOW_ICON_PX))
+            .and_then(|image| {
+                let aspect = image.width as f32 / image.height.max(1) as f32;
+                renderer
+                    .with_context(|gl| unsafe { upload_rgba(gl, &image) })
+                    .ok()
+                    .map(|id| Texture { id, aspect })
+            });
+        self.window_icons.insert(app_id.to_string(), loaded);
+        loaded.map(|t| TitleTexture {
+            id: t.id,
+            aspect: t.aspect,
+        })
     }
 
     /// A texture for a window title, rasterising it on first sight.
@@ -998,6 +1060,90 @@ impl Scene {
                     (0.0, 1.0),
                 );
             }
+
+            // The bar's furniture: the application's icon at one end, the close button at the
+            // other. Both are placed from `Frame`, in the quad's own coordinates, which is the
+            // same arithmetic the ray is tested against — so what is drawn and what can be
+            // pressed cannot drift apart.
+            let frame = crate::pointer::Frame::of(window.pixels);
+            let content_height = height;
+            let quad = (
+                content_height * frame.width() as f32,
+                content_height * frame.height() as f32,
+            );
+            // A box on the chrome, as a model matrix. `v` runs down from the top, the world's
+            // z runs up, hence the sign.
+            let furniture = |b: crate::pointer::Box2| {
+                let offset = orientation
+                    * Vec3::new(
+                        0.0,
+                        -((b.u as f32 - 0.5) * quad.0),
+                        (0.5 - b.v as f32) * quad.1,
+                    );
+                self.panel_model(
+                    chrome_centre + offset,
+                    orientation,
+                    b.half_u as f32 * 2.0 * quad.0,
+                    b.half_v as f32 * 2.0 * quad.1,
+                )
+            };
+
+            if let Some(icon) = window.icon {
+                // Inset a little inside its box: an icon drawn to the full square touches the
+                // glass around it, and the whole point of the furniture being smaller than the
+                // bar is that it reads as sitting *in* the bar.
+                let mut box2 = frame.icon();
+                box2.half_u *= 0.82;
+                box2.half_v *= 0.82;
+                self.quads.draw(
+                    gl,
+                    icon.id,
+                    &(eye.view_projection() * furniture(box2)),
+                    [1.0, 1.0, 1.0, if window.focused { 1.0 } else { 0.72 }],
+                    (0.0, 1.0),
+                );
+            }
+
+            // The close button. A disc of brighter glass with a cross on it, rather than a
+            // bare glyph: a cross alone on a transparent bar is hard to find and impossible to
+            // judge the extent of, and the extent is what has to be aimed at.
+            //
+            // Drawn from the distance field rather than from the glass texture, which is a
+            // wide rounded panel and comes out as a squashed rectangle when asked to be a
+            // circle. A radius of half the side is a circle by construction, at any size.
+            let close = frame.close();
+            let hot = window.close_hot;
+            let disc = if hot {
+                // Red only under the pointer. A window permanently wearing a red button reads
+                // as an error, and there are several of them in the room at once.
+                [0.98, 0.42, 0.40, 0.92]
+            } else if window.focused {
+                [0.86, 0.92, 1.0, 0.28]
+            } else {
+                [0.80, 0.86, 1.0, 0.15]
+            };
+            let disc_px = 64.0f32;
+            self.rounded.draw(
+                gl,
+                &(eye.view_projection() * furniture(close)),
+                disc,
+                (disc_px, disc_px),
+                disc_px * 0.5,
+            );
+            let mut cross = close;
+            cross.half_u *= 0.46;
+            cross.half_v *= 0.46;
+            self.quads.draw(
+                gl,
+                self.close_glyph,
+                &(eye.view_projection() * furniture(cross)),
+                if hot {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    [0.92, 0.95, 1.0, if window.focused { 0.90 } else { 0.55 }]
+                },
+                (0.0, 1.0),
+            );
 
             // Client textures arrive with GL's *default* sampler state, which is
             // NEAREST_MIPMAP_LINEAR. A texture with no mipmaps and a mipmap filter is
@@ -1636,6 +1782,49 @@ fn resize_cursor_image(size: u32) -> Vec<u8> {
     out
 }
 
+/// The cross on a window's close button.
+///
+/// Generated like every other glyph here rather than shipped or shaped from a font: it is two
+/// lines, and a font would make the one mark on a window that everybody recognises depend on
+/// which fonts happen to be installed.
+///
+/// The strokes are drawn as a distance to the diagonal rather than by walking pixels, so the
+/// edges are antialiased. A hard-edged cross a degree across, seen through optics, reads as a
+/// smudge — the softness is what makes it look like a drawn mark at this size.
+fn close_glyph_image(size: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (size * size * 4) as usize];
+    let centre = (size as f32 - 1.0) * 0.5;
+    let radius = centre;
+    // Half the stroke width, and how far each arm reaches, both as a fraction of the radius.
+    let half_stroke = 0.085f32;
+    let reach = 0.90f32;
+    let feather = 1.5 / radius;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = (x as f32 - centre) / radius;
+            let dy = (y as f32 - centre) / radius;
+            // Distance to each of the two diagonals, and how far along it the point lies.
+            let arm = |across: f32, along: f32| {
+                if along.abs() > reach {
+                    return 0.0;
+                }
+                let d = across.abs() * std::f32::consts::FRAC_1_SQRT_2;
+                (1.0 - (d - half_stroke) / feather).clamp(0.0, 1.0)
+            };
+            let a = arm(dx - dy, dx + dy).max(arm(dx + dy, dx - dy));
+            if a <= 0.0 {
+                continue;
+            }
+            let i = ((y * size + x) * 4) as usize;
+            out[i] = 255;
+            out[i + 1] = 255;
+            out[i + 2] = 255;
+            out[i + 3] = (a * 255.0) as u8;
+        }
+    }
+    out
+}
+
 /// The left pad's cursor: a ring with a cross rather than a dot.
 ///
 /// Deliberately a different *shape* as well as a different colour. Two cursors that differ
@@ -1752,7 +1941,11 @@ pub fn collect_windows(
             pixels: (width, height),
             placement,
             focused: state.layout.is_focused(&window),
+            // Both are filled in by the backend once it has a renderer to build textures with
+            // and a pointer to test against.
             title: None,
+            icon: None,
+            close_hot: false,
         });
     }
     out

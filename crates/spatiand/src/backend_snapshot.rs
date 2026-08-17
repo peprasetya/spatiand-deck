@@ -256,6 +256,9 @@ pub fn run(
                 .title_of(&quad.window)
                 .unwrap_or_else(|| "Untitled".to_string());
             quad.title = scene.title_texture(&mut renderer, &mut text, &title, ppd_now);
+            if let Some(app_id) = runtime.state.app_id_of(&quad.window) {
+                quad.icon = scene.window_icon(&mut renderer, &app_id);
+            }
         }
     }
     for w in &windows {

@@ -187,6 +187,49 @@ pub fn strip_field_codes(exec: &str) -> String {
         .join(" ")
 }
 
+/// The icon file for a window, given the application id it reports over Wayland.
+///
+/// An app id is not an icon name, and the relationship between them is a convention rather
+/// than a rule, so this is a ladder of increasingly expensive guesses:
+///
+/// 1. the app id as an icon name — `org.kde.dolphin` is both, for most modern KDE apps;
+/// 2. the desktop entry whose filename is the app id, and whatever `Icon=` it names — this is
+///    the association the freedesktop spec actually endorses;
+/// 3. the last dot-separated piece — `org.gnome.TextEditor` becomes `TextEditor` — which
+///    catches older applications whose icon is named after the binary.
+///
+/// The order matters for cost as much as for correctness: step 2 reads every desktop file on
+/// the machine, and doing that while a window is opening is a visible hitch. Most windows are
+/// answered by step 1 without touching the disk beyond the icon theme.
+///
+/// `None` is an ordinary answer. A dialog, or anything launched from a terminal, may report an
+/// app id that belongs to no installed application.
+pub fn icon_for_app(app_id: &str) -> Option<PathBuf> {
+    if app_id.is_empty() {
+        return None;
+    }
+    if let Some(path) = crate::icons::resolve(app_id) {
+        return Some(path);
+    }
+    let wanted = app_id.to_lowercase();
+    let entry = scan().into_iter().find(|e| {
+        e.path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase() == wanted)
+            .unwrap_or(false)
+    });
+    if let Some(icon) = entry.and_then(|e| e.icon) {
+        if let Some(path) = crate::icons::resolve(&icon) {
+            return Some(path);
+        }
+    }
+    app_id
+        .rsplit('.')
+        .next()
+        .filter(|tail| *tail != app_id)
+        .and_then(crate::icons::resolve)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

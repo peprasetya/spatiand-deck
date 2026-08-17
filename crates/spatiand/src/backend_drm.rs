@@ -969,6 +969,9 @@ pub fn run(
                     .title_of(&quad.window)
                     .unwrap_or_else(|| "Untitled".to_string());
                 quad.title = scene.title_texture(&mut renderer, &mut text, &title, ppd);
+                if let Some(app_id) = runtime.state.app_id_of(&quad.window) {
+                    quad.icon = scene.window_icon(&mut renderer, &app_id);
+                }
             }
 
             // --- pointing and clicking ---
@@ -987,6 +990,19 @@ pub fn run(
             };
             let right_aim = pads.as_ref().and_then(|p| aim_of(&p.right_pad));
             let left_aim = pads.as_ref().and_then(|p| aim_of(&p.left_pad));
+
+            // Light the close button whichever hand is over it. Either pad can press it, so
+            // lighting only the one under the dominant hand would leave the other pressing a
+            // control that never acknowledged it was aimed at.
+            for aim in [right_aim.as_ref(), left_aim.as_ref()].into_iter().flatten() {
+                if aim.zone == Some(Zone::Close) {
+                    if let Some((index, _)) = aim.hit {
+                        if let Some(quad) = windows.get_mut(index) {
+                            quad.close_hot = true;
+                        }
+                    }
+                }
+            }
 
             if shell.menu_is_open() {
                 // A menu takes the pointer away. Anything held has to be let go, or the client
@@ -1217,6 +1233,17 @@ pub fn run(
 
                     if !typed && right_click && pointers.drag.is_none() && !right_was_down {
                         match right_aim.as_ref() {
+                            // Before the title bar: the button sits inside the bar, so testing
+                            // the bar first would start a drag and never reach this.
+                            Some(a) if a.zone == Some(Zone::Close) => {
+                                if let Some(quad) = a.hit.and_then(|(i, _)| windows.get(i)) {
+                                    log::info!("closing {}", runtime
+                                        .state
+                                        .title_of(&quad.window)
+                                        .unwrap_or_else(|| "a window".into()));
+                                    runtime.state.close_window(&quad.window);
+                                }
+                            }
                             Some(a) if a.on_title => {
                                 if let Some((index, _)) = a.hit {
                                     if let Some(quad) = windows.get(index) {
