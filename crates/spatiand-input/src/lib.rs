@@ -29,6 +29,8 @@ pub mod haptics;
 pub mod layout;
 pub mod report;
 pub mod scroll;
+#[cfg(test)]
+mod scroll_trace;
 pub mod takeover;
 pub mod touch;
 pub mod trigger;
