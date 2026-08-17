@@ -14,10 +14,14 @@
 //! SPATIAND_BACKEND=snapshot SPATIAND_SNAPSHOT=/tmp/hud.png SPATIAND_VIEW=hud spatiand
 //! ```
 //!
-//! `SPATIAND_VIEW` is `world`, `hud`, `environment`, `files`, `launcher`, `keyboard` or
-//! `calibrate`; `SPATIAND_SNAPSHOT_SIZE` is
+//! `SPATIAND_VIEW` is `world`, `hud`, `environment`, `files`, `launcher`, `keyboard`,
+//! `calibrate` or `sidecar`; `SPATIAND_SNAPSHOT_SIZE` is
 //! `WIDTHxHEIGHT` and defaults to one eye of the glasses (1920x1080). `SPATIAND_SNAPSHOT_YAW`
-//! turns the head, in degrees, which is how the arc's edges get checked.
+//! turns the head and `SPATIAND_SNAPSHOT_PITCH` tips it down, both in degrees -- which is how
+//! the arc's edges and anything hanging below the eye line get checked.
+//!
+//! `sidecar` draws the Deck's own panel instead of the glasses, at its real 800x1280, and
+//! takes `SPATIAND_VIEW_PAGE=keyboard` for its second page.
 //!
 //! `SPATIAND_CLIENT` goes further and launches a real Wayland application into the snapshot:
 //! a full compositor runs, the client connects, commits a buffer, and the frame is rendered
@@ -59,6 +63,9 @@ enum View {
     Keyboard,
     Environment,
     Files,
+    /// The Deck's own panel rather than the glasses, so the sidecar can be looked at without
+    /// a Deck to look at. Honours `SPATIAND_VIEW_PAGE=keyboard` for its second page.
+    Sidecar,
 }
 
 impl View {
@@ -70,6 +77,7 @@ impl View {
             Ok("launcher") => Self::Launcher,
             Ok("calibrate") => Self::Calibrate,
             Ok("keyboard") => Self::Keyboard,
+            Ok("sidecar") => Self::Sidecar,
             _ => Self::World,
         }
     }
@@ -375,6 +383,12 @@ pub fn run(
         Some(renderer.with_context(|gl| unsafe { (crate::gl::upload_rgba(gl, &image), aspect) })?)
     };
 
+    // The panel is a different surface with a different size and its own 2D projection, so it
+    // short-circuits the whole stereo path rather than being drawn into it.
+    if view == View::Sidecar {
+        return draw_sidecar(&mut renderer, &mut text, &mut scene, &keyboard, &out);
+    }
+
     // --- draw ---
     let target: GlesTexture =
         renderer.create_buffer(Fourcc::Abgr8888, (width as i32, height as i32).into())?;
@@ -470,6 +484,89 @@ pub fn run(
     }
 
     image::save_buffer(&out, &flipped, width, height, image::ColorType::Rgba8)?;
+    log::info!("wrote {}", out.display());
+    Ok(())
+}
+
+/// Render the Deck's own panel to a PNG.
+///
+/// The sidecar draws in the panel's pixels with its own quarter turn, so there is nothing here
+/// to share with the stereo path above -- and every layout bug it has ever had was one that
+/// only showed up as a picture.
+fn draw_sidecar(
+    renderer: &mut GlesRenderer,
+    text: &mut TextRenderer,
+    scene: &mut Scene,
+    keyboard: &spatiand_shell::Keyboard,
+    out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The Deck's panel, as it actually reports itself.
+    let panel = (800u32, 1280u32);
+    let mut ui = crate::sidecar::Sidecar::new(scene.white(), panel);
+    if std::env::var("SPATIAND_VIEW_PAGE").as_deref() == Ok("keyboard") {
+        ui.show(crate::sidecar::Page::Keyboard);
+    }
+    let levels = crate::sidecar::Levels {
+        screen: Some(0.62),
+        glasses: Some(0.40),
+        volume: Some(0.75),
+    };
+    let audio = crate::sidecar::Audio::default();
+    let mut monitors = crate::system::Monitors::new();
+    monitors.tick();
+
+    let prepared = ui.prepare(renderer, text, &monitors, "17:04", levels, &audio, keyboard);
+
+    let target: GlesTexture =
+        renderer.create_buffer(Fourcc::Abgr8888, (panel.0 as i32, panel.1 as i32).into())?;
+    let fbo = renderer.with_context(|gl| unsafe {
+        let mut fbo = 0;
+        gl.GenFramebuffers(1, &mut fbo);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+        gl.FramebufferTexture2D(
+            ffi::FRAMEBUFFER,
+            ffi::COLOR_ATTACHMENT0,
+            ffi::TEXTURE_2D,
+            target.tex_id(),
+            0,
+        );
+        let status = gl.CheckFramebufferStatus(ffi::FRAMEBUFFER);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+        (fbo, status)
+    })?;
+    if fbo.1 != ffi::FRAMEBUFFER_COMPLETE {
+        return Err(format!("sidecar framebuffer incomplete: {:#x}", fbo.1).into());
+    }
+    let fbo = fbo.0;
+
+    let mut pixels = vec![0u8; (panel.0 * panel.1 * 4) as usize];
+    let quads = scene.quads();
+    let rounded = scene.rounded();
+    renderer.with_context(|gl| unsafe {
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+        gl.Disable(ffi::SCISSOR_TEST);
+        gl.Viewport(0, 0, panel.0 as i32, panel.1 as i32);
+        gl.ClearColor(0.02, 0.03, 0.05, 1.0);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        ui.draw(gl, quads, rounded, &monitors, levels, &audio, keyboard, &prepared);
+        gl.ReadPixels(
+            0,
+            0,
+            panel.0 as i32,
+            panel.1 as i32,
+            ffi::RGBA,
+            ffi::UNSIGNED_BYTE,
+            pixels.as_mut_ptr() as *mut _,
+        );
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+    })?;
+
+    // No flip on the way out, unlike the stereo path above. The sidecar's own projection
+    // already carries the Y flip -- see `Sidecar::projection`, which explains at length why it
+    // lives in `Layout::rect` rather than in the projection itself. Flipping again here
+    // mirrors every label while leaving the layout looking plausible, which is precisely the
+    // failure that comment was written about.
+    image::save_buffer(out, &pixels, panel.0, panel.1, image::ColorType::Rgba8)?;
     log::info!("wrote {}", out.display());
     Ok(())
 }

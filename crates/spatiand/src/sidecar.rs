@@ -71,6 +71,14 @@ const DEVICE_TEXT: f32 = 22.0;
 /// How tall one device row is. A finger has to land on it, so this is the same order as a
 /// slider card rather than the size the text needs.
 const DEVICE_ROW: f32 = 54.0;
+/// The page-swap button in the header.
+const PAGE_BUTTON_HEIGHT: f32 = 64.0;
+/// Gap between neighbouring keycaps on the panel, as a fraction of a cell's shorter side.
+///
+/// Larger than the 3D keyboard's, because this one is hit with a fingertip about 9 mm across
+/// rather than with a ray: the gaps are what stop a thumb landing on two keys at once from
+/// looking like the wrong one was chosen.
+const KEY_GAP: f32 = 0.16;
 
 
 /// The lowest the brightness slider will go.
@@ -113,6 +121,38 @@ impl Rect {
             return 0.0;
         }
         ((x - self.x) / self.w).clamp(0.0, 1.0)
+    }
+}
+
+/// What the panel is showing.
+///
+/// Two pages rather than one crowded screen. The Deck's panel is a *touchscreen* the wearer can
+/// reach without aiming anything, which makes it far and away the best keyboard in the session —
+/// a finger on glass beats a head-anchored ray at a key a degree across. But a keyboard needs
+/// the whole panel to have keys worth hitting, so it replaces the readouts rather than squeezing
+/// in beside them. The 3D keyboard stays available either way; they are not exclusive, and
+/// nothing here turns the other one off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Page {
+    #[default]
+    Dashboard,
+    Keyboard,
+}
+
+impl Page {
+    /// What the button offers, which is the page you are *not* on.
+    fn button_label(self) -> &'static str {
+        match self {
+            Page::Dashboard => "Keyboard",
+            Page::Keyboard => "Dashboard",
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Page::Dashboard => Page::Keyboard,
+            Page::Keyboard => Page::Dashboard,
+        }
     }
 }
 
@@ -195,6 +235,12 @@ pub enum Action {
     Moved(Knob),
     /// Make this PipeWire node the default for its direction.
     ChooseDevice(Direction, u32),
+    /// A key on the panel's keyboard was touched.
+    ///
+    /// The key rather than the keystroke: latching and releasing modifiers is the keyboard's
+    /// own business, and it is shared with the one hanging in the world. Deciding it twice
+    /// would let shift be on in one place and off in the other.
+    PressKey(&'static spatiand_shell::keyboard::Key),
 }
 
 /// Every row of the sidecar, worked out once.
@@ -341,6 +387,11 @@ pub struct Sidecar {
     held: Option<(usize, Knob)>,
     /// Live contacts in landscape pixels, drawn so a touch is visibly registered.
     touches: Vec<(usize, f32, f32)>,
+    page: Page,
+    /// The key under each live finger, so a pressed key can be drawn as pressed. Without it a
+    /// touch keyboard gives no sign it registered anything, which on a panel with no travel is
+    /// the whole of the feedback.
+    pressed: Vec<(usize, &'static spatiand_shell::keyboard::Key)>,
 }
 
 impl Sidecar {
@@ -360,7 +411,67 @@ impl Sidecar {
             portrait,
             held: None,
             touches: Vec::new(),
+            page: Page::default(),
+            pressed: Vec::new(),
         }
+    }
+
+    pub fn page(&self) -> Page {
+        self.page
+    }
+
+    pub fn show(&mut self, page: Page) {
+        self.page = page;
+    }
+
+    /// The button that swaps pages, at the right-hand end of the header.
+    ///
+    /// In the header rather than on a card of its own, because it is the one control that is
+    /// not about a reading — putting it in the grid would make it look like a fourth setting.
+    pub fn page_button(&self) -> Rect {
+        let header = self.rows(Levels::default()).header;
+        let w = 260.0f32.min(header.w * 0.42);
+        Rect {
+            x: header.x + header.w - w,
+            y: header.y + (header.h - PAGE_BUTTON_HEIGHT) * 0.5,
+            w,
+            h: PAGE_BUTTON_HEIGHT,
+        }
+    }
+
+    /// Where the keyboard is drawn, in landscape pixels.
+    ///
+    /// The largest rectangle of the keyboard's own aspect that fits under the header, centred
+    /// in what is left. Sized from [`spatiand_shell::keyboard::face_aspect`] rather than from a
+    /// constant, so a change to the rows cannot quietly restretch the keys.
+    pub fn keyboard_area(&self) -> Rect {
+        let (width, height) = self.size;
+        let top = MARGIN + HEADER_HEIGHT + HEADER_GAP;
+        let room_w = width - MARGIN * 2.0;
+        let room_h = (height - MARGIN - top).max(1.0);
+        let aspect = spatiand_shell::keyboard::face_aspect() as f32;
+        let w = room_w.min(room_h * aspect);
+        let h = w / aspect;
+        Rect {
+            x: MARGIN + (room_w - w) * 0.5,
+            y: top + (room_h - h) * 0.5,
+            w,
+            h,
+        }
+    }
+
+    /// Which key is under a point in landscape pixels.
+    pub fn key_at(&self, x: f32, y: f32) -> Option<&'static spatiand_shell::keyboard::Key> {
+        let area = self.keyboard_area();
+        if !area.contains(x, y) {
+            return None;
+        }
+        // Straight into the face's own coordinates: the panel draws the face alone, with no
+        // resize border, because there is nothing to resize — it fills the screen it is on.
+        spatiand_shell::Keyboard::default().key_at(
+            ((x - area.x) / area.w) as f64,
+            ((y - area.y) / area.h) as f64,
+        )
     }
 
     /// Where every row sits. See [`Rows`].
@@ -497,6 +608,26 @@ impl Sidecar {
                     let (x, y) = self.touch_to_layout(c.x, c.y);
                     self.touches.retain(|(slot, _, _)| *slot != c.slot);
                     self.touches.push((c.slot, x, y));
+
+                    // The page button is tested before anything else and on either page, so
+                    // there is always a way back. A control that only exists on one of two
+                    // pages is a way to get stranded on the other.
+                    if self.page_button().contains(x, y) {
+                        self.page = self.page.other();
+                        continue;
+                    }
+
+                    if self.page == Page::Keyboard {
+                        // Typed on the way down, like every other touch keyboard. Waiting for
+                        // the lift puts a visible delay between the tap and the character.
+                        if let Some(key) = self.key_at(x, y) {
+                            self.pressed.retain(|(slot, _)| *slot != c.slot);
+                            self.pressed.push((c.slot, key));
+                            changed.push(Action::PressKey(key));
+                        }
+                        continue;
+                    }
+
                     // First finger down on a knob owns it. A second one arriving on the same
                     // bar must not steal it, or resting a palm mid-drag jumps the value.
                     if self.held.is_none() {
@@ -528,6 +659,7 @@ impl Sidecar {
                 }
                 TouchEvent::Up { slot } => {
                     self.touches.retain(|(s, _, _)| *s != slot);
+                    self.pressed.retain(|(s, _)| *s != slot);
                     if self.held.map(|(s, _)| s) == Some(slot) {
                         self.held = None;
                     }
@@ -607,6 +739,7 @@ impl Sidecar {
         monitors: &Monitors,
         levels: Levels,
         audio: &Audio,
+        keyboard: &spatiand_shell::Keyboard,
         prepared: &[Label],
     ) {
         let layout = Layout {
@@ -638,6 +771,17 @@ impl Sidecar {
 
         // The header carries no card of its own. Text on the ground reads as a title; text on
         // a plate reads as another row of data, and the clock is not data.
+
+        // The page button, on both pages, so there is always a way back.
+        let button = self.page_button();
+        round(button, TRACK, button.h * 0.5);
+
+        if self.page == Page::Keyboard {
+            self.draw_keys(gl, &round, keyboard);
+            self.draw_touches(&round);
+            self.draw_labels(gl, quads, &projection, &layout, prepared);
+            return;
+        }
 
         for (series, card) in [&monitors.cpu, &monitors.gpu, &monitors.memory]
             .into_iter()
@@ -715,11 +859,18 @@ impl Sidecar {
             }
         }
 
-        // Wherever a finger is. This is the only confirmation the panel gives that a touch
-        // arrived at all, and it is what tells a wrong quarter turn from a dead digitiser:
-        // a dot that mirrors the finger is a sign error, a dot that never appears is not.
-        //
-        // Round, because a fingertip is, and a square one looked like a rendering fault.
+        self.draw_touches(&round);
+        self.draw_labels(gl, quads, &projection, &layout, prepared);
+    }
+
+    /// Wherever a finger is.
+    ///
+    /// This is the only confirmation the panel gives that a touch arrived at all, and it is
+    /// what tells a wrong quarter turn from a dead digitiser: a dot that mirrors the finger is
+    /// a sign error, a dot that never appears is not.
+    ///
+    /// Round, because a fingertip is, and a square one looked like a rendering fault.
+    fn draw_touches(&self, round: &impl Fn(Rect, [f32; 4], f32)) {
         for (_, x, y) in &self.touches {
             let size = 56.0;
             round(
@@ -728,17 +879,74 @@ impl Sidecar {
                 size * 0.5,
             );
         }
+    }
 
-        // Text last, so it is never behind a card.
+    /// Text last, so it is never behind a card.
+    ///
+    /// # Safety
+    /// Context must be current and the target framebuffer bound.
+    unsafe fn draw_labels(
+        &self,
+        gl: &ffi::Gles2,
+        quads: &QuadPipeline,
+        projection: &Mat4,
+        layout: &Layout,
+        prepared: &[Label],
+    ) {
         for label in prepared {
             let width = label.height * label.texture.1.max(0.01);
             quads.draw(
                 gl,
                 label.texture.0,
-                &(projection * layout.rect(label.x, label.y, width, label.height)),
+                &(*projection * layout.rect(label.x, label.y, width, label.height)),
                 label.colour,
                 (0.0, 1.0),
             );
+        }
+    }
+
+    /// The keycaps, drawn straight onto the panel.
+    ///
+    /// One rounded rectangle per key rather than a rasterised face like the 3D keyboard uses.
+    /// The panel draws in its own pixels with no perspective and no texture upload, so there is
+    /// nothing to gain from baking it into an image — and the pressed and latched states change
+    /// on every touch, which would mean rebuilding that image on every touch.
+    fn draw_keys(
+        &self,
+        _gl: &ffi::Gles2,
+        round: &impl Fn(Rect, [f32; 4], f32),
+        keyboard: &spatiand_shell::Keyboard,
+    ) {
+        use spatiand_shell::keyboard::Role;
+        let area = self.keyboard_area();
+        for (key, rect) in spatiand_shell::keyboard::layout() {
+            let cap = self.cap_rect(area, &rect);
+            let held = self.pressed.iter().any(|(_, k)| k.code == key.code);
+            let colour = if held {
+                // Brighter than a latch, because it lasts only as long as the finger does and
+                // has to be visible in that time.
+                [1.0, 1.0, 1.0, 0.55]
+            } else if keyboard.is_latched(key) {
+                [ACCENT[0], ACCENT[1], ACCENT[2], 0.85]
+            } else if matches!(key.role, Role::Modifier(_)) || key.label.len() > 1 {
+                CARD
+            } else {
+                TRACK
+            };
+            round(cap, colour, cap.h.min(cap.w) * 0.22);
+        }
+    }
+
+    /// A key's drawn cap: its cell inset by the gap.
+    fn cap_rect(&self, area: Rect, rect: &spatiand_shell::keyboard::KeyRect) -> Rect {
+        let cell_w = (rect.half_u * 2.0) as f32 * area.w;
+        let cell_h = (rect.half_v * 2.0) as f32 * area.h;
+        let inset = cell_w.min(cell_h) * KEY_GAP * 0.5;
+        Rect {
+            x: area.x + (rect.u as f32) * area.w - cell_w * 0.5 + inset,
+            y: area.y + (rect.v as f32) * area.h - cell_h * 0.5 + inset,
+            w: (cell_w - inset * 2.0).max(1.0),
+            h: (cell_h - inset * 2.0).max(1.0),
         }
     }
 
@@ -800,9 +1008,65 @@ impl Sidecar {
         status: &str,
         levels: Levels,
         audio: &Audio,
+        keyboard: &spatiand_shell::Keyboard,
     ) -> Vec<Label> {
         let rows = self.rows(levels);
         let mut out = Vec::new();
+
+        // The page button's own label, centred in its capsule.
+        let button = self.page_button();
+        let button_text = self.page.button_label().to_string();
+        if let Some(entry) = self.label(renderer, text, &button_text, LABEL_TEXT * 1.35) {
+            let width = LABEL_TEXT * entry.1.max(0.01);
+            out.push(Label {
+                texture: entry,
+                x: button.x + (button.w - width) * 0.5,
+                y: button.y + (button.h - LABEL_TEXT) * 0.5,
+                height: LABEL_TEXT,
+                colour: INK,
+            });
+        }
+
+        if self.page == Page::Keyboard {
+            // The clock comes along, so the header is not an empty strip with one button in
+            // it -- and it is the thing most worth glancing at while typing anyway.
+            if let Some(entry) = self.label(renderer, text, status, HEADER_TEXT * 1.35) {
+                out.push(Label {
+                    texture: entry,
+                    x: rows.header.x + 4.0,
+                    y: rows.header.y + (rows.header.h - HEADER_TEXT) * 0.5,
+                    height: HEADER_TEXT,
+                    colour: INK,
+                });
+            }
+            let area = self.keyboard_area();
+            for (key, rect) in spatiand_shell::keyboard::layout() {
+                let cap = self.cap_rect(area, &rect);
+                let label = keyboard.label(key);
+                // Words are set smaller than letters, so "space" fits its cap without the
+                // letters shrinking to match the longest label on the board.
+                let size = if label.chars().count() > 1 {
+                    cap.h * 0.34
+                } else {
+                    cap.h * 0.48
+                };
+                let Some(entry) = self.label(renderer, text, label, size * 1.35) else {
+                    continue;
+                };
+                let width = size * entry.1.max(0.01);
+                out.push(Label {
+                    texture: entry,
+                    x: cap.x + (cap.w - width) * 0.5,
+                    y: cap.y + (cap.h - size) * 0.5,
+                    height: size,
+                    // A latched key is drawn on a bright plate, so its label has to go dark to
+                    // stay readable.
+                    colour: if keyboard.is_latched(key) { GROUND } else { INK },
+                });
+            }
+            return out;
+        }
+
         // `x` is the left edge, or the right edge when `from_right`. Right alignment has to
         // happen here rather than in `draw`, because the width of a piece of text is not known
         // until it has been rasterised and its aspect measured.
@@ -956,6 +1220,131 @@ mod tests {
 
     fn sidecar(panel: (u32, u32)) -> Sidecar {
         Sidecar::new(1, panel)
+    }
+
+    fn down(slot: usize, x: f32, y: f32) -> spatiand_input::TouchEvent {
+        spatiand_input::TouchEvent::Down(spatiand_input::Contact {
+            slot,
+            id: slot as i32,
+            x,
+            y,
+        })
+    }
+
+    /// A touch aimed at a point in landscape pixels, expressed the way the digitiser would
+    /// report it — so these tests go through the same quarter turn the real panel does.
+    fn touch_at(s: &Sidecar, lx: f32, ly: f32) -> (f32, f32) {
+        let (w, h) = s.size;
+        if s.portrait {
+            (1.0 - ly / h, lx / w)
+        } else {
+            (lx / w, ly / h)
+        }
+    }
+
+    #[test]
+    fn the_page_button_swaps_pages_and_swaps_back() {
+        // A control that only exists on one of two pages is a way to get stranded on the other.
+        let mut s = sidecar((800, 1280));
+        let button = s.page_button();
+        let (cx, cy) = (button.x + button.w * 0.5, button.y + button.h * 0.5);
+        assert_eq!(s.page(), Page::Dashboard);
+
+        let (u, v) = touch_at(&s, cx, cy);
+        s.touch(&[down(0, u, v)], all(), &Audio::default());
+        assert_eq!(s.page(), Page::Keyboard);
+
+        // The button does not move between pages, so the same place takes you back.
+        s.touch(
+            &[spatiand_input::TouchEvent::Up { slot: 0 }, down(1, u, v)],
+            all(),
+            &Audio::default(),
+        );
+        assert_eq!(s.page(), Page::Dashboard);
+    }
+
+    #[test]
+    fn touching_a_key_asks_for_that_key() {
+        let mut s = sidecar((800, 1280));
+        s.page = Page::Keyboard;
+        let area = s.keyboard_area();
+        // The middle of the "a" cell: second row of five, second cell in.
+        let (key, rect) = spatiand_shell::keyboard::layout()
+            .into_iter()
+            .find(|(k, _)| k.label == "a")
+            .expect("there must be an a");
+        let lx = area.x + rect.u as f32 * area.w;
+        let ly = area.y + rect.v as f32 * area.h;
+        let (u, v) = touch_at(&s, lx, ly);
+        let actions = s.touch(&[down(0, u, v)], all(), &Audio::default());
+        assert_eq!(actions, vec![Action::PressKey(key)]);
+    }
+
+    #[test]
+    fn the_keys_land_where_they_are_drawn() {
+        // The panel draws each cap from `cap_rect` and decides what was pressed from `key_at`.
+        // If those disagree every key is subtly the wrong one, which reads as a broken keymap
+        // rather than as a layout that is a few pixels out.
+        let s = sidecar((800, 1280));
+        let area = s.keyboard_area();
+        for (key, rect) in spatiand_shell::keyboard::layout() {
+            let cap = s.cap_rect(area, &rect);
+            let hit = s
+                .key_at(cap.x + cap.w * 0.5, cap.y + cap.h * 0.5)
+                .expect("the middle of a cap must be a key");
+            assert_eq!(hit.code, key.code, "cap for {:?} hits {:?}", key.label, hit.label);
+        }
+    }
+
+    #[test]
+    fn a_touch_off_the_keyboard_types_nothing() {
+        // The area is letterboxed inside the panel, and the margin around it must not be a
+        // strip that types whatever key is nearest.
+        let s = sidecar((800, 1280));
+        let area = s.keyboard_area();
+        assert!(s.key_at(area.x - 8.0, area.y + area.h * 0.5).is_none());
+        assert!(s.key_at(area.x + area.w * 0.5, area.y - 8.0).is_none());
+    }
+
+    #[test]
+    fn the_keyboard_keeps_its_shape_on_the_panel() {
+        let s = sidecar((800, 1280));
+        let area = s.keyboard_area();
+        let aspect = (area.w / area.h) as f64;
+        assert!(
+            (aspect - spatiand_shell::keyboard::face_aspect()).abs() < 1e-3,
+            "drew at {aspect}"
+        );
+        // And fits inside the panel with its margins.
+        assert!(area.x >= MARGIN - 0.01 && area.y >= MARGIN);
+        assert!(area.x + area.w <= s.size.0 - MARGIN + 0.01);
+        assert!(area.y + area.h <= s.size.1 - MARGIN + 0.01);
+    }
+
+    #[test]
+    fn a_key_on_the_panel_is_big_enough_for_a_finger() {
+        // The whole reason the keyboard gets the panel to itself. A landscape pixel is about
+        // 0.118 mm on the Deck, and a fingertip contact patch is 8-10 mm — so an ordinary key
+        // has to be comfortably over 60 px to be aimed at rather than guessed.
+        let s = sidecar((800, 1280));
+        let area = s.keyboard_area();
+        let (_, rect) = spatiand_shell::keyboard::layout()
+            .into_iter()
+            .find(|(k, _)| k.label == "g")
+            .unwrap();
+        let cap = s.cap_rect(area, &rect);
+        assert!(cap.w > 60.0, "an ordinary key is only {} px wide", cap.w);
+        assert!(cap.h > 60.0, "an ordinary key is only {} px tall", cap.h);
+    }
+
+    #[test]
+    fn the_dashboard_still_answers_a_slider_when_the_keyboard_is_shut() {
+        // The page split must not have taken the original panel with it.
+        let mut s = sidecar((800, 1280));
+        let card = s.rows(all()).slider(Knob::Volume).expect("volume has a reading");
+        let (u, v) = touch_at(&s, card.x + card.w * 0.5, card.y + card.h * 0.5);
+        let actions = s.touch(&[down(0, u, v)], all(), &Audio::default());
+        assert_eq!(actions, vec![Action::Moved(Knob::Volume)]);
     }
 
     #[test]

@@ -373,6 +373,11 @@ impl Scene {
     }
 
     /// Rounded rectangles and circles, from a distance field rather than a texture.
+    /// The one-pixel white texture, for anything that wants a flat fill.
+    pub fn white(&self) -> u32 {
+        self.white
+    }
+
     pub fn rounded(&self) -> &RoundedPipeline {
         &self.rounded
     }

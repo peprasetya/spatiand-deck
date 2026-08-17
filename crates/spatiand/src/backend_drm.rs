@@ -1643,6 +1643,17 @@ pub fn run(
                                     }
                                     continue;
                                 }
+                                crate::sidecar::Action::PressKey(key) => {
+                                    // The same keyboard the 3D one uses, so a shift latched on
+                                    // the panel is latched in the world too -- two copies of
+                                    // that state would let it be on in one place and off in
+                                    // the other.
+                                    if let Some(stroke) = keyboard.press(key) {
+                                        send_stroke(&mut runtime.state, stroke, time_ms);
+                                    }
+                                    keyboard.after_press(key);
+                                    continue;
+                                }
                             };
                             let Some(value) = ui.knob_value(knob, levels) else {
                                 continue;
@@ -1682,18 +1693,20 @@ pub fn run(
                     }
                 }
                 let prepared =
-                    ui.prepare(&mut renderer, &mut text, &monitors, &status_text, levels, &audio);
+                    ui.prepare(&mut renderer, &mut text, &monitors, &status_text, levels, &audio, &keyboard);
                 let (sw, sh) = (side.size.0 as i32, side.size.1 as i32);
                 let fbo = side.fbo;
                 let quads = scene.quads();
                 let rounded = scene.rounded();
+                // Borrowed for the draw closure, which cannot also take `keyboard` mutably.
+                let keyboard_for_panel = &keyboard;
                 renderer.with_context(|gl| unsafe {
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
                     gl.Disable(ffi::SCISSOR_TEST);
                     gl.Viewport(0, 0, sw, sh);
                     gl.ClearColor(0.02, 0.03, 0.05, 1.0);
                     gl.Clear(ffi::COLOR_BUFFER_BIT);
-                    ui.draw(gl, quads, rounded, &monitors, levels, &audio, &prepared);
+                    ui.draw(gl, quads, rounded, &monitors, levels, &audio, keyboard_for_panel, &prepared);
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
                 })?;
 
