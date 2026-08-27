@@ -106,16 +106,21 @@ impl WindowLayout {
         // perfectly coincident, so they read as a single window that keeps changing its mind
         // about what it contains.
         //
-        // A small cascade rather than the old wide fan: the point is that they are
-        // distinguishable and all still in front of you, not that they never overlap.
-        const STEP: f64 = 7.0;
+        // The step is half a window's own angular width, so neighbours overlap by half and
+        // there is no arrangement in which one hides another.
+        //
+        // It was a flat 7 degrees, chosen so that everything stayed comfortably in front of
+        // you. That optimised for the wrong thing and gave up the property it was there to
+        // deliver: a window is 1.1 m wide at 2.2 m, which is 28 degrees, so a 7 degree step
+        // left the newer one covering three quarters of the older -- and, being nearer, it
+        // drew in front. Opening Bluetooth and then Wi-Fi looked exactly like one window that
+        // had changed its contents, which is what it was reported as. Half a width is wide
+        // enough to see two things; a spatial desktop is allowed to ask you to turn your head.
         let n = self.placements.len();
-        let side = if n % 2 == 0 { 1.0 } else { -1.0 };
-        let rank = ((n + 1) / 2) as f64;
         let placement = Placement {
-            yaw: view_yaw + side * rank * STEP.to_radians(),
+            yaw: view_yaw + Self::fan_offset(n),
             // A little depth too, so even a head-on view separates them.
-            radius: Placement::default().radius + rank * 0.06,
+            radius: Placement::default().radius + Self::fan_rank(n) * 0.06,
             ..Default::default()
         };
         let id = self.id_for(window);
@@ -124,6 +129,30 @@ impl WindowLayout {
             self.focused = Some(id);
         }
         placement
+    }
+
+    /// How far apart consecutive windows are placed, in radians.
+    ///
+    /// Derived from the default placement rather than written down, so that moving a window
+    /// nearer or making it wider cannot silently turn the fan back into a stack.
+    pub fn fan_step() -> f64 {
+        let d = Placement::default();
+        // The full angle a window subtends, halved.
+        (2.0 * (d.width * 0.5 / d.radius).atan()) * 0.5
+    }
+
+    /// How far out from centre the `n`th window sits, counting from zero.
+    fn fan_rank(n: usize) -> f64 {
+        ((n + 1) / 2) as f64
+    }
+
+    /// Where the `n`th window goes relative to where you are looking, in radians.
+    ///
+    /// Alternating sides: straight ahead, then left, then right, then further left. A fan that
+    /// only ever went one way would march everything off to one side of the room.
+    pub fn fan_offset(n: usize) -> f64 {
+        let side = if n % 2 == 0 { 1.0 } else { -1.0 };
+        side * Self::fan_rank(n) * Self::fan_step()
     }
 
     pub fn get(&self, window: &Window) -> Option<Placement> {
@@ -271,6 +300,35 @@ mod tests {
             ..Default::default()
         };
         assert!(p.position().z > 0.0);
+    }
+
+    #[test]
+    fn a_new_window_can_never_be_hidden_by_the_one_before_it() {
+        // The bug this replaces: a 7 degree step against a 28 degree window left the newer one
+        // covering three quarters of the older and drawing in front, so opening a second app
+        // looked like the first one had changed its contents.
+        let d = Placement::default();
+        let width_deg = (2.0 * (d.width * 0.5 / d.radius).atan()).to_degrees();
+        let step_deg = WindowLayout::fan_step().to_degrees();
+        assert!(
+            step_deg >= width_deg * 0.5 - 1e-9,
+            "a step of {step_deg:.1} deg against a {width_deg:.1} deg window hides one behind the other"
+        );
+    }
+
+    #[test]
+    fn consecutive_windows_land_on_opposite_sides_and_walk_outwards() {
+        let step = WindowLayout::fan_step();
+        let steps: Vec<i64> = (0..5)
+            .map(|n| (WindowLayout::fan_offset(n) / step).round() as i64)
+            .collect();
+        assert_eq!(steps, vec![0, -1, 1, -2, 2]);
+    }
+
+    #[test]
+    fn the_first_window_opens_where_you_are_looking() {
+        // Anything else means the thing you just asked for is not the thing in front of you.
+        assert!(approx(WindowLayout::fan_offset(0), 0.0));
     }
 
     #[test]

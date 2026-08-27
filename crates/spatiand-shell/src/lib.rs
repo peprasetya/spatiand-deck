@@ -208,11 +208,12 @@ impl Shell {
                     // is what makes a newly dropped-in image appear.
                     match action {
                         HudAction::OpenEnvironments => self.mode = Mode::Environment,
-                        // Opening a settings window leaves the HUD up, since the window
-                        // appears beside it rather than instead of it.
-                        HudAction::OpenSystemSettings(_) => {}
-                        // Everything else takes you back to the world: staying on the menu
-                        // after recentring hides the thing you just changed.
+                        // Everything else takes you back to the world, settings panels
+                        // included: staying on the menu after recentring hides the thing you
+                        // just changed, and staying on it after opening Wi-Fi leaves a menu
+                        // floating in front of the window you asked for. The HUD used to stay
+                        // up here on the theory that you might open a second panel, which is
+                        // not a thing anyone does -- you open one and then use it.
                         _ => self.mode = Mode::World,
                     }
                     Some(ShellEvent::Hud(action))
@@ -372,20 +373,34 @@ mod tests {
     }
 
     #[test]
-    fn hud_actions_return_to_the_world_but_settings_panels_do_not() {
+    fn every_hud_action_but_the_environment_picker_returns_to_the_world() {
         let mut s = shell();
         s.handle(Intent::ToggleHud);
         assert_eq!(s.handle(Intent::Accept), Some(ShellEvent::Hud(HudAction::Recentre)));
         assert_eq!(s.mode(), Mode::World, "recentring should show you the result");
 
-        // Opening a settings window keeps the HUD up, so you can open another.
+        // Settings panels included. The window you asked for is the thing you wanted to look
+        // at; leaving the menu up puts it between you and that window.
         let mut s = shell();
         s.handle(Intent::ToggleHud);
         while !matches!(s.hud().focused().action, HudAction::OpenSystemSettings(_)) {
             assert!(s.hud.step(Direction::Down), "ran out of rows");
         }
         s.handle(Intent::Accept);
-        assert_eq!(s.mode(), Mode::Hud);
+        assert_eq!(s.mode(), Mode::World, "the HUD should get out of the way");
+    }
+
+    #[test]
+    fn the_environment_picker_is_the_only_row_that_goes_deeper() {
+        // It opens a list rather than doing something, so it is the one row where staying in
+        // the menus is the point.
+        let mut s = shell();
+        s.handle(Intent::ToggleHud);
+        while !matches!(s.hud().focused().action, HudAction::OpenEnvironments) {
+            assert!(s.hud.step(Direction::Down), "ran out of rows");
+        }
+        s.handle(Intent::Accept);
+        assert_eq!(s.mode(), Mode::Environment);
     }
 
     #[test]

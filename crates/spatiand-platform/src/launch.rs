@@ -10,7 +10,55 @@
 //! * A command that fails to start must say so, rather than leaving the wearer pressing A at
 //!   an icon that does nothing.
 
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+/// The most this file is allowed to grow to before it is started again, in bytes.
+///
+/// One misbehaving application logging every frame would otherwise fill a partition, and the
+/// partition it would fill is the one holding the session.
+const APP_LOG_LIMIT: u64 = 4 * 1024 * 1024;
+
+/// Where a launched application's own complaints go.
+///
+/// Not `/dev/null`, which is where they used to go. An application that fails in here fails
+/// silently and invisibly: there is no terminal to have shown the error in, and the
+/// compositor's own log is a frame-rate trace that a Qt backtrace would bury. A KDE settings
+/// panel reported "could not prompt the user for which application to start" and there was
+/// nothing at all behind it -- not because nothing was written, but because we were throwing
+/// it away.
+///
+/// Its own file rather than ours for that second reason: interleaving a chatty toolkit with
+/// the render loop's output costs both of them.
+fn app_log_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let dir = PathBuf::from(home).join(".local/share");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("spatiand-apps.log"))
+}
+
+/// Open the application log, ready to be handed to a child as its output.
+///
+/// Returns `None` rather than failing the launch. Losing the diagnostics is a worse session;
+/// refusing to start the application because we could not open a log file would be a broken
+/// one, and the wearer did not ask for a log.
+fn open_app_log(program: &str) -> Option<std::fs::File> {
+    let path = app_log_path()?;
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > APP_LOG_LIMIT {
+        let _ = std::fs::remove_file(&path);
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    // A header per launch, so a burst of warnings can be attributed to the thing that made
+    // them. Without it the file is one undifferentiated stream from every app of the session.
+    let _ = writeln!(file, "\n=== {program} ===");
+    let _ = file.flush();
+    Some(file)
+}
 
 /// Split an `Exec` line into a program and arguments.
 ///
@@ -110,6 +158,11 @@ pub fn launch(exec: &str, wayland_display: &str) -> Result<u32, String> {
     let mut args = args.to_vec();
     args.extend(wayland_arguments(program, &args));
 
+    let log = open_app_log(program);
+    let (out, err) = match log.as_ref().and_then(|f| Some((f.try_clone().ok()?, f.try_clone().ok()?))) {
+        Some((a, b)) => (Stdio::from(a), Stdio::from(b)),
+        None => (Stdio::null(), Stdio::null()),
+    };
     let child = Command::new(program)
         .args(&args)
         .env("WAYLAND_DISPLAY", wayland_display)
@@ -118,10 +171,9 @@ pub fn launch(exec: &str, wayland_display: &str) -> Result<u32, String> {
         .env_remove("DISPLAY")
         .env("XDG_SESSION_TYPE", "wayland")
         .stdin(Stdio::null())
-        // Inheriting our stdout would interleave the child's chatter with the compositor's
-        // frame logs, which are the only diagnostics available in a session with no terminal.
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        // Into the application log, not ours and not /dev/null. See `app_log_path`.
+        .stdout(out)
+        .stderr(err)
         .spawn()
         .map_err(|e| format!("could not start {program}: {e}"))?;
 
@@ -271,6 +323,32 @@ mod tests {
         let result = launch("/nonexistent/program/xyzzy", "wayland-1");
         assert!(result.is_err(), "should have failed to start");
         assert!(result.unwrap_err().contains("xyzzy"));
+    }
+
+    #[test]
+    fn what_a_launched_application_says_is_kept_rather_than_discarded() {
+        // The point of the file. This used to go to /dev/null, which is why a settings panel
+        // could report an internal error with nothing anywhere to say what it was.
+        let Some(path) = app_log_path() else {
+            return; // no HOME, which is not a case worth failing a test over
+        };
+        let before = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let marker = "spatiand-launch-test-marker";
+        launch(&format!("/bin/sh -c \"echo {marker} >&2\""), "wayland-test")
+            .expect("sh should start");
+        // The child writes and exits immediately, but "immediately" is not "before this line".
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > before {
+                break;
+            }
+        }
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            text.contains(marker),
+            "what the child wrote to stderr should reach {}",
+            path.display()
+        );
     }
 
     #[test]
