@@ -15,6 +15,21 @@
 
 use crate::grid::Direction;
 
+// There is deliberately no "display and sound" row either.
+//
+// It opened KDE's screen KCM, which on a headset is a panel for rearranging monitors that are
+// not there — and it was the one entry that could take the session down with it, since the
+// module reconfigures the very outputs Spatiand is driving. But the reason it is gone is not
+// that it crashed. Apparent size here is controlled by moving a window in the world, not by a
+// resolution; the glasses have one native mode. A spatial desktop has no display settings in
+// the sense a monitor does, the same way an iPad or a Vision Pro does not. Sound has a
+// picker of its own in the sidecar, which is where the output actually gets chosen.
+//
+// Screen blanking and lock are the one part of that panel that would still mean something,
+// and they are unresolved rather than dismissed: SteamOS's own idle handling and this
+// session have not been tested against each other. When that is settled it belongs as its
+// own row, phrased as what it does, not as a KCM.
+
 // There is deliberately no "stereo on/off" row.
 //
 // Spatiand is a stereo desktop; a mono mode is not a feature of it, it is a broken version of
@@ -63,6 +78,29 @@ pub enum HudAction {
     Dismiss,
 }
 
+/// Which of the desktop's own settings panels exist on this machine.
+///
+/// Two flags rather than one, because they are separately installable: Plasma ships the runner
+/// and the network module, while the Bluetooth module comes from bluedevil. Treating them as a
+/// single "has KDE" answer is what produced a row labelled Bluetooth that only ever opened
+/// Wi-Fi.
+///
+/// The shell does not work this out for itself. It has no filesystem to look at and no
+/// business having one — the compositor asks `spatiand_platform::panel_available` and passes
+/// the answers in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DesktopPanels {
+    pub network: bool,
+    pub bluetooth: bool,
+}
+
+impl DesktopPanels {
+    /// Nothing to shell out to. What a machine without a desktop session gets.
+    pub const NONE: Self = Self { network: false, bluetooth: false };
+    /// Everything present. The Deck, and what the tests assume unless they say otherwise.
+    pub const ALL: Self = Self { network: true, bluetooth: true };
+}
+
 /// One row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HudItem {
@@ -82,14 +120,14 @@ pub struct Hud {
 
 impl Default for Hud {
     fn default() -> Self {
-        Self::new(true)
+        Self::new(DesktopPanels::ALL)
     }
 }
 
 impl Hud {
-    /// Build the HUD. `has_desktop_settings` hides the entries that shell out to KDE on a
-    /// system without it, rather than offering a row that does nothing.
-    pub fn new(has_desktop_settings: bool) -> Self {
+    /// Build the HUD. `panels` hides the entries that shell out to the desktop's own settings
+    /// on a system that does not have them, rather than offering a row that does nothing.
+    pub fn new(panels: DesktopPanels) -> Self {
         let mut items = vec![
             HudItem {
                 label: "Recentre",
@@ -117,16 +155,18 @@ impl Hud {
                 action: HudAction::Screenshot,
             },
         ];
-        if has_desktop_settings {
+        if panels.network {
             items.push(HudItem {
-                label: "Wi-Fi and Bluetooth",
-                detail: "Opens the system panel as a window in front of you",
+                label: "Wi-Fi",
+                detail: "Join a network, in the system panel as a window in front of you",
                 action: HudAction::OpenSystemSettings("kcm_networkmanagement"),
             });
+        }
+        if panels.bluetooth {
             items.push(HudItem {
-                label: "Display and sound",
-                detail: "Opens the system panel as a window in front of you",
-                action: HudAction::OpenSystemSettings("kcm_kscreen"),
+                label: "Bluetooth",
+                detail: "Pair headphones or a controller, in a window in front of you",
+                action: HudAction::OpenSystemSettings("kcm_bluetooth"),
             });
         }
         items.push(HudItem {
@@ -191,20 +231,20 @@ mod tests {
 
     #[test]
     fn the_hud_is_never_empty_so_focused_cannot_panic() {
-        assert!(!Hud::new(false).items().is_empty());
-        assert!(!Hud::new(true).items().is_empty());
+        assert!(!Hud::new(DesktopPanels::NONE).items().is_empty());
+        assert!(!Hud::new(DesktopPanels::ALL).items().is_empty());
     }
 
     #[test]
     fn a_system_without_kde_is_not_offered_kde_panels() {
         // Offering a row that silently does nothing is worse than not offering it: the wearer
         // concludes the whole HUD is broken.
-        let bare = Hud::new(false);
+        let bare = Hud::new(DesktopPanels::NONE);
         assert!(!bare
             .items()
             .iter()
             .any(|i| matches!(i.action, HudAction::OpenSystemSettings(_))));
-        let full = Hud::new(true);
+        let full = Hud::new(DesktopPanels::ALL);
         assert!(full
             .items()
             .iter()
@@ -212,11 +252,59 @@ mod tests {
     }
 
     #[test]
+    fn wifi_and_bluetooth_are_separate_rows_that_open_separate_panels() {
+        // They were one row labelled "Wi-Fi and Bluetooth" that opened the network module and
+        // nothing else, so half the label was a lie. Two rows, two modules.
+        let hud = Hud::new(DesktopPanels::ALL);
+        let modules: Vec<_> = hud
+            .items()
+            .iter()
+            .filter_map(|i| match i.action {
+                HudAction::OpenSystemSettings(m) => Some((i.label, m)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            modules,
+            vec![("Wi-Fi", "kcm_networkmanagement"), ("Bluetooth", "kcm_bluetooth")]
+        );
+    }
+
+    #[test]
+    fn bluetooth_can_be_absent_while_wifi_is_present() {
+        // The reason this is two flags: the runner and the network module ship with Plasma,
+        // the Bluetooth one ships with bluedevil. One installed without the other is ordinary.
+        let hud = Hud::new(DesktopPanels { network: true, bluetooth: false });
+        let modules: Vec<_> = hud
+            .items()
+            .iter()
+            .filter_map(|i| match i.action {
+                HudAction::OpenSystemSettings(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(modules, vec!["kcm_networkmanagement"]);
+    }
+
+    #[test]
+    fn there_is_no_display_settings_row() {
+        // Removed on purpose, and worth a test rather than only a comment: the pull to add
+        // "just a resolution setting" back is constant, and on a headset it means nothing.
+        // Apparent size comes from where a window sits in the world.
+        for panels in [DesktopPanels::ALL, DesktopPanels::NONE] {
+            assert!(!Hud::new(panels).items().iter().any(|i| matches!(
+                i.action,
+                HudAction::OpenSystemSettings("kcm_kscreen")
+            )));
+        }
+    }
+
+    #[test]
     fn leaving_is_always_the_last_entry() {
         // Muscle memory: "down until it stops, then A" should always be the way out, whether
         // or not the optional rows are present.
-        for kde in [true, false] {
-            let hud = Hud::new(kde);
+        for panels in [DesktopPanels::ALL, DesktopPanels::NONE] {
+            let hud = Hud::new(panels);
             assert_eq!(hud.items().last().map(|i| i.action.clone()), Some(HudAction::ReturnToDesktop));
         }
     }

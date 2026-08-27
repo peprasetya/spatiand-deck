@@ -11,7 +11,9 @@
 pub mod desktop_entry;
 pub mod icons;
 pub mod launch;
+pub mod settings;
 
 pub use desktop_entry::{icon_for_app, scan, DesktopEntry};
 pub use icons::resolve as resolve_icon;
 pub use launch::launch;
+pub use settings::{has_desktop_settings, panel_available};

@@ -23,7 +23,7 @@ pub mod keyboard;
 pub mod launcher;
 
 pub use grid::{Direction as NavDirection, Grid};
-pub use hud::{Hud, HudAction, HudItem};
+pub use hud::{DesktopPanels, Hud, HudAction, HudItem};
 pub use keyboard::{Key, Keyboard};
 pub use category::{Group, GROUPS};
 pub use environment::{
@@ -87,10 +87,10 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn new(apps: Vec<AppEntry>, has_desktop_settings: bool) -> Self {
+    pub fn new(apps: Vec<AppEntry>, panels: DesktopPanels) -> Self {
         Self {
             mode: Mode::World,
-            hud: Hud::new(has_desktop_settings),
+            hud: Hud::new(panels),
             launcher: Launcher::new(apps),
             environments: EnvironmentPicker::default(),
             files: FileBrowser::default(),
@@ -265,7 +265,7 @@ mod tests {
     }
 
     fn shell() -> Shell {
-        Shell::new(vec![app("alpha"), app("beta"), app("gamma")], true)
+        Shell::new(vec![app("alpha"), app("beta"), app("gamma")], DesktopPanels::ALL)
     }
 
     #[test]
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn an_empty_launcher_cannot_launch_anything() {
-        let mut s = Shell::new(vec![], true);
+        let mut s = Shell::new(vec![], DesktopPanels::ALL);
         s.handle(Intent::ToggleLauncher);
         assert_eq!(s.handle(Intent::Accept), None);
         // And it must stay open rather than silently dropping you back into the world, which

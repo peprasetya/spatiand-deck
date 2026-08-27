@@ -49,7 +49,7 @@ use smithay::utils::{DeviceFd, Transform};
 use spatiand_hmd::{DisplayMode, HmdEvent};
 use spatiand_render::ray::{ray_from_pad, PointerConfig};
 use spatiand_render::{EyeSide, StereoConfig, TextRenderer};
-use spatiand_shell::{HudAction, Mode, Shell, ShellEvent};
+use spatiand_shell::{DesktopPanels, HudAction, Mode, Shell, ShellEvent};
 use spatiand_track::{AxisMap, HeadTracker, TrackerConfig};
 
 use crate::calib::Calibration;
@@ -242,9 +242,18 @@ pub fn run(
         })
         .collect();
     log::info!("launcher: {} application(s)", apps.len());
-    let has_kde = std::path::Path::new("/usr/bin/kcmshell6").exists()
-        || std::path::Path::new("/usr/bin/systemsettings").exists();
-    let mut shell = Shell::new(apps, has_kde);
+    // Asked per panel rather than once. "A desktop is installed" does not imply "the
+    // Bluetooth module is installed", and a row that opens nothing reads as a broken HUD.
+    let panels = DesktopPanels {
+        network: spatiand_platform::panel_available("kcm_networkmanagement"),
+        bluetooth: spatiand_platform::panel_available("kcm_bluetooth"),
+    };
+    log::info!(
+        "desktop settings panels: wi-fi {}, bluetooth {}",
+        panels.network,
+        panels.bluetooth
+    );
+    let mut shell = Shell::new(apps, panels);
     let mut environments = Environments::discover();
     shell.set_environments(environments.entries(), environments.choice());
     let mut browser = crate::environment::Browser::new();

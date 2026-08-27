@@ -168,6 +168,7 @@ mod tests {
     use super::*;
     use spatiand_shell::grid::Direction;
     use spatiand_shell::hud::HudAction;
+    use spatiand_shell::DesktopPanels;
     use spatiand_shell::Intent;
 
     /// Walk the settings list to the environment row and press A.
@@ -186,14 +187,14 @@ mod tests {
     }
 
     fn hud_shell() -> Shell {
-        let mut shell = Shell::new(Vec::new(), true);
+        let mut shell = Shell::new(Vec::new(), DesktopPanels::ALL);
         shell.handle(Intent::ToggleHud);
         shell
     }
 
     #[test]
     fn the_world_has_no_menu() {
-        assert!(model(&Shell::new(Vec::new(), true)).is_none());
+        assert!(model(&Shell::new(Vec::new(), DesktopPanels::ALL)).is_none());
     }
 
     #[test]
