@@ -75,7 +75,15 @@ export SPATIAND_BACKEND=drm
 export RUST_BACKTRACE=1
 # Log where it can be read after the fact: a session that fails at startup leaves no terminal
 # to have shown the error in.
-exec "$BIN" >"\$HOME/.local/share/spatiand-session.log" 2>&1
+#
+# The previous log is kept, because truncating it here destroys the only copy of exactly the
+# thing worth reading. A session that dies is followed within seconds by SDDM starting
+# another, and that next session opened this file with > and wiped the crash that caused it.
+# One crash report arrived with nothing behind it for precisely that reason.
+LOG="\$HOME/.local/share/spatiand-session.log"
+mkdir -p "\$(dirname "\$LOG")"
+[ -f "\$LOG" ] && mv -f "\$LOG" "\$LOG.1"
+exec "$BIN" >"\$LOG" 2>&1
 EOF
 chmod +x "$LAUNCHER"
 
@@ -99,4 +107,5 @@ echo "    steamosctl switch-to-game-mode"
 echo "    steamosctl switch-to-desktop-mode plasma.desktop"
 echo
 echo "If a session fails to start, SDDM returns you to the login screen and the reason is in"
-echo "    ~/.local/share/spatiand-session.log"
+echo "    ~/.local/share/spatiand-session.log       (this session)"
+echo "    ~/.local/share/spatiand-session.log.1     (the one before -- where a crash will be)"
