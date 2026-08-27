@@ -21,7 +21,8 @@
 //! the arc's edges and anything hanging below the eye line get checked.
 //!
 //! `sidecar` draws the Deck's own panel instead of the glasses, at its real 800x1280, and
-//! takes `SPATIAND_VIEW_PAGE=keyboard` for its second page.
+//! takes `SPATIAND_VIEW_PAGE=keyboard` for its second page and `SPATIAND_VIEW_EXIT=0..1` to
+//! catch the exit button part-way through its hold.
 //!
 //! `SPATIAND_CLIENT` goes further and launches a real Wayland application into the snapshot:
 //! a full compositor runs, the client connects, commits a buffer, and the frame is rendered
@@ -521,6 +522,13 @@ fn draw_sidecar(
     let mut ui = crate::sidecar::Sidecar::new(scene.white(), panel);
     if std::env::var("SPATIAND_VIEW_PAGE").as_deref() == Ok("keyboard") {
         ui.show(crate::sidecar::Page::Keyboard);
+    }
+    // `SPATIAND_VIEW_EXIT=0.6` draws the exit button part-way through its hold, which is the
+    // only way to see the fill without a Deck and a spare finger.
+    if let Ok(progress) = std::env::var("SPATIAND_VIEW_EXIT") {
+        if let Ok(progress) = progress.parse::<f32>() {
+            ui.pose_exit_hold(progress);
+        }
     }
     let levels = crate::sidecar::Levels {
         screen: Some(0.62),

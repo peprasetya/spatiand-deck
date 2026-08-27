@@ -846,6 +846,16 @@ pub fn run(
                     },
                 }
             }
+            // The sidecar's exit button, which fires on the clock rather than on an event: a
+            // finger resting perfectly still sends no motion, so nothing would ever notice the
+            // hold completing. Decided here with every other way out, so all of them go
+            // through the one block that hands the hardware back.
+            if let Some(ui) = sidecar_ui.as_mut() {
+                if ui.settle() == Some(crate::sidecar::Action::LeaveSession) {
+                    log::info!("exit held on the sidecar — returning to the desktop");
+                    leaving = true;
+                }
+            }
             // A signal is a request to leave, handled exactly like the button that means the
             // same thing -- so the controller gets handed back and the glasses go back to 2D.
             if crate::shutdown::requested() {
@@ -1786,6 +1796,10 @@ pub fn run(
                                     }
                                     continue;
                                 }
+                                // Never produced by a touch: the hold is decided on the clock,
+                                // by `settle`, above. Listed so that adding a way for a touch
+                                // to end the session has to be a deliberate edit here.
+                                crate::sidecar::Action::LeaveSession => continue,
                                 crate::sidecar::Action::PressKey(key) => {
                                     // The same keyboard the 3D one uses, so a shift latched on
                                     // the panel is latched in the world too -- two copies of

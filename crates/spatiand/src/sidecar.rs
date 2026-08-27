@@ -73,6 +73,35 @@ const DEVICE_TEXT: f32 = 22.0;
 const DEVICE_ROW: f32 = 54.0;
 /// The page-swap button in the header.
 const PAGE_BUTTON_HEIGHT: f32 = 64.0;
+/// The header buttons carry a symbol rather than a word, so they are sized for the finger
+/// rather than for the longest label. A capsule half again as wide as it is tall still reads
+/// as a button and still gives a fingertip about 100 x 64 px to land in.
+const HEADER_BUTTON_WIDTH: f32 = PAGE_BUTTON_HEIGHT * 1.6;
+/// How large to set each header symbol, as a multiple of the button's height.
+///
+/// A size per symbol rather than one for all of them, and not a taste decision. A font size is
+/// the em box, and these glyphs fill very different fractions of theirs: measured on the
+/// Deck's own fonts, set at a nominal 33 px in a 64 px capsule, the power symbol inks 12 px
+/// while the keyboard inks 17 px. Setting both from one number is what made the power symbol
+/// look like a speck beside a full-size keyboard. These bring all three to roughly 28 px of
+/// ink -- a little under half the capsule, which is what a button's icon wants to be.
+///
+/// Re-measure these if the symbols change or the font stack does. `tools/`'s snapshot backend
+/// renders the sidecar headlessly, which is how the numbers above were arrived at.
+const POWER_SYMBOL: f32 = PAGE_BUTTON_HEIGHT * 1.20;
+const KEYBOARD_SYMBOL: f32 = PAGE_BUTTON_HEIGHT * 0.85;
+const DASHBOARD_SYMBOL: f32 = PAGE_BUTTON_HEIGHT * 0.80;
+/// How long the exit button has to be held before the session ends.
+///
+/// A tap will not do it. Leaving closes every window in the session, and this control sits on
+/// a bare touchscreen that spends the whole session face-up on a table with the wearer unable
+/// to see it -- the one surface in the machine most likely to be brushed by accident. Holding
+/// is the cheapest thing that cannot happen by accident, and the button fills while held so
+/// the requirement explains itself rather than needing a caption.
+const HOLD_TO_EXIT: std::time::Duration = std::time::Duration::from_millis(1200);
+/// The exit button while it is filling. Red, because this is the one control on the panel that
+/// throws work away.
+const DANGER: [f32; 4] = [0.90, 0.32, 0.30, 1.0];
 /// Gap between neighbouring keycaps on the panel, as a fraction of a cell's shorter side.
 ///
 /// Larger than the 3D keyboard's, because this one is hit with a fingertip about 9 mm across
@@ -141,10 +170,19 @@ pub enum Page {
 
 impl Page {
     /// What the button offers, which is the page you are *not* on.
-    fn button_label(self) -> &'static str {
+    ///
+    /// A symbol rather than the word, because the word was doing no work. There are exactly
+    /// two pages and the button always shows the other one, so nothing has to be read -- and
+    /// on a panel glanced down at from inside a headset, a shape is recognised faster than a
+    /// word is. Both of these are in DejaVu Sans, which is on every system that has fontconfig
+    /// at all; see the sidecar's glyph test.
+    fn button_label(self) -> (&'static str, f32) {
         match self {
-            Page::Dashboard => "Keyboard",
-            Page::Keyboard => "Dashboard",
+            // U+2328 KEYBOARD.
+            Page::Dashboard => ("\u{2328}", KEYBOARD_SYMBOL),
+            // U+25A6 SQUARE WITH ORTHOGONAL CROSSHATCH FILL -- a grid of panes, which is what
+            // the dashboard is.
+            Page::Keyboard => ("\u{25A6}", DASHBOARD_SYMBOL),
         }
     }
 
@@ -241,6 +279,8 @@ pub enum Action {
     /// own business, and it is shared with the one hanging in the world. Deciding it twice
     /// would let shift be on in one place and off in the other.
     PressKey(&'static spatiand_shell::keyboard::Key),
+    /// The exit button was held long enough. End the session and go back to the desktop.
+    LeaveSession,
 }
 
 /// Every row of the sidecar, worked out once.
@@ -392,6 +432,9 @@ pub struct Sidecar {
     /// touch keyboard gives no sign it registered anything, which on a panel with no travel is
     /// the whole of the feedback.
     pressed: Vec<(usize, &'static spatiand_shell::keyboard::Key)>,
+    /// Which finger is holding the exit button, and since when. Cleared the moment it lifts or
+    /// slides off, so backing out is simply a matter of moving away before it fills.
+    exit_hold: Option<(usize, std::time::Instant)>,
 }
 
 impl Sidecar {
@@ -413,6 +456,7 @@ impl Sidecar {
             touches: Vec::new(),
             page: Page::default(),
             pressed: Vec::new(),
+            exit_hold: None,
         }
     }
 
@@ -430,13 +474,74 @@ impl Sidecar {
     /// not about a reading — putting it in the grid would make it look like a fourth setting.
     pub fn page_button(&self) -> Rect {
         let header = self.rows(Levels::default()).header;
-        let w = 260.0f32.min(header.w * 0.42);
+        let w = HEADER_BUTTON_WIDTH.min(header.w * 0.42);
         Rect {
             x: header.x + header.w - w,
             y: header.y + (header.h - PAGE_BUTTON_HEIGHT) * 0.5,
             w,
             h: PAGE_BUTTON_HEIGHT,
         }
+    }
+
+    /// The button that ends the session, at the left-hand end of the header.
+    ///
+    /// The far end from the page button on purpose. These are the only two controls in the
+    /// header, one is harmless and the other throws the session away, and putting them within
+    /// a thumb's width of each other is how the harmless one gets mis-hit into the other. The
+    /// clock is set to the right of this rather than at the margin, so the two never overlap.
+    pub fn exit_button(&self) -> Rect {
+        let header = self.rows(Levels::default()).header;
+        Rect {
+            x: header.x,
+            y: header.y + (header.h - PAGE_BUTTON_HEIGHT) * 0.5,
+            w: HEADER_BUTTON_WIDTH.min(header.w * 0.42),
+            h: PAGE_BUTTON_HEIGHT,
+        }
+    }
+
+    /// Where the clock starts: clear of the exit button.
+    fn clock_x(&self) -> f32 {
+        let button = self.exit_button();
+        button.x + button.w + CARD_GAP
+    }
+
+    /// Pose the exit hold at a given fraction, for the snapshot backend.
+    ///
+    /// The fill is the only thing that tells anyone the button wants a hold rather than a tap,
+    /// so it has to be *looked at*, and a headless render is the only way to look at it
+    /// without a Deck and a spare finger. Same reasoning as `SPATIAND_VIEW_HOVER` on the
+    /// keyboard: state that only exists mid-gesture is state no still frame can otherwise show.
+    pub fn pose_exit_hold(&mut self, progress: f32) {
+        let progress = progress.clamp(0.0, 1.0);
+        let elapsed = HOLD_TO_EXIT.mul_f32(progress);
+        self.exit_hold = std::time::Instant::now()
+            .checked_sub(elapsed)
+            .map(|since| (0, since));
+    }
+
+    /// How far through the exit hold we are, 0..1. The button fills by this much.
+    pub fn exit_progress(&self) -> f32 {
+        match self.exit_hold {
+            Some((_, since)) => {
+                (since.elapsed().as_secs_f32() / HOLD_TO_EXIT.as_secs_f32()).clamp(0.0, 1.0)
+            }
+            None => 0.0,
+        }
+    }
+
+    /// Call once a frame, whether or not any touch arrived.
+    ///
+    /// The hold completes on the clock, not on an event: a finger resting perfectly still
+    /// generates no motion, so waiting for one to notice would mean the button only fired if
+    /// you wobbled. `touch` cannot answer this for the same reason -- it is not called on a
+    /// frame with no events.
+    pub fn settle(&mut self) -> Option<Action> {
+        let (_, since) = self.exit_hold?;
+        if since.elapsed() >= HOLD_TO_EXIT {
+            self.exit_hold = None;
+            return Some(Action::LeaveSession);
+        }
+        None
     }
 
     /// Where the keyboard is drawn, in landscape pixels.
@@ -617,6 +722,13 @@ impl Sidecar {
                         continue;
                     }
 
+                    // Exit starts a hold rather than doing anything. Nothing is emitted here;
+                    // `settle` decides, once the finger has stayed put long enough.
+                    if self.exit_button().contains(x, y) {
+                        self.exit_hold = Some((c.slot, std::time::Instant::now()));
+                        continue;
+                    }
+
                     if self.page == Page::Keyboard {
                         // Typed on the way down, like every other touch keyboard. Waiting for
                         // the lift puts a visible delay between the tap and the character.
@@ -651,6 +763,13 @@ impl Sidecar {
                             *entry = (c.slot, x, y);
                         }
                     }
+                    // Sliding off cancels. That is the way out of a hold begun by accident,
+                    // and it is the one every press-and-hold control on a phone already has.
+                    if self.exit_hold.map(|(slot, _)| slot) == Some(c.slot)
+                        && !self.exit_button().contains(x, y)
+                    {
+                        self.exit_hold = None;
+                    }
                     if let Some((slot, knob)) = self.held {
                         if slot == c.slot {
                             changed.push(Action::Moved(knob));
@@ -660,6 +779,9 @@ impl Sidecar {
                 TouchEvent::Up { slot } => {
                     self.touches.retain(|(s, _, _)| *s != slot);
                     self.pressed.retain(|(s, _)| *s != slot);
+                    if self.exit_hold.map(|(s, _)| s) == Some(slot) {
+                        self.exit_hold = None;
+                    }
                     if self.held.map(|(s, _)| s) == Some(slot) {
                         self.held = None;
                     }
@@ -775,6 +897,37 @@ impl Sidecar {
         // The page button, on both pages, so there is always a way back.
         let button = self.page_button();
         round(button, TRACK, button.h * 0.5);
+
+        // The exit button, on both pages for the same reason. Its plate fills red from the
+        // left as it is held, so the hold is visibly doing something and its length is
+        // visible rather than guessed at. A tap paints a sliver and stops, which reads as
+        // "not yet" -- the right answer for a control that must not fire by accident.
+        let exit = self.exit_button();
+        round(exit, TRACK, exit.h * 0.5);
+        // A fill inside the capsule rather than one the same size as it. Two earlier shapes
+        // were wrong for instructive reasons: a fill floored at the capsule's own height could
+        // not be drawn narrower than 64 px in a 102 px button, so the first two thirds of the
+        // hold all painted the same shape and it looked committed the moment it was touched;
+        // and a fill sharing the capsule's bounds but not its corner radius poked its square
+        // corners out through the rounded ends. Inset, it is the same track-and-fill the
+        // sliders below already use, and it grows from a dot to a pill across the whole hold.
+        let progress = self.exit_progress();
+        let inset = 5.0f32;
+        let track_w = (exit.w - inset * 2.0).max(0.0);
+        let w = track_w * progress;
+        if w >= 1.0 {
+            let full = (exit.h - inset * 2.0).max(1.0);
+            // Round while it is narrower than it is tall, so the fill begins as a dot and
+            // becomes a pill rather than starting as a full-height hairline. A hairline is not
+            // only ugly -- at one pixel wide it stands taller than the capsule's own rounded
+            // end is at that x, so it visibly pokes out through the curve.
+            let h = full.min(w);
+            round(
+                Rect { x: exit.x + inset, y: exit.y + (exit.h - h) * 0.5, w, h },
+                DANGER,
+                h * 0.5,
+            );
+        }
 
         if self.page == Page::Keyboard {
             self.draw_keys(gl, &round, keyboard);
@@ -1013,16 +1166,24 @@ impl Sidecar {
         let rows = self.rows(levels);
         let mut out = Vec::new();
 
-        // The page button's own label, centred in its capsule.
-        let button = self.page_button();
-        let button_text = self.page.button_label().to_string();
-        if let Some(entry) = self.label(renderer, text, &button_text, LABEL_TEXT * 1.35) {
-            let width = LABEL_TEXT * entry.1.max(0.01);
+        // Both header buttons carry a symbol, centred in its capsule.
+        let (page_glyph, page_size) = self.page.button_label();
+        for (rect, glyph, size) in [
+            (self.page_button(), page_glyph, page_size),
+            // U+23FB POWER SYMBOL. Not a word: "Exit Spatiand" in a capsule this size would
+            // have to be set small enough to stop being glanceable, and the power symbol is
+            // the one piece of iconography everyone already reads without being taught.
+            (self.exit_button(), "\u{23FB}", POWER_SYMBOL),
+        ] {
+            let Some(entry) = self.label(renderer, text, glyph, size * 1.35) else {
+                continue;
+            };
+            let width = size * entry.1.max(0.01);
             out.push(Label {
                 texture: entry,
-                x: button.x + (button.w - width) * 0.5,
-                y: button.y + (button.h - LABEL_TEXT) * 0.5,
-                height: LABEL_TEXT,
+                x: rect.x + (rect.w - width) * 0.5,
+                y: rect.y + (rect.h - size) * 0.5,
+                height: size,
                 colour: INK,
             });
         }
@@ -1033,7 +1194,7 @@ impl Sidecar {
             if let Some(entry) = self.label(renderer, text, status, HEADER_TEXT * 1.35) {
                 out.push(Label {
                     texture: entry,
-                    x: rows.header.x + 4.0,
+                    x: self.clock_x(),
                     y: rows.header.y + (rows.header.h - HEADER_TEXT) * 0.5,
                     height: HEADER_TEXT,
                     colour: INK,
@@ -1089,12 +1250,13 @@ impl Sidecar {
 
         // The clock, large, on the ground rather than on a plate.
         let header = rows.header;
+        let clock_x = self.clock_x();
         push(
             self,
             renderer,
             text,
             status.to_string(),
-            header.x + 4.0,
+            clock_x,
             header.y + (header.h - HEADER_TEXT) * 0.5,
             HEADER_TEXT,
             false,
@@ -1239,6 +1401,113 @@ mod tests {
             (1.0 - ly / h, lx / w)
         } else {
             (lx / w, ly / h)
+        }
+    }
+
+    fn up(slot: usize) -> spatiand_input::TouchEvent {
+        spatiand_input::TouchEvent::Up { slot }
+    }
+
+    fn motion(slot: usize, x: f32, y: f32) -> spatiand_input::TouchEvent {
+        spatiand_input::TouchEvent::Motion(spatiand_input::Contact { slot, id: slot as i32, x, y })
+    }
+
+    fn centre(r: Rect) -> (f32, f32) {
+        (r.x + r.w * 0.5, r.y + r.h * 0.5)
+    }
+
+    #[test]
+    fn tapping_exit_does_not_end_the_session() {
+        // The whole reason this is a hold. The panel lies face-up on a table for the length of
+        // a session while the wearer cannot see it, so a tap is something that happens to it,
+        // not something someone meant.
+        let mut s = sidecar((800, 1280));
+        let (cx, cy) = centre(s.exit_button());
+        let (u, v) = touch_at(&s, cx, cy);
+        assert!(s.touch(&[down(0, u, v)], all(), &Audio::default()).is_empty());
+        assert_eq!(s.settle(), None, "a hold that has just begun has not finished");
+        s.touch(&[up(0)], all(), &Audio::default());
+        assert_eq!(s.settle(), None, "lifting abandons the hold");
+        assert_eq!(s.exit_progress(), 0.0);
+    }
+
+    #[test]
+    fn sliding_off_exit_abandons_the_hold() {
+        // The way out of a hold begun by accident, and the one every press-and-hold control on
+        // a phone already has. Without it the only escape from a brushed button is to be quick.
+        let mut s = sidecar((800, 1280));
+        let exit = s.exit_button();
+        let (cx, cy) = centre(exit);
+        let (u, v) = touch_at(&s, cx, cy);
+        s.touch(&[down(0, u, v)], all(), &Audio::default());
+        assert!(s.exit_hold.is_some());
+
+        let (fu, fv) = touch_at(&s, exit.x + exit.w * 2.0, cy);
+        s.touch(&[motion(0, fu, fv)], all(), &Audio::default());
+        assert!(s.exit_hold.is_none(), "moving off the button should cancel");
+        assert_eq!(s.settle(), None);
+    }
+
+    #[test]
+    fn a_completed_hold_asks_to_leave_exactly_once() {
+        let mut s = sidecar((800, 1280));
+        let (cx, cy) = centre(s.exit_button());
+        let (u, v) = touch_at(&s, cx, cy);
+        s.touch(&[down(0, u, v)], all(), &Audio::default());
+        // Reach back in time rather than sleeping for the hold: a test that takes more than a
+        // second to say one thing is a test people start skipping.
+        s.exit_hold = Some((0, std::time::Instant::now() - HOLD_TO_EXIT));
+        assert_eq!(s.exit_progress(), 1.0);
+        assert_eq!(s.settle(), Some(Action::LeaveSession));
+        assert_eq!(s.settle(), None, "leaving twice would run the teardown twice");
+    }
+
+    #[test]
+    fn the_exit_and_page_buttons_are_at_opposite_ends_and_do_not_touch() {
+        // They are the only two controls in the header; one is harmless and the other throws
+        // the session away. A thumb aiming at either must not be able to reach the other.
+        for panel in [(800u32, 1280u32), (1280, 800), (1920, 1080)] {
+            let s = sidecar(panel);
+            let exit = s.exit_button();
+            let page = s.page_button();
+            let header = s.rows(all()).header;
+            assert_eq!(exit.x, header.x, "exit sits at the left edge of the header");
+            assert_eq!(page.x + page.w, header.x + header.w, "the page button sits at the right");
+            assert!(
+                exit.x + exit.w < page.x,
+                "{panel:?}: the header buttons overlap"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clock_starts_clear_of_the_exit_button() {
+        // The clock used to start at the header's left margin, which is now where the button
+        // is. Text drawn under a button is unreadable and the button takes the touch.
+        let s = sidecar((800, 1280));
+        let exit = s.exit_button();
+        assert!(s.clock_x() >= exit.x + exit.w, "the clock would overlap the exit button");
+    }
+
+    #[test]
+    fn the_header_buttons_are_still_big_enough_for_a_finger() {
+        // Swapping words for symbols is not a licence to shrink the target. A fingertip is
+        // about 9 mm, which on this panel is a little over 40 px.
+        let s = sidecar((800, 1280));
+        for r in [s.exit_button(), s.page_button()] {
+            assert!(r.w >= 60.0 && r.h >= 60.0, "{r:?} is too small to hit");
+        }
+    }
+
+    #[test]
+    fn every_header_symbol_is_one_character_and_not_a_word() {
+        // The point of the change. A regression here means a caption crept back in, which at
+        // this size would have to be set too small to glance at.
+        for page in [Page::Dashboard, Page::Keyboard] {
+            let (label, size) = page.button_label();
+            assert_eq!(label.chars().count(), 1, "{label:?} should be a single symbol");
+            assert!(!label.is_ascii(), "{label:?} should be a symbol, not a letter");
+            assert!(size > 0.0, "{label:?} has no size");
         }
     }
 
