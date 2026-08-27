@@ -72,7 +72,12 @@ pub enum HudAction {
     OpenEnvironments,
     /// Hand the display back and return to the desktop session.
     ReturnToDesktop,
-    /// Float a system settings panel as a 2D window.
+    /// Float one of the desktop's own settings panels as a 2D window.
+    ///
+    /// Carries what the panel *is* -- "wifi", "bluetooth" -- and not how to open it. It used
+    /// to carry a KDE settings-module name, which put one desktop's vocabulary in the crate
+    /// that is meant not to have any. The compositor asks
+    /// `spatiand_platform::settings_command` what that means on this machine.
     OpenSystemSettings(&'static str),
     /// Close the HUD.
     Dismiss,
@@ -159,14 +164,14 @@ impl Hud {
             items.push(HudItem {
                 label: "Wi-Fi",
                 detail: "Join a network, in the system panel as a window in front of you",
-                action: HudAction::OpenSystemSettings("kcm_networkmanagement"),
+                action: HudAction::OpenSystemSettings("wifi"),
             });
         }
         if panels.bluetooth {
             items.push(HudItem {
                 label: "Bluetooth",
                 detail: "Pair headphones or a controller, in a window in front of you",
-                action: HudAction::OpenSystemSettings("kcm_bluetooth"),
+                action: HudAction::OpenSystemSettings("bluetooth"),
             });
         }
         items.push(HudItem {
@@ -266,7 +271,7 @@ mod tests {
             .collect();
         assert_eq!(
             modules,
-            vec![("Wi-Fi", "kcm_networkmanagement"), ("Bluetooth", "kcm_bluetooth")]
+            vec![("Wi-Fi", "wifi"), ("Bluetooth", "bluetooth")]
         );
     }
 
@@ -283,7 +288,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(modules, vec!["kcm_networkmanagement"]);
+        assert_eq!(modules, vec!["wifi"]);
     }
 
     #[test]
@@ -294,7 +299,7 @@ mod tests {
         for panels in [DesktopPanels::ALL, DesktopPanels::NONE] {
             assert!(!Hud::new(panels).items().iter().any(|i| matches!(
                 i.action,
-                HudAction::OpenSystemSettings("kcm_kscreen")
+                HudAction::OpenSystemSettings("display")
             )));
         }
     }

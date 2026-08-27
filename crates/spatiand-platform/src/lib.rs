@@ -16,4 +16,4 @@ pub mod settings;
 pub use desktop_entry::{icon_for_app, scan, DesktopEntry};
 pub use icons::resolve as resolve_icon;
 pub use launch::launch;
-pub use settings::{has_desktop_settings, panel_available};
+pub use settings::{has_desktop_settings, panel_available, settings_command};

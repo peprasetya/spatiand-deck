@@ -179,8 +179,8 @@ pub fn run(
     // Asked per panel rather than once. "A desktop is installed" does not imply "the
     // Bluetooth module is installed", and a row that opens nothing reads as a broken HUD.
     let panels = DesktopPanels {
-        network: spatiand_platform::panel_available("kcm_networkmanagement"),
-        bluetooth: spatiand_platform::panel_available("kcm_bluetooth"),
+        network: spatiand_platform::panel_available("wifi"),
+        bluetooth: spatiand_platform::panel_available("bluetooth"),
     };
     log::info!(
         "desktop settings panels: wi-fi {}, bluetooth {}",
@@ -312,12 +312,20 @@ pub fn run(
                             environments.refresh();
                             shell.set_environments(environments.entries(), environments.choice());
                         }
-                        HudAction::OpenSystemSettings(module) => {
-                            let command = format!("kcmshell6 {module}");
-                            if let Err(e) =
-                                spatiand_platform::launch(&command, &runtime.state.socket_name)
-                            {
-                                log::warn!("could not open {module}: {e}");
+                        HudAction::OpenSystemSettings(panel) => {
+                            // What "wifi" means on this machine is the platform crate's
+                            // business, not the shell's and not this loop's.
+                            match spatiand_platform::settings_command(panel) {
+                                Some(command) => {
+                                    log::info!("{panel}: {command}");
+                                    if let Err(e) = spatiand_platform::launch(
+                                        &command,
+                                        &runtime.state.socket_name,
+                                    ) {
+                                        log::warn!("could not open {panel}: {e}");
+                                    }
+                                }
+                                None => log::warn!("no way to open {panel} on this system"),
                             }
                         }
                         // Nothing to hand back in a window on someone else's desktop.

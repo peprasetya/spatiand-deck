@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use glam::{DQuat, DVec3};
 use smithay::desktop::Window;
+use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::Resource;
 
 /// Where a window sits, in the viewer-centred frame.
@@ -86,7 +87,7 @@ pub struct WindowLayout {
     placements: HashMap<usize, Placement>,
     focused: Option<usize>,
     next_id: usize,
-    ids: HashMap<String, usize>,
+    ids: HashMap<ObjectId, usize>,
 }
 
 impl WindowLayout {
@@ -123,10 +124,11 @@ impl WindowLayout {
             radius: Placement::default().radius + Self::fan_rank(n) * 0.06,
             ..Default::default()
         };
-        let id = self.id_for(window);
-        self.placements.insert(id, placement);
-        if self.focused.is_none() {
-            self.focused = Some(id);
+        if let Some(id) = self.id_for(window) {
+            self.placements.insert(id, placement);
+            if self.focused.is_none() {
+                self.focused = Some(id);
+            }
         }
         placement
     }
@@ -156,16 +158,20 @@ impl WindowLayout {
     }
 
     pub fn get(&self, window: &Window) -> Option<Placement> {
-        self.ids.get(&Self::key(window)).and_then(|id| self.placements.get(id)).copied()
+        let key = Self::key(window)?;
+        self.ids.get(&key).and_then(|id| self.placements.get(id)).copied()
     }
 
     pub fn set(&mut self, window: &Window, placement: Placement) {
-        let id = self.id_for(window);
-        self.placements.insert(id, placement);
+        if let Some(id) = self.id_for(window) {
+            self.placements.insert(id, placement);
+        }
     }
 
     pub fn remove(&mut self, window: &Window) {
-        let key = Self::key(window);
+        let Some(key) = Self::key(window) else {
+            return;
+        };
         if let Some(id) = self.ids.remove(&key) {
             self.placements.remove(&id);
             if self.focused == Some(id) {
@@ -175,11 +181,13 @@ impl WindowLayout {
     }
 
     pub fn is_focused(&self, window: &Window) -> bool {
-        self.ids.get(&Self::key(window)).copied() == self.focused
+        Self::key(window).and_then(|k| self.ids.get(&k).copied()) == self.focused
     }
 
     pub fn focus(&mut self, window: &Window) {
-        self.focused = Some(self.id_for(window));
+        if let Some(id) = self.id_for(window) {
+            self.focused = Some(id);
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -190,24 +198,40 @@ impl WindowLayout {
         self.placements.is_empty()
     }
 
-    fn id_for(&mut self, window: &Window) -> usize {
-        let key = Self::key(window);
+    /// The slot for a window, creating one if it has none.
+    ///
+    /// `None` only for a window with no toplevel, which xdg_shell does not produce and which
+    /// there is no XWayland here to produce either. Returning it rather than inventing a
+    /// shared fallback slot is the point: a fallback is how every keyless window ends up in
+    /// the same place, which is the bug this whole function just had.
+    fn id_for(&mut self, window: &Window) -> Option<usize> {
+        let key = Self::key(window)?;
         if let Some(id) = self.ids.get(&key) {
-            return *id;
+            return Some(*id);
         }
         let id = self.next_id;
         self.next_id += 1;
         self.ids.insert(key, id);
-        id
+        Some(id)
     }
 
     /// A stable identity for a window. `Window` is not `Hash`, and its underlying surface id
     /// is what actually persists for the window's lifetime.
-    fn key(window: &Window) -> String {
-        window
-            .toplevel()
-            .map(|t| format!("{:?}", t.wl_surface().id()))
-            .unwrap_or_default()
+    /// What identifies a window, for as long as it exists.
+    ///
+    /// The `ObjectId` itself, never a string made from it. This was
+    /// `format!("{:?}", surface.id())`, and with smithay built on libwayland -- which is what
+    /// `use_system_lib` selects -- that Debug format is `ObjectId(wl_surface@12)`: interface
+    /// and object id, and nothing else. Wayland object ids are numbered **per client**, so two
+    /// applications each get a `wl_surface@12` and the two strings are identical.
+    ///
+    /// The consequence was not subtle. Two windows hashed to one slot, so the second
+    /// overwrote the first's placement and both drew as a single quad in one spot, with a
+    /// click cycling between them -- reported, exactly, as Wi-Fi and Bluetooth landing on the
+    /// same 3D object and rotating. `ObjectId`'s own `Eq` is documented to compare equal only
+    /// for the same object from the same client, which is the guarantee wanted here.
+    fn key(window: &Window) -> Option<ObjectId> {
+        window.toplevel().map(|t| t.wl_surface().id())
     }
 }
 
