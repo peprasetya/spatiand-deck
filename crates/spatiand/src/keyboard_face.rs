@@ -40,6 +40,16 @@ const CAP_MODIFIER: [f32; 4] = [0.13, 0.15, 0.21, 1.0];
 /// character and looks like a broken keymap.
 const CAP_LATCHED: [f32; 4] = [0.42, 0.68, 1.0, 1.0];
 
+/// The speaker in the strip above the keys, sounding and silent.
+///
+/// U+1F50A SPEAKER WITH THREE SOUND WAVES and U+1F507 SPEAKER WITH CANCELLATION STROKE. Both
+/// come out of the same font stack the rest of the shell sets its symbols from, monochrome
+/// rather than as colour emoji -- checked by `the_speaker_symbols_are_really_in_the_font`
+/// below, because a missing glyph here is a tofu box on a control with no caption to fall back
+/// on. This is the pair every phone and desktop uses, so it needs no caption.
+pub const SOUND_ON: &str = "\u{1F50A}";
+pub const SOUND_OFF: &str = "\u{1F507}";
+
 const INK: [u8; 4] = [236, 242, 255, 255];
 const INK_MODIFIER: [u8; 4] = [186, 199, 224, 255];
 const INK_LATCHED: [u8; 4] = [8, 14, 28, 255];
@@ -95,7 +105,35 @@ pub fn face(text: &mut TextRenderer, keyboard: &Keyboard, width_px: u32) -> Text
         }
     }
 
+    // The sound toggle, in the strip above the keys. Drawn by the same code as a keycap, at
+    // the same inset, so it reads as something to press rather than as a decal on the frame.
+    //
+    // Not given a latched modifier's colour, though it is a piece of state. The saturated blue
+    // is spent on shift and ctrl because those change what the *next* key does and are
+    // otherwise invisible; this one announces itself the moment you type, and the glyph itself
+    // says which way it is. Making it the brightest thing on a keyboard whose default state is
+    // "on" would have it competing with a latched shift for the eye.
+    let toggle = spatiand_shell::keyboard::toggle_rect();
+    let cap = cap_rect(&toggle, width, height);
+    let (fill, ink) = if keyboard.click {
+        (CAP, INK)
+    } else {
+        (CAP_MODIFIER, INK_MODIFIER)
+    };
+    rounded_rect(&mut rgba, width, height, cap, cap.2.min(cap.3) * RADIUS, fill);
+    let glyphs = fit_label(text, sound_symbol(keyboard), cap.2, cap.3, ink);
+    blit_centred(&mut rgba, width, height, &glyphs, cap);
+
     TextImage { width, height, rgba }
+}
+
+/// Which speaker the toggle is showing.
+pub fn sound_symbol(keyboard: &Keyboard) -> &'static str {
+    if keyboard.click {
+        SOUND_ON
+    } else {
+        SOUND_OFF
+    }
 }
 
 /// Rasterise one key on its own, raised: brighter, with a shadow beneath it, and nothing but
@@ -163,6 +201,8 @@ pub fn cap(text: &mut TextRenderer, keyboard: &Keyboard, key: &Key, width_px: u3
 /// serves both — and the cache and the drawing ask the same question, so a stale cap is not a
 /// thing that can happen.
 pub fn cap_id(keyboard: &Keyboard, key: &Key) -> String {
+    // The toggle is not a key and never rises, so it is deliberately not part of this. What
+    // *does* depend on it is the face, whose cache lives in `Scene::sync_keyboard`.
     format!("{}|{}|{}", key.code, keyboard.label(key), keyboard.is_latched(key))
 }
 
@@ -364,6 +404,55 @@ mod tests {
             (aspect - spatiand_shell::keyboard::face_aspect()).abs() < 0.02,
             "face drew at {aspect}"
         );
+    }
+
+    #[test]
+    fn the_speaker_symbols_are_really_in_the_font() {
+        // The failure this exists to catch is specific: a font stack with neither glyph draws
+        // the same tofu box for both, and the toggle then has two states that look identical
+        // on a control with no caption to fall back on.
+        let mut text = TextRenderer::new();
+        let on = text.render(SOUND_ON, 64.0, 256, [255, 255, 255, 255]);
+        let off = text.render(SOUND_OFF, 64.0, 256, [255, 255, 255, 255]);
+        for (s, image) in [(SOUND_ON, &on), (SOUND_OFF, &off)] {
+            assert_eq!(s.chars().count(), 1, "{s:?} is not a single symbol");
+            assert!(!s.is_ascii(), "{s:?} should be a symbol, not a letter");
+            assert!(image.width > 0 && image.height > 0, "{s:?} rendered nothing at all");
+        }
+        assert!(
+            on.width != off.width || on.rgba != off.rgba,
+            "the two speakers draw identically — the font has neither of them"
+        );
+    }
+
+    #[test]
+    fn the_sound_toggle_says_which_way_it_is_and_says_it_in_its_own_corner() {
+        let mut text = TextRenderer::new();
+        let mut keyboard = Keyboard::default();
+        let on = face(&mut text, &keyboard, 900);
+        keyboard.click = false;
+        let off = face(&mut text, &keyboard, 900);
+        assert_ne!(on.rgba, off.rgba, "the face looks the same with the sound off");
+
+        // Everything that changed has to be inside the toggle's own cell. This is the check
+        // that a change to the toggle has not quietly restyled the keys as well — which would
+        // not show up in "the images differ" and is exactly the kind of thing that only gets
+        // noticed once it is in a headset.
+        let (w, h) = (on.width as usize, on.height as usize);
+        let cell = cap_rect(&spatiand_shell::keyboard::toggle_rect(), on.width, on.height);
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                if on.rgba[i..i + 4] == off.rgba[i..i + 4] {
+                    continue;
+                }
+                let inside = (x as f32) >= cell.0 - 2.0
+                    && (x as f32) <= cell.0 + cell.2 + 2.0
+                    && (y as f32) >= cell.1 - 2.0
+                    && (y as f32) <= cell.1 + cell.3 + 2.0;
+                assert!(inside, "turning the sound off changed the face at ({x}, {y})");
+            }
+        }
     }
 
     #[test]

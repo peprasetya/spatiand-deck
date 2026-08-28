@@ -2157,6 +2157,7 @@ dependencies = [
  "libc",
  "log",
  "resvg",
+ "serde",
  "smithay",
  "spatiand-hmd",
  "spatiand-input",
@@ -2166,6 +2167,7 @@ dependencies = [
  "spatiand-track",
  "thiserror 2.0.20",
  "tiny-skia",
+ "toml",
  "usvg",
 ]
 

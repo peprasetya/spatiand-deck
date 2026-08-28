@@ -279,6 +279,12 @@ pub enum Action {
     /// own business, and it is shared with the one hanging in the world. Deciding it twice
     /// would let shift be on in one place and off in the other.
     PressKey(&'static spatiand_shell::keyboard::Key),
+    /// The speaker above the keys was tapped. Flip the click and remember the choice.
+    ///
+    /// The panel does not flip it itself, for the same reason it does not latch its own
+    /// modifiers: there is one keyboard state and one preferences file, and both live with the
+    /// backend. A panel that kept its own copy could disagree with the keyboard in the world.
+    ToggleKeyClick,
     /// The exit button was held long enough. End the session and go back to the desktop.
     LeaveSession,
 }
@@ -567,16 +573,29 @@ impl Sidecar {
 
     /// Which key is under a point in landscape pixels.
     pub fn key_at(&self, x: f32, y: f32) -> Option<&'static spatiand_shell::keyboard::Key> {
+        let (u, v) = self.face_at(x, y)?;
+        spatiand_shell::Keyboard::default().key_at(u, v)
+    }
+
+    /// Whether a point in landscape pixels is on the sound toggle.
+    pub fn on_sound_toggle(&self, x: f32, y: f32) -> bool {
+        match self.face_at(x, y) {
+            Some((u, v)) => spatiand_shell::keyboard::toggle_rect().contains(u, v),
+            None => false,
+        }
+    }
+
+    /// A point in landscape pixels, in the keyboard face's own 0..1 coordinates.
+    ///
+    /// Straight into the face: the panel draws the face alone, with no resize border, because
+    /// there is nothing to resize — it fills the screen it is on. It is the same face the 3D
+    /// keyboard shows, strip included, so the toggle is in the same place on both.
+    fn face_at(&self, x: f32, y: f32) -> Option<(f64, f64)> {
         let area = self.keyboard_area();
         if !area.contains(x, y) {
             return None;
         }
-        // Straight into the face's own coordinates: the panel draws the face alone, with no
-        // resize border, because there is nothing to resize — it fills the screen it is on.
-        spatiand_shell::Keyboard::default().key_at(
-            ((x - area.x) / area.w) as f64,
-            ((y - area.y) / area.h) as f64,
-        )
+        Some((((x - area.x) / area.w) as f64, ((y - area.y) / area.h) as f64))
     }
 
     /// Where every row sits. See [`Rows`].
@@ -730,6 +749,10 @@ impl Sidecar {
                     }
 
                     if self.page == Page::Keyboard {
+                        if self.on_sound_toggle(x, y) {
+                            changed.push(Action::ToggleKeyClick);
+                            continue;
+                        }
                         // Typed on the way down, like every other touch keyboard. Waiting for
                         // the lift puts a visible delay between the tap and the character.
                         if let Some(key) = self.key_at(x, y) {
@@ -1088,6 +1111,13 @@ impl Sidecar {
             };
             round(cap, colour, cap.h.min(cap.w) * 0.22);
         }
+
+        // The sound toggle, in the strip above the keys. Drawn as a cap rather than as bare
+        // chrome, because it is something to press — and held back rather than accented, so
+        // that on a keyboard whose default is "on" it is not the brightest thing on the panel.
+        // The speaker itself is what says which way it is; see `prepare`.
+        let cap = self.cap_rect(area, &spatiand_shell::keyboard::toggle_rect());
+        round(cap, if keyboard.click { TRACK } else { CARD }, cap.h.min(cap.w) * 0.22);
     }
 
     /// A key's drawn cap: its cell inset by the gap.
@@ -1223,6 +1253,26 @@ impl Sidecar {
                     // A latched key is drawn on a bright plate, so its label has to go dark to
                     // stay readable.
                     colour: if keyboard.is_latched(key) { GROUND } else { INK },
+                });
+            }
+            let cap = self.cap_rect(area, &spatiand_shell::keyboard::toggle_rect());
+            // Set from the cap's height rather than fitted, and larger than the number alone
+            // suggests: `render` crops a label to its ink horizontally but keeps the full line
+            // box vertically, so a glyph asked for at 62% of the cap inked at barely a third of
+            // it and read as a speck in a long pill. Measured on the Deck's own fonts through
+            // the snapshot backend, the same way the header symbols above were.
+            let size = cap.h * 1.05;
+            let symbol = crate::keyboard_face::sound_symbol(keyboard);
+            if let Some(entry) = self.label(renderer, text, symbol, size * 1.35) {
+                let width = size * entry.1.max(0.01);
+                out.push(Label {
+                    texture: entry,
+                    x: cap.x + (cap.w - width) * 0.5,
+                    y: cap.y + (cap.h - size) * 0.5,
+                    height: size,
+                    // Dimmed when off, so the control reads as inactive at a glance rather
+                    // than only once the crossed-out speaker has been made out.
+                    colour: if keyboard.click { INK } else { DIM },
                 });
             }
             return out;
@@ -1563,6 +1613,54 @@ mod tests {
                 .expect("the middle of a cap must be a key");
             assert_eq!(hit.code, key.code, "cap for {:?} hits {:?}", key.label, hit.label);
         }
+    }
+
+    #[test]
+    fn the_sound_toggle_is_reachable_and_does_not_type() {
+        // The control has to be on the panel's keyboard as well as on the one in the world:
+        // the panel is where most typing actually happens, and a setting you can only change
+        // by putting the headset on is not a setting you change while it is annoying you.
+        let mut s = sidecar((800, 1280));
+        s.page = Page::Keyboard;
+        let area = s.keyboard_area();
+        let t = spatiand_shell::keyboard::toggle_rect();
+        let (cx, cy) = (
+            area.x + t.u as f32 * area.w,
+            area.y + t.v as f32 * area.h,
+        );
+        assert!(s.on_sound_toggle(cx, cy));
+        assert!(s.key_at(cx, cy).is_none(), "the toggle is being read as a key");
+
+        let (u, v) = touch_at(&s, cx, cy);
+        let actions = s.touch(&[down(0, u, v)], all(), &Audio::default());
+        assert!(
+            actions.iter().any(|a| matches!(a, Action::ToggleKeyClick)),
+            "tapping the speaker did nothing: {actions:?}"
+        );
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::PressKey(_))),
+            "tapping the speaker also typed something: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn the_toggle_sits_clear_of_every_key_on_the_panel() {
+        // A thumb is about nine millimetres across. The toggle overlapping a keycap would mean
+        // a mis-tap deletes a character instead of muting, which is the expensive direction.
+        let mut s = sidecar((800, 1280));
+        s.page = Page::Keyboard;
+        let area = s.keyboard_area();
+        let toggle = s.cap_rect(area, &spatiand_shell::keyboard::toggle_rect());
+        for (key, rect) in spatiand_shell::keyboard::layout() {
+            let cap = s.cap_rect(area, &rect);
+            let overlaps = toggle.x < cap.x + cap.w
+                && cap.x < toggle.x + toggle.w
+                && toggle.y < cap.y + cap.h
+                && cap.y < toggle.y + toggle.h;
+            assert!(!overlaps, "the toggle overlaps {:?}", key.label);
+        }
+        // And it is inside the keyboard's own area rather than floating over the header.
+        assert!(toggle.y >= area.y - 1.0, "the toggle is above the keyboard");
     }
 
     #[test]

@@ -190,7 +190,12 @@ pub fn run(
     // button, left pulls the right one.
     let mut right_trigger = spatiand_input::Trigger::default();
     let mut left_trigger = spatiand_input::Trigger::default();
-    let mut keyboard = spatiand_shell::Keyboard::default();
+    let mut prefs = crate::prefs::Prefs::load();
+    let mut keyboard = spatiand_shell::Keyboard { click: prefs.keyboard_click, ..Default::default() };
+    // The sound a key makes. Nothing is started here: the first press opens the stream, so a
+    // session that never types -- or one where the wearer has turned the click off -- never
+    // touches the sound device at all.
+    let clicks = crate::click::Clicks::new();
     // A keyboard resize in progress: the scale when the frame was grabbed, and how far from
     // the middle the pointer was at that moment. Held rather than recomputed so the drag
     // measures against where it started instead of against the size it is producing — which
@@ -1363,6 +1368,10 @@ pub fn run(
                                 Some(spatiand_shell::keyboard::Target::Border) => {
                                     keyboard_border_hot = true
                                 }
+                                // Nothing to light up. The toggle does not rise the way a key
+                                // does -- a raised cap is a picture of a key, and the reticle
+                                // is already sitting on it saying where the ray landed.
+                                Some(spatiand_shell::keyboard::Target::SoundToggle) => {}
                                 None => {}
                             }
                         }
@@ -1430,10 +1439,23 @@ pub fn run(
                                     // No pulse here: the block above already buzzed whichever
                                     // pad was clicked, and a second one on the same press is
                                     // felt as a rattle rather than as confirmation.
+                                    if keyboard.click {
+                                        clicks.play();
+                                    }
                                     if let Some(stroke) = keyboard.press(key) {
                                         send_stroke(&mut runtime.state, stroke, time_ms);
                                     }
                                     keyboard.after_press(key);
+                                }
+                                Some(spatiand_shell::keyboard::Target::SoundToggle) => {
+                                    // Counts as having typed, so this press does not also fall
+                                    // through to the code that shuts a client's menus.
+                                    if right_hand {
+                                        typed = true;
+                                    } else {
+                                        left_typed = true;
+                                    }
+                                    toggle_click(&mut keyboard, &mut prefs, &clicks);
                                 }
                                 Some(spatiand_shell::keyboard::Target::Border) if right_hand => {
                                     typed = true;
@@ -1813,10 +1835,17 @@ pub fn run(
                                     // the panel is latched in the world too -- two copies of
                                     // that state would let it be on in one place and off in
                                     // the other.
+                                    if keyboard.click {
+                                        clicks.play();
+                                    }
                                     if let Some(stroke) = keyboard.press(key) {
                                         send_stroke(&mut runtime.state, stroke, time_ms);
                                     }
                                     keyboard.after_press(key);
+                                    continue;
+                                }
+                                crate::sidecar::Action::ToggleKeyClick => {
+                                    toggle_click(&mut keyboard, &mut prefs, &clicks);
                                     continue;
                                 }
                             };
@@ -2409,6 +2438,29 @@ mod tests {
 /// press with no matching release leaves the client repeating that character for ever -- which
 /// is a spectacular way to discover the bug. The modifiers are released in the reverse order
 /// they were pressed, so the client never sees a stray one left down.
+/// Flip the keyboard's click, store the choice, and let the wearer hear what they chose.
+///
+/// One function because both keyboards reach it and the three steps have to stay together: the
+/// state that the drawing reads, the file that outlives the session, and the sound device,
+/// which is handed back when the answer is "off" rather than left open and silent.
+fn toggle_click(
+    keyboard: &mut spatiand_shell::Keyboard,
+    prefs: &mut crate::prefs::Prefs,
+    clicks: &crate::click::Clicks,
+) {
+    let on = keyboard.toggle_click();
+    prefs.keyboard_click = on;
+    prefs.save();
+    log::info!("keyboard click {}", if on { "on" } else { "off" });
+    if on {
+        // The control's own confirmation. Turning the sound on and hearing nothing until the
+        // next letter leaves you unsure the button did anything.
+        clicks.play();
+    } else {
+        clicks.release();
+    }
+}
+
 fn send_stroke(state: &mut Spatiand, stroke: spatiand_shell::keyboard::Stroke, time_ms: u32) {
     use spatiand_shell::keyboard as kb;
     let mut held = Vec::new();

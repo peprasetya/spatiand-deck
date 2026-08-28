@@ -283,11 +283,12 @@ pub struct Scene {
     /// [`crate::keyboard_face::cap_id`], so the whole board costs at most a few dozen small
     /// textures and shift's alternates are simply more of them.
     key_caps: std::collections::HashMap<String, Texture>,
-    /// The keyboard face, rebuilt when a modifier latches or unlatches.
+    /// The keyboard face, rebuilt when anything drawn on it changes.
     keys: Option<Texture>,
-    /// The latch state the face was drawn for, as `(shift, ctrl, alt)`. A modifier that is on
-    /// and drawn as off types the wrong character and reads as a broken keymap.
-    keys_latches: (bool, bool, bool),
+    /// What the face was drawn for, as `(shift, ctrl, alt, click)`. A modifier that is on and
+    /// drawn as off types the wrong character and reads as a broken keymap; a sound toggle
+    /// drawn the wrong way round reads as a control that does not work.
+    keys_latches: (bool, bool, bool, bool),
     keys_built: bool,
 
     /// The status bar, rebuilt when its text changes.
@@ -400,7 +401,7 @@ impl Scene {
             window_icons: std::collections::HashMap::new(),
             key_caps: std::collections::HashMap::new(),
             keys: None,
-            keys_latches: (false, false, false),
+            keys_latches: (false, false, false, false),
             keys_built: false,
             status: None,
             status_text: String::new(),
@@ -699,7 +700,7 @@ impl Scene {
         Some(TitleTexture { id, aspect })
     }
 
-    /// Rebuild the keyboard face if a modifier latched or unlatched.
+    /// Rebuild the keyboard face if anything drawn on it changed.
     ///
     /// Rasterised at a fixed width rather than at the wearer's pixel density: the keyboard can
     /// be resized, and rebuilding the texture on every frame of a resize drag would rasterise
@@ -711,7 +712,10 @@ impl Scene {
         keyboard: &spatiand_shell::Keyboard,
         _px_per_degree: f32,
     ) -> Result<(), String> {
-        let latches = (keyboard.shift, keyboard.ctrl, keyboard.alt);
+        // The sound toggle is drawn on the face too, so it belongs in what the cache is
+        // keyed on. Left out, the speaker would keep the picture it had when the face was last
+        // rebuilt and only change the next time a modifier happened to be pressed.
+        let latches = (keyboard.shift, keyboard.ctrl, keyboard.alt, keyboard.click);
         if self.keys_built && self.keys_latches == latches {
             return Ok(());
         }

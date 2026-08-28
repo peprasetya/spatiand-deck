@@ -16,6 +16,14 @@
 //! and a 2.25-wide enter is 9. Integers rather than floats because every row has to add up to
 //! exactly [`ROW_UNITS`], and that is an equality worth being able to assert.
 //!
+//! ## The strip above the keys
+//!
+//! The face is not only keys: a strip along the top carries the sound toggle. It is part of
+//! the face rather than of the resize border because it has to be *hittable* — see
+//! [`CHROME_UNITS`] — and part of the face rather than a thing beside it because the face is
+//! rasterised as one image and hit-tested in one coordinate system, and splitting either of
+//! those is how a control comes to be drawn in one place and pressed in another.
+//!
 //! Codes are **evdev** keycodes, the same numbers `/usr/include/linux/input-event-codes.h`
 //! uses. Wayland wants them offset by 8; that offset is applied where the event is sent rather
 //! than baked in here, so this table can be read against the header directly.
@@ -222,10 +230,57 @@ pub struct KeyRect {
     pub half_v: f64,
 }
 
-/// Aspect ratio of the face alone — width over height.
+impl KeyRect {
+    /// Whether a point in the same coordinates falls inside the cell.
+    pub fn contains(&self, u: f64, v: f64) -> bool {
+        (u - self.u).abs() <= self.half_u && (v - self.v).abs() <= self.half_v
+    }
+}
+
+/// Height of the strip above the keys, in the quarter-keys [`Key::width`] uses.
+///
+/// The strip carries the sound toggle, and its height is the whole reason that toggle is
+/// hittable. Putting the control in the resize border would have cost no room at all, but the
+/// border is about half a degree tall at the size the keyboard is really drawn — it works as a
+/// grab handle only because it runs the whole way round, and a small button inside it would be
+/// a target nobody could hit with a head-anchored ray. Three quarters of a key row is a little
+/// over a degree, the same order as a key, and costs the keyboard 15% of its height rather
+/// than the 20% a full row would.
+pub const CHROME_UNITS: u16 = 3;
+
+/// Width of the sound toggle, in quarter-keys: one and a half ordinary keys.
+pub const TOGGLE_UNITS: u16 = 6;
+
+fn face_units() -> f64 {
+    // Rows are as tall as an ordinary key is wide, so the key cells are square.
+    ROWS.len() as f64 * UNIT as f64 + CHROME_UNITS as f64
+}
+
+/// How much of the face's height the chrome strip takes.
+pub fn chrome_fraction() -> f64 {
+    CHROME_UNITS as f64 / face_units()
+}
+
+/// Aspect ratio of the face — width over height.
+///
+/// The face is the strip *and* the keys: they are rasterised as one image and hit-tested in
+/// one set of coordinates, so that a toggle drawn in one place and pressed in another is not a
+/// thing that can happen.
 pub fn face_aspect() -> f64 {
-    // Rows are as tall as an ordinary key is wide, so the cells are square.
-    ROW_UNITS as f64 / (ROWS.len() as f64 * UNIT as f64)
+    ROW_UNITS as f64 / face_units()
+}
+
+/// Where the sound toggle sits, in the face's own 0..1 coordinates.
+///
+/// Flush with the face's **left** edge, which is a choice about what a near miss costs rather
+/// than about symmetry. The right end sits directly above `back`, and backspace is the key a
+/// keyboard you have to aim at gets pressed over and over — overshooting it by a third of a
+/// row would mute the session. Above the left end is the backtick, which is the least-pressed
+/// key on the board.
+pub fn toggle_rect() -> KeyRect {
+    let w = TOGGLE_UNITS as f64 / ROW_UNITS as f64;
+    let h = chrome_fraction();
+    KeyRect { u: w * 0.5, v: h * 0.5, half_u: w * 0.5, half_v: h * 0.5 }
 }
 
 /// Aspect ratio of the whole plate, border included.
@@ -254,6 +309,8 @@ pub fn face_fraction() -> (f64, f64) {
 pub fn layout() -> Vec<(&'static Key, KeyRect)> {
     let rows = ROWS.len() as f64;
     let total = ROW_UNITS as f64;
+    let top = chrome_fraction();
+    let row_h = (1.0 - top) / rows;
     let mut out = Vec::new();
     for (row_index, row) in ROWS.iter().enumerate() {
         let mut x = 0.0f64;
@@ -263,9 +320,9 @@ pub fn layout() -> Vec<(&'static Key, KeyRect)> {
                 k,
                 KeyRect {
                     u: x + w * 0.5,
-                    v: (row_index as f64 + 0.5) / rows,
+                    v: top + (row_index as f64 + 0.5) * row_h,
                     half_u: w * 0.5,
-                    half_v: 0.5 / rows,
+                    half_v: row_h * 0.5,
                 },
             ));
             x += w;
@@ -278,6 +335,8 @@ pub fn layout() -> Vec<(&'static Key, KeyRect)> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     Key(&'static Key),
+    /// The speaker in the strip above the keys. Turns the click on and off.
+    SoundToggle,
     /// The frame. Grab to resize.
     Border,
 }
@@ -302,6 +361,17 @@ pub struct Keyboard {
     pub alt: bool,
     /// How much the wearer has grown or shrunk it, as a multiple of its natural size.
     pub scale: f32,
+    /// Whether pressing a key should make a sound.
+    ///
+    /// The shell has no idea how to make one — it only carries the choice, because both
+    /// keyboards share this one state. Two copies would let the click be on in the world and
+    /// off on the panel, which is the same class of bug as a shift that latches in one place
+    /// and not the other.
+    ///
+    /// On by default. Neither keyboard has any travel, so without a sound the only thing
+    /// confirming a press is the cap coming up under the pointer — which the panel does not
+    /// even draw, and which you are not looking at while typing anyway.
+    pub click: bool,
 }
 
 impl Default for Keyboard {
@@ -312,6 +382,7 @@ impl Default for Keyboard {
             ctrl: false,
             alt: false,
             scale: 1.0,
+            click: true,
         }
     }
 }
@@ -322,6 +393,13 @@ impl Keyboard {
         if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
             return None;
         }
+        // The strip above the keys is the one part of the face that is not a key, which is why
+        // `target_at` asks about the toggle before it asks about this.
+        let top = chrome_fraction();
+        if v < top {
+            return None;
+        }
+        let v = (v - top) / (1.0 - top);
         let rows = ROWS.len();
         let row_index = ((v * rows as f64) as usize).min(rows - 1);
         let row = ROWS.get(row_index)?;
@@ -344,6 +422,9 @@ impl Keyboard {
         let (fw, fh) = face_fraction();
         let fu = (u - (1.0 - fw) * 0.5) / fw;
         let fv = (v - (1.0 - fh) * 0.5) / fh;
+        if toggle_rect().contains(fu, fv) {
+            return Some(Target::SoundToggle);
+        }
         match self.key_at(fu, fv) {
             Some(k) => Some(Target::Key(k)),
             None => Some(Target::Border),
@@ -395,6 +476,12 @@ impl Keyboard {
         k.face(self.shift)
     }
 
+    /// Turn the click on or off. Returns what it now is, which is what has to be stored.
+    pub fn toggle_click(&mut self) -> bool {
+        self.click = !self.click;
+        self.click
+    }
+
     /// Grow or shrink, clamped. Returns the scale actually adopted.
     pub fn rescale(&mut self, factor: f32) -> f32 {
         self.scale = (self.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
@@ -419,9 +506,11 @@ mod tests {
     #[test]
     fn the_corners_land_on_the_expected_keys() {
         let kb = Keyboard::default();
-        assert_eq!(kb.key_at(0.01, 0.01).unwrap().label, "`");
-        assert_eq!(kb.key_at(0.99, 0.01).unwrap().label, "back");
-        assert_eq!(kb.key_at(0.01, 0.45).unwrap().label, "esc");
+        // The top row starts below the strip, not at the top of the face.
+        let first_row = chrome_fraction() + 0.01;
+        assert_eq!(kb.key_at(0.01, first_row).unwrap().label, "`");
+        assert_eq!(kb.key_at(0.99, first_row).unwrap().label, "back");
+        assert_eq!(kb.key_at(0.01, 0.52).unwrap().label, "esc");
         assert_eq!(kb.key_at(0.01, 0.99).unwrap().label, "ctrl");
         assert_eq!(kb.key_at(0.99, 0.99).unwrap().label, "→");
     }
@@ -438,10 +527,11 @@ mod tests {
         // A dead spot is indistinguishable from a missed click, and with a head-anchored ray
         // people will blame their aim.
         let kb = Keyboard::default();
+        let top = chrome_fraction();
         for i in 0..120 {
             for j in 0..40 {
                 let u = (i as f64 + 0.5) / 120.0;
-                let v = (j as f64 + 0.5) / 40.0;
+                let v = top + (1.0 - top) * (j as f64 + 0.5) / 40.0;
                 assert!(kb.key_at(u, v).is_some(), "nothing at ({u}, {v})");
             }
         }
@@ -460,8 +550,10 @@ mod tests {
 
     #[test]
     fn the_cells_tile_the_face_without_gaps_or_overlap() {
+        // Everything below the strip, and nothing above it.
+        let want = 1.0 - chrome_fraction();
         let total: f64 = layout().iter().map(|(_, r)| r.half_u * 2.0 * r.half_v * 2.0).sum();
-        assert!((total - 1.0).abs() < 1e-9, "cells cover {total} of the face");
+        assert!((total - want).abs() < 1e-9, "cells cover {total} of the face, wanted {want}");
     }
 
     #[test]
@@ -486,8 +578,10 @@ mod tests {
     }
 
     #[test]
-    fn the_face_is_about_three_times_as_wide_as_it_is_tall() {
+    fn the_face_is_about_as_wide_as_a_real_keyboard_is() {
         // A real keyboard's proportions. Far from this and it stops reading as a keyboard.
+        // The keys alone are 3:1; the strip above them makes the whole face a little squarer,
+        // and this band is what says how much of that is affordable.
         let a = face_aspect();
         assert!((2.5..3.5).contains(&a), "aspect {a}");
         // The plate is a little squarer than the face, because the border is a bigger share of
@@ -585,7 +679,9 @@ mod tests {
         }
         // And the shifted symbols above them. The "1" is the second cell, so it starts one
         // key-width in — aiming at 0.03 lands on the backtick.
-        let one = kb.key_at(UNIT as f64 * 1.5 / ROW_UNITS as f64, 0.1).unwrap();
+        let one = kb
+            .key_at(UNIT as f64 * 1.5 / ROW_UNITS as f64, chrome_fraction() + 0.05)
+            .unwrap();
         assert_eq!(one.label, "1");
         assert_eq!(one.shifted, "!");
     }
@@ -630,5 +726,76 @@ mod tests {
         let kb = Keyboard::default();
         assert!(!kb.open);
         assert_eq!(kb.scale, 1.0);
+        assert!(kb.click, "a keyboard with no travel should confirm a press somehow");
+    }
+
+    #[test]
+    fn the_strip_sits_above_every_key_and_takes_none_of_their_room() {
+        let top = chrome_fraction();
+        assert!(top > 0.0, "there is no strip to put the toggle in");
+        for (k, rect) in layout() {
+            assert!(
+                rect.v - rect.half_v >= top - 1e-9,
+                "{:?} reaches up into the strip",
+                k.label
+            );
+        }
+        // And the toggle is inside it, not hanging down into the top row of keys.
+        let t = toggle_rect();
+        assert!(t.v + t.half_v <= top + 1e-9, "the toggle overlaps the keys");
+    }
+
+    #[test]
+    fn the_toggle_is_a_target_worth_aiming_at() {
+        // The reason it is not in the resize border. The border is BORDER_FRACTION of the face
+        // height; a control has to beat that by enough to be a different kind of thing.
+        let t = toggle_rect();
+        assert!(
+            t.half_v * 2.0 > BORDER_FRACTION * 2.0,
+            "the toggle is no easier to hit than the frame it was moved out of"
+        );
+        // Wider than an ordinary key, so it reads as a button rather than as a stray keycap.
+        let key_w = UNIT as f64 / ROW_UNITS as f64;
+        assert!(t.half_u * 2.0 > key_w, "the toggle is narrower than a key");
+    }
+
+    #[test]
+    fn the_toggle_is_pressable_and_is_not_a_key() {
+        let kb = Keyboard::default();
+        let t = toggle_rect();
+        // On the face it is not a key...
+        assert!(kb.key_at(t.u, t.v).is_none(), "the toggle is being read as a key");
+        // ...and on the plate it is the toggle rather than the frame.
+        let (fw, fh) = face_fraction();
+        let plate = |u: f64, v: f64| (u * fw + (1.0 - fw) * 0.5, v * fh + (1.0 - fh) * 0.5);
+        let (pu, pv) = plate(t.u, t.v);
+        assert_eq!(kb.target_at(pu, pv), Some(Target::SoundToggle));
+        // Just below it is the top row of keys, not the toggle again.
+        let (ku, kv) = plate(t.u, chrome_fraction() + 0.02);
+        assert!(matches!(kb.target_at(ku, kv), Some(Target::Key(_))));
+    }
+
+    #[test]
+    fn the_click_can_be_turned_off_and_back_on() {
+        // The point of the control: it has to be escapable, or it is a one-way door to silence.
+        let mut kb = Keyboard::default();
+        assert!(kb.click);
+        assert!(!kb.toggle_click());
+        assert!(!kb.click);
+        assert!(kb.toggle_click());
+        assert!(kb.click);
+    }
+
+    #[test]
+    fn turning_the_sound_off_does_not_disturb_the_typing() {
+        // The toggle sits on the keyboard so it can be reached mid-sentence. Reaching it must
+        // not cost a latched shift or a resize.
+        let mut kb = Keyboard::default();
+        kb.press(&ROWS[3][0]);
+        kb.rescale(1.3);
+        let scale = kb.scale;
+        kb.toggle_click();
+        assert!(kb.shift, "the toggle dropped a latched modifier");
+        assert_eq!(kb.scale, scale);
     }
 }

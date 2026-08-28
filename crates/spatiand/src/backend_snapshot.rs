@@ -24,6 +24,9 @@
 //! takes `SPATIAND_VIEW_PAGE=keyboard` for its second page and `SPATIAND_VIEW_EXIT=0..1` to
 //! catch the exit button part-way through its hold.
 //!
+//! `SPATIAND_VIEW_CLICK=off` draws either keyboard with its sound turned off, which is the
+//! only way to look at the muted speaker without a headset and a finger.
+//!
 //! `SPATIAND_CLIENT` goes further and launches a real Wayland application into the snapshot:
 //! a full compositor runs, the client connects, commits a buffer, and the frame is rendered
 //! with that window in it. That is the only way to answer "what does an app actually look like
@@ -207,6 +210,9 @@ pub fn run(
     let mut keyboard = spatiand_shell::Keyboard::default();
     if view == View::Keyboard {
         keyboard.open = true;
+    }
+    if std::env::var("SPATIAND_VIEW_CLICK").as_deref() == Ok("off") {
+        keyboard.click = false;
     }
 
     // --- optionally host a real application ---
