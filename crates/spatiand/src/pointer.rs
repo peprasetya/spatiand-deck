@@ -69,6 +69,13 @@ pub const BORDER_FRACTION: f64 = 0.10;
 /// at the end of the bar, where overshooting lands on the bar rather than on the surface.
 const FURNITURE_FRACTION: f64 = 0.66;
 
+/// How far apart two pieces of furniture sit, as a multiple of their own width.
+///
+/// A little over one, so they are neighbours with a gap rather than a single wide control.
+/// Aiming at these is done down a ray from a couple of metres away, where two touching
+/// buttons are one button.
+const FURNITURE_SPACING: f64 = 1.25;
+
 /// How far along the bottom edge counts as a corner rather than a side, in border widths.
 ///
 /// Two, so a corner is roughly a 3.6° square. Smaller and it is a target you hit by luck;
@@ -103,6 +110,11 @@ pub enum Zone {
     Title,
     /// The button at the right of the bar. Press to ask the window to close.
     Close,
+    /// The speaker, to the left of the close button. Press to silence this window alone.
+    ///
+    /// Only ever reached when the window is actually making a sound: a button that is not
+    /// drawn must not be pressable, or the bar has an invisible dead spot in it.
+    Mute,
     /// The client's own surface. Everything here is forwarded.
     Content,
     /// The frame. Grab to resize.
@@ -188,18 +200,36 @@ impl Frame {
     /// by the border — so they sit over the glass rather than over the surface, whatever the
     /// window's aspect ratio.
     fn furniture(&self, from_right: bool) -> Box2 {
+        self.furniture_at(from_right, 0)
+    }
+
+    /// Furniture `slot` places in from one end of the bar, counting from zero.
+    fn furniture_at(&self, from_right: bool, slot: usize) -> Box2 {
         let side = self.bar * FURNITURE_FRACTION;
         let (w, h) = (self.width(), self.height());
         // The bar's centre is half a content-height above the quad's centre — the chrome
         // reaches further above the content than below it, so the two centres do not coincide.
         let v = 0.5 - 0.5 / h;
-        let inset = (self.border + side * 0.5) / w;
+        // Spaced by a little more than their own width, so two buttons read as two things
+        // rather than as one wide one — which matters more here than on a desktop, because
+        // they are aimed at down a ray from across the room.
+        let step = side * FURNITURE_SPACING / w;
+        let inset = (self.border + side * 0.5) / w + step * slot as f64;
         Box2 {
             u: if from_right { 1.0 - inset } else { inset },
             v,
             half_u: side * 0.5 / w,
             half_v: side * 0.5 / h,
         }
+    }
+
+    /// The mute button, immediately left of the close button.
+    ///
+    /// Next to close rather than anywhere else because the two are the same kind of thing —
+    /// something you do *to* the window rather than with it — and because the right end of
+    /// the bar is where a hand already goes.
+    pub fn mute(&self) -> Box2 {
+        self.furniture_at(true, 1)
     }
 
     /// The application's icon, at the left of the bar. Decoration only — nothing to press.
@@ -217,7 +247,11 @@ impl Frame {
     }
 
     /// What the wearer is pointing at.
-    pub fn zone(&self, u: f64, v: f64) -> Zone {
+    ///
+    /// `sounding` says whether this window has a mute button at all. A window that makes no
+    /// sound has no speaker drawn on it, and passing that through here is what stops the bar
+    /// having an invisible dead spot where the button would have been.
+    pub fn zone(&self, u: f64, v: f64, sounding: bool) -> Zone {
         let (x, y) = self.content_at(u, v);
         // Everything above the content is the bar, including the frame above it: a strip of
         // border one degree tall that behaves differently from the bar it touches would be
@@ -227,6 +261,8 @@ impl Frame {
             // it is simply a piece of the bar that happens to have a cross drawn on it.
             return if self.close().contains(u, v) {
                 Zone::Close
+            } else if sounding && self.mute().contains(u, v) {
+                Zone::Mute
             } else {
                 Zone::Title
             };
@@ -478,7 +514,10 @@ pub fn aim(ray: Ray, windows: &[WindowQuad]) -> Aim {
         // A menu covers whatever chrome is behind it. Reporting the zone underneath would let
         // a click on the top row of a menu grab the title bar it happens to be sitting over.
         Some(_) => Some(Zone::Content),
-        None => hit.and_then(|(index, h)| Some(Frame::of(windows.get(index)?.pixels).zone(h.u, h.v))),
+        None => hit.and_then(|(index, h)| {
+            let window = windows.get(index)?;
+            Some(Frame::of(window.pixels).zone(h.u, h.v, window.sound.is_some()))
+        }),
     };
     Aim {
         ray,
@@ -566,7 +605,9 @@ fn centre_of(pixels: (u32, u32), placement: &crate::window::Placement) -> glam::
 /// a pointer position would put the cursor above the top edge of the surface.
 pub fn surface_position(hit: &Hit, pixels: (u32, u32)) -> Option<Point<f64, Logical>> {
     let frame = Frame::of(pixels);
-    if frame.zone(hit.u, hit.v) != Zone::Content {
+    // Whether there is a speaker on the bar cannot change whether this is the client's
+    // surface: both answers are chrome, and chrome is not forwarded.
+    if frame.zone(hit.u, hit.v, false) != Zone::Content {
         return None;
     }
     let (x, y) = frame.content_at(hit.u, hit.v);
@@ -887,9 +928,9 @@ mod tests {
         // starts dragging the window instead, which looks like the button being dead.
         let f = Frame::of(PIXELS);
         let close = f.close();
-        assert_eq!(f.zone(close.u, close.v), Zone::Close);
+        assert_eq!(f.zone(close.u, close.v, false), Zone::Close);
         // A little to the left of it is ordinary bar.
-        assert_eq!(f.zone(close.u - close.half_u * 3.0, close.v), Zone::Title);
+        assert_eq!(f.zone(close.u - close.half_u * 3.0, close.v, false), Zone::Title);
     }
 
     #[test]
@@ -898,7 +939,7 @@ mod tests {
         // worse than no target: it gets pressed, and the window does not move.
         let f = Frame::of(PIXELS);
         let icon = f.icon();
-        assert_eq!(f.zone(icon.u, icon.v), Zone::Title);
+        assert_eq!(f.zone(icon.u, icon.v, false), Zone::Title);
     }
 
     #[test]
@@ -919,8 +960,8 @@ mod tests {
         // is geometrically part of the bar.
         let f = Frame::of(PIXELS);
         let close = f.close();
-        assert!(matches!(f.zone(close.u, close.v), Zone::Close));
-        assert_ne!(f.zone(close.u, close.v), Zone::Title);
+        assert!(matches!(f.zone(close.u, close.v, false), Zone::Close));
+        assert_ne!(f.zone(close.u, close.v, false), Zone::Title);
     }
 
     #[test]
@@ -983,7 +1024,7 @@ mod tests {
 
     #[test]
     fn the_middle_of_a_window_is_its_content() {
-        assert_eq!(Frame::of(PIXELS).zone(0.5, 0.5), Zone::Content);
+        assert_eq!(Frame::of(PIXELS).zone(0.5, 0.5, false), Zone::Content);
     }
 
     #[test]
@@ -995,21 +1036,21 @@ mod tests {
         let mid_content = f.border + f.bar + 0.5;
         let just_inside = |t: f64| t * 0.5;
         assert_eq!(
-            f.zone(just_inside(f.border) / f.width(), mid_content / f.height()),
+            f.zone(just_inside(f.border) / f.width(), mid_content / f.height(), false),
             Zone::Resize(Edge::Left)
         );
         assert_eq!(
-            f.zone(1.0 - just_inside(f.border) / f.width(), mid_content / f.height()),
+            f.zone(1.0 - just_inside(f.border) / f.width(), mid_content / f.height(), false),
             Zone::Resize(Edge::Right)
         );
         // Middle of the bottom strip, horizontally centred so it is a side rather than a corner.
         assert_eq!(
-            f.zone(0.5, 1.0 - just_inside(f.border) / f.height()),
+            f.zone(0.5, 1.0 - just_inside(f.border) / f.height(), false),
             Zone::Resize(Edge::Bottom)
         );
         // Anything above the content is the bar, frame included.
-        assert_eq!(f.zone(0.5, 0.0), Zone::Title);
-        assert_eq!(f.zone(0.5, (f.border + f.bar * 0.5) / f.height()), Zone::Title);
+        assert_eq!(f.zone(0.5, 0.0, false), Zone::Title);
+        assert_eq!(f.zone(0.5, (f.border + f.bar * 0.5) / f.height(), false), Zone::Title);
     }
 
     #[test]
@@ -1019,14 +1060,14 @@ mod tests {
         let f = Frame::of(PIXELS);
         let below = 1.0 - (f.border * 0.5) / f.height();
         let beside = (f.border * 0.5) / f.width();
-        assert_eq!(f.zone(beside, below), Zone::Resize(Edge::BottomLeft));
-        assert_eq!(f.zone(1.0 - beside, below), Zone::Resize(Edge::BottomRight));
+        assert_eq!(f.zone(beside, below, false), Zone::Resize(Edge::BottomLeft));
+        assert_eq!(f.zone(1.0 - beside, below, false), Zone::Resize(Edge::BottomRight));
         // From along the bottom, just inside the content's own width.
         let inside_left = (f.border + f.border * 0.5) / f.width();
-        assert_eq!(f.zone(inside_left, below), Zone::Resize(Edge::BottomLeft));
+        assert_eq!(f.zone(inside_left, below, false), Zone::Resize(Edge::BottomLeft));
         // From up the side, above the corner, is the plain side.
         let up_the_side = (f.border + f.bar + 0.5) / f.height();
-        assert_eq!(f.zone(beside, up_the_side), Zone::Resize(Edge::Left));
+        assert_eq!(f.zone(beside, up_the_side, false), Zone::Resize(Edge::Left));
     }
 
     #[test]
@@ -1042,7 +1083,7 @@ mod tests {
         // On a narrow window the two corner regions could meet in the middle, leaving no
         // bottom edge at all.
         let f = Frame::of((400, 900));
-        assert_eq!(f.zone(0.5, 1.0 - f.border * 0.5 / f.height()), Zone::Resize(Edge::Bottom));
+        assert_eq!(f.zone(0.5, 1.0 - f.border * 0.5 / f.height(), false), Zone::Resize(Edge::Bottom));
     }
 
     #[test]

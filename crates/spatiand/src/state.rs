@@ -54,6 +54,15 @@ impl ClientData for ClientState {
 
 pub struct Spatiand {
     pub display_handle: DisplayHandle,
+    /// Windows that have appeared since the render loop last looked, each with the process id
+    /// of the client that owns it.
+    ///
+    /// Collected here rather than acted on directly because the audio engine lives in the
+    /// render loop, and a Wayland handler is not the place to reach into it. The process id is
+    /// what ties a window back to the app that was launched for it — see [`crate::audio`].
+    pub arrived_windows: Vec<(usize, Option<u32>)>,
+    /// Windows that have gone since the render loop last looked.
+    pub departed_windows: Vec<usize>,
     pub running: bool,
     pub socket_name: String,
 
@@ -114,6 +123,8 @@ impl Spatiand {
 
         Self {
             display_handle: dh,
+            arrived_windows: Vec::new(),
+            departed_windows: Vec::new(),
             running: true,
             socket_name,
             compositor_state,
@@ -351,6 +362,20 @@ impl XdgShellHandler for Spatiand {
         // Newly opened windows take focus, so the thing you just launched is the thing the
         // pointer and keyboard talk to.
         self.layout.focus(&window);
+        // Which process this window belongs to, so its sound can be found. Read from the
+        // Wayland connection's own credentials, which the kernel supplies and a client cannot
+        // lie about.
+        let pid = window
+            .toplevel()
+            .and_then(|t| {
+                use smithay::reexports::wayland_server::Resource;
+                t.wl_surface().client()
+            })
+            .and_then(|c| c.get_credentials(&self.display_handle).ok())
+            .map(|c| c.pid as u32);
+        if let Some(id) = self.layout.id_of(&window) {
+            self.arrived_windows.push((id, pid));
+        }
         log::info!(
             "new toplevel at yaw {:.0} deg ({} windows)",
             self.spawn_yaw.to_degrees(),
@@ -405,6 +430,9 @@ impl XdgShellHandler for Spatiand {
             .find(|w| w.toplevel().map(|t| t == &surface).unwrap_or(false))
             .cloned();
         if let Some(window) = window {
+            if let Some(id) = self.layout.id_of(&window) {
+                self.departed_windows.push(id);
+            }
             self.layout.remove(&window);
             self.space.unmap_elem(&window);
         }

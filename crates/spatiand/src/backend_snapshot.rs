@@ -232,7 +232,7 @@ pub fn run(
             .and_then(|v| v.parse().ok())
             .unwrap_or(8.0);
         log::info!("launching {command:?} into the snapshot, waiting up to {seconds}s");
-        match spatiand_platform::launch(&command, &runtime.state.socket_name) {
+        match spatiand_platform::launch(&command, &runtime.state.socket_name, &[]) {
             Ok(pid) => {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f32(seconds);
                 while std::time::Instant::now() < deadline {

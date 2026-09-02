@@ -2442,6 +2442,7 @@ dependencies = [
  "resvg",
  "serde",
  "smithay",
+ "spatiand-audio",
  "spatiand-hmd",
  "spatiand-input",
  "spatiand-platform",

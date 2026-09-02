@@ -204,6 +204,12 @@ impl WindowLayout {
     /// there is no XWayland here to produce either. Returning it rather than inventing a
     /// shared fallback slot is the point: a fallback is how every keyless window ends up in
     /// the same place, which is the bug this whole function just had.
+    /// This window's stable id, if it has one. The same number the audio engine keys a
+    /// window's sink on, so the two cannot drift apart.
+    pub fn id_of(&self, window: &Window) -> Option<usize> {
+        Self::key(window).and_then(|k| self.ids.get(&k).copied())
+    }
+
     fn id_for(&mut self, window: &Window) -> Option<usize> {
         let key = Self::key(window)?;
         if let Some(id) = self.ids.get(&key) {

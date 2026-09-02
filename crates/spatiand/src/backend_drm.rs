@@ -199,6 +199,10 @@ pub fn run(
     // session that never types -- or one where the wearer has turned the click off -- never
     // touches the sound device at all.
     let clicks = crate::click::Clicks::new();
+    // Every window's sound, placed where the window is. Started here rather than lazily
+    // because the connection to the audio server is what takes the time, and doing it on the
+    // first launch would stall the launcher rather than the startup.
+    let mut spatial_audio = crate::audio::Audio::new(prefs.spatial_audio, prefs.directness());
     // A keyboard resize in progress: the scale when the frame was grabbed, and how far from
     // the middle the pointer was at that moment. Held rather than recomputed so the drag
     // measures against where it started instead of against the size it is producing — which
@@ -844,10 +848,23 @@ pub fn run(
                         }
                     }
                     ShellEvent::Launch(app) => {
-                        if let Err(e) =
-                            spatiand_platform::launch(&app.exec, &runtime.state.socket_name)
-                        {
-                            log::warn!("could not launch {}: {e}", app.name);
+                        // Claim a sink before the app starts, so its very first sound already
+                        // knows which window it belongs to. Nothing here fails if spatial
+                        // audio is off -- the app simply launches as it always did.
+                        let claim = spatial_audio.prepare_launch();
+                        let env: Vec<(String, String)> =
+                            claim.iter().map(|(_, e)| e.clone()).collect();
+                        match spatiand_platform::launch(
+                            &app.exec,
+                            &runtime.state.socket_name,
+                            &env,
+                        ) {
+                            Ok(pid) => {
+                                if let Some((slot, _)) = claim {
+                                    spatial_audio.launched(pid, slot);
+                                }
+                            }
+                            Err(e) => log::warn!("could not launch {}: {e}", app.name),
                         }
                     }
                     ShellEvent::ChooseEnvironment(choice) => {
@@ -902,6 +919,7 @@ pub fn run(
                                     if let Err(e) = spatiand_platform::launch(
                                         &command,
                                         &runtime.state.socket_name,
+                                        &[],
                                     ) {
                                         log::warn!("could not open {panel}: {e}");
                                     }
@@ -1170,6 +1188,40 @@ pub fn run(
                 }
             }
 
+            // Windows that have come and gone since the last frame. Collected by the Wayland
+            // handlers, which have no business reaching into an audio engine, and drained
+            // here where the engine lives.
+            for (id, pid) in std::mem::take(&mut runtime.state.arrived_windows) {
+                spatial_audio.adopt(id, pid);
+            }
+            for id in std::mem::take(&mut runtime.state.departed_windows) {
+                spatial_audio.forget(id);
+            }
+            // Where every window's sound is, now, and what it is doing. The head has moved
+            // since the last frame even if nothing else has, so the aim is unconditional --
+            // and cheap when the answer has not changed, because the renderer only fetches
+            // new filters once a direction has moved further than anyone can hear.
+            if spatial_audio.is_on() {
+                let head = tracker.orientation();
+                for quad in windows.iter_mut() {
+                    let Some(id) = runtime.state.layout.id_of(&quad.window) else {
+                        continue;
+                    };
+                    spatial_audio.aim(id, &quad.placement, head);
+                    // A window only grows a speaker once it has actually made a sound, and
+                    // keeps it from then on: one that vanished between tracks would be a
+                    // control that moved out from under a thumb reaching for it.
+                    if let Some(status) = spatial_audio.status(id) {
+                        let ever = quad.sound.is_some() || status.sounding.is_some();
+                        quad.sound = ever.then_some(crate::scene::WindowSound {
+                            muted: status.muted,
+                            sounding: status.sounding,
+                            peak: status.peak,
+                        });
+                    }
+                }
+            }
+
             // --- pointing and clicking ---
             //
             // Built from the head pose latched this frame, so the cursors track with the world
@@ -1191,12 +1243,14 @@ pub fn run(
             // lighting only the one under the dominant hand would leave the other pressing a
             // control that never acknowledged it was aimed at.
             for aim in [right_aim.as_ref(), left_aim.as_ref()].into_iter().flatten() {
-                if aim.zone == Some(Zone::Close) {
-                    if let Some((index, _)) = aim.hit {
-                        if let Some(quad) = windows.get_mut(index) {
-                            quad.close_hot = true;
-                        }
-                    }
+                let Some((index, _)) = aim.hit else { continue };
+                let Some(quad) = windows.get_mut(index) else {
+                    continue;
+                };
+                match aim.zone {
+                    Some(Zone::Close) => quad.close_hot = true,
+                    Some(Zone::Mute) => quad.mute_hot = true,
+                    _ => {}
                 }
             }
 
@@ -1535,6 +1589,25 @@ pub fn run(
                         match right_aim.as_ref() {
                             // Before the title bar: the button sits inside the bar, so testing
                             // the bar first would start a drag and never reach this.
+                            Some(a) if a.zone == Some(Zone::Mute) => {
+                                if let Some(quad) = a.hit.and_then(|(i, _)| windows.get(i)) {
+                                    if let Some(id) =
+                                        runtime.state.layout.id_of(&quad.window)
+                                    {
+                                        let now =
+                                            quad.sound.map(|s| s.muted).unwrap_or(false);
+                                        spatial_audio.set_muted(id, !now);
+                                        log::info!(
+                                            "{} {}",
+                                            if now { "unmuted" } else { "muted" },
+                                            runtime
+                                                .state
+                                                .title_of(&quad.window)
+                                                .unwrap_or_else(|| "a window".into())
+                                        );
+                                    }
+                                }
+                            }
                             Some(a) if a.zone == Some(Zone::Close) => {
                                 if let Some(quad) = a.hit.and_then(|(i, _)| windows.get(i)) {
                                     log::info!("closing {}", runtime

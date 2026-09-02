@@ -150,7 +150,13 @@ pub fn wayland_arguments(program: &str, existing: &[String]) -> Vec<String> {
 ///
 /// `wayland_display` is the socket name Spatiand is listening on; it is set in the child's
 /// environment so the new window arrives here rather than on a desktop underneath.
-pub fn launch(exec: &str, wayland_display: &str) -> Result<u32, String> {
+///
+/// `extra` is set alongside it, and is how a caller says something to the child that only the
+/// child's own libraries will read — which is how an app's audio is told which window it
+/// belongs to, without the app knowing anything about it. Inherited by grandchildren, which
+/// is the whole reason it is the environment rather than an argument: a browser plays its
+/// sound from a process it forks itself.
+pub fn launch(exec: &str, wayland_display: &str, extra: &[(String, String)]) -> Result<u32, String> {
     let parts = split_command(exec);
     let (program, args) = parts
         .split_first()
@@ -163,7 +169,11 @@ pub fn launch(exec: &str, wayland_display: &str) -> Result<u32, String> {
         Some((a, b)) => (Stdio::from(a), Stdio::from(b)),
         None => (Stdio::null(), Stdio::null()),
     };
-    let child = Command::new(program)
+    let mut command = Command::new(program);
+    for (key, value) in extra {
+        command.env(key, value);
+    }
+    let child = command
         .args(&args)
         .env("WAYLAND_DISPLAY", wayland_display)
         // Some toolkits prefer X11 when DISPLAY is set, and would then try to reach an X
@@ -265,7 +275,7 @@ mod tests {
     fn an_empty_command_yields_nothing_rather_than_a_blank_program() {
         assert!(split_command("").is_empty());
         assert!(split_command("   ").is_empty());
-        assert!(launch("", "wayland-1").is_err());
+        assert!(launch("", "wayland-1", &[]).is_err());
     }
 
     #[test]
@@ -320,7 +330,7 @@ mod tests {
     fn a_missing_program_is_reported_not_swallowed() {
         // The wearer's symptom is "pressing A does nothing", and without an error there is
         // nothing in the log to connect that to a bad Exec line.
-        let result = launch("/nonexistent/program/xyzzy", "wayland-1");
+        let result = launch("/nonexistent/program/xyzzy", "wayland-1", &[]);
         assert!(result.is_err(), "should have failed to start");
         assert!(result.unwrap_err().contains("xyzzy"));
     }
@@ -334,7 +344,7 @@ mod tests {
         };
         let before = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let marker = "spatiand-launch-test-marker";
-        launch(&format!("/bin/sh -c \"echo {marker} >&2\""), "wayland-test")
+        launch(&format!("/bin/sh -c \"echo {marker} >&2\""), "wayland-test", &[])
             .expect("sh should start");
         // The child writes and exits immediately, but "immediately" is not "before this line".
         for _ in 0..50 {
@@ -356,7 +366,7 @@ mod tests {
         // The whole point: under memory pressure the kernel picks by badness score, and it has
         // no idea that killing a browser costs a tab while killing the compositor costs every
         // window on every desktop at once.
-        let pid = launch("/bin/sleep 2", "wayland-test").expect("sleep should start");
+        let pid = launch("/bin/sleep 2", "wayland-test", &[]).expect("sleep should start");
         let adjusted = std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj"))
             .expect("the child should still be alive to read");
         assert_eq!(

@@ -121,8 +121,27 @@ pub struct WindowQuad {
     pub icon: Option<TitleTexture>,
     /// True while a pointer is over the close button, which is the only thing that colours it.
     pub close_hot: bool,
+    /// What this window's sound is doing, if it has any.
+    ///
+    /// `None` means the window has never made a sound, and it then has no speaker on its bar
+    /// at all — a mute button on a window that cannot make a noise is a control that does
+    /// nothing, and there would be one on every window in the room.
+    pub sound: Option<WindowSound>,
+    /// True while a pointer is over the mute button.
+    pub mute_hot: bool,
     /// Menus and dropdowns this window has open, innermost last.
     pub popups: Vec<PopupQuad>,
+}
+
+/// What a window is playing, as far as its title bar is concerned.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowSound {
+    pub muted: bool,
+    /// What the app is actually using, rather than how wide its connection is. `None` while
+    /// it is silent, which is what makes the speaker fade out when a video ends.
+    pub sounding: Option<spatiand_audio::Layout>,
+    /// Loudest sample in the last block, for how brightly the speaker is lit.
+    pub peak: f32,
 }
 
 /// A popup, already imported, placed in its parent window's own pixels.
@@ -251,6 +270,9 @@ pub struct Scene {
     resize_cursor: u32,
     /// The cross on a window's close button.
     close_glyph: u32,
+    /// The speaker on a window's mute button, sounding and silenced.
+    speaker_glyph: u32,
+    speaker_off_glyph: u32,
     /// A second cursor shape for the left pad. Different in outline as well as colour, so the
     /// two are distinguishable to someone who cannot rely on hue.
     reticle_left: u32,
@@ -348,7 +370,17 @@ impl Scene {
         let bubbles = BubblePipeline::new(renderer, &quads)?;
         let rounded = RoundedPipeline::new(renderer, &quads)?;
 
-        let (sky, white, reticle, reticle_left, resize_cursor, close_glyph, glass) = renderer
+        let (
+            sky,
+            white,
+            reticle,
+            reticle_left,
+            resize_cursor,
+            close_glyph,
+            speaker_glyph,
+            speaker_off_glyph,
+            glass,
+        ) = renderer
             .with_context(|gl| unsafe {
                 (
                     // Wrapping horizontally: an equirectangular image joins itself, and
@@ -372,6 +404,14 @@ impl Scene {
                         upload_raw(gl, 64, 64, &c, false)
                     },
                     {
+                        let g = speaker_glyph_image(64, false);
+                        upload_raw(gl, 64, 64, &g, false)
+                    },
+                    {
+                        let g = speaker_glyph_image(64, true);
+                        upload_raw(gl, 64, 64, &g, false)
+                    },
+                    {
                         // Wide and short: it is stretched across frames of every proportion,
                         // and the corner radius is what has to survive that, not the pixels.
                         let g = glass_panel_image(256, 96, 14.0);
@@ -393,6 +433,8 @@ impl Scene {
             reticle_left,
             resize_cursor,
             close_glyph,
+            speaker_glyph,
+            speaker_off_glyph,
             glass,
             app_labels: Vec::new(),
             app_glyphs: Vec::new(),
@@ -1333,6 +1375,51 @@ impl Scene {
                 (0.0, 1.0),
             );
 
+            // The speaker, and only on windows that make a sound. A mute button on a text
+            // editor is a control that does nothing, and there would be one on every window
+            // in the room -- so the bar stays as bare as the window's behaviour allows.
+            if let Some(sound) = window.sound {
+                let mute = frame.mute();
+                let hot = window.mute_hot;
+                // Lit by how loud it currently is, so a glance across the room says which
+                // window the sound is coming from without reading anything.
+                let live = sound.peak.clamp(0.0, 1.0).sqrt();
+                let disc = if sound.muted {
+                    // Plainly off rather than merely dim: a muted window is a state someone
+                    // has chosen and has to be able to see they chose.
+                    [1.0, 0.55, 0.45, if hot { 0.85 } else { 0.55 }]
+                } else if hot {
+                    [0.86, 0.94, 1.0, 0.60]
+                } else {
+                    [0.80, 0.90, 1.0, 0.16 + 0.34 * live]
+                };
+                self.rounded.draw(
+                    gl,
+                    &(eye.view_projection() * furniture(mute)),
+                    disc,
+                    (disc_px, disc_px),
+                    disc_px * 0.5,
+                );
+                let mut glyph = mute;
+                glyph.half_u *= 0.46;
+                glyph.half_v *= 0.46;
+                self.quads.draw(
+                    gl,
+                    if sound.muted {
+                        self.speaker_off_glyph
+                    } else {
+                        self.speaker_glyph
+                    },
+                    &(eye.view_projection() * furniture(glyph)),
+                    if hot || sound.muted {
+                        [1.0, 1.0, 1.0, 1.0]
+                    } else {
+                        [0.92, 0.95, 1.0, if window.focused { 0.90 } else { 0.55 }]
+                    },
+                    (0.0, 1.0),
+                );
+            }
+
             // Client textures arrive with GL's *default* sampler state, which is
             // NEAREST_MIPMAP_LINEAR. A texture with no mipmaps and a mipmap filter is
             // incomplete, and an incomplete texture samples as opaque black -- so the window
@@ -2019,6 +2106,89 @@ fn resize_cursor_image(size: u32) -> Vec<u8> {
 /// The strokes are drawn as a distance to the diagonal rather than by walking pixels, so the
 /// edges are antialiased. A hard-edged cross a degree across, seen through optics, reads as a
 /// smudge — the softness is what makes it look like a drawn mark at this size.
+/// A speaker, with or without a line through it.
+///
+/// Drawn rather than shaped from a font, for the same reason the close cross is: the one
+/// character that means this is an emoji, whose colour and metrics vary by whichever font
+/// happens to be installed, and a control has to look the same on every machine.
+///
+/// Supersampled rather than distance-fielded. The shape is a handful of half-plane and
+/// circle tests, and counting how many of a grid of samples land inside is both shorter than
+/// the equivalent distance field and exactly as smooth at this size.
+fn speaker_glyph_image(size: u32, muted: bool) -> Vec<u8> {
+    /// How far out the cone flares, and where the body ends.
+    const BODY: (f32, f32) = (-0.62, -0.28);
+    const CONE_END: f32 = 0.10;
+    const BODY_HALF: f32 = 0.26;
+    const CONE_HALF: f32 = 0.62;
+
+    let inside = |x: f32, y: f32| -> bool {
+        // The box the diaphragm sits in.
+        if x >= BODY.0 && x <= BODY.1 && y.abs() <= BODY_HALF {
+            return true;
+        }
+        // The cone, widening linearly to its mouth.
+        if x > BODY.1 && x <= CONE_END {
+            let t = (x - BODY.1) / (CONE_END - BODY.1);
+            if y.abs() <= BODY_HALF + t * (CONE_HALF - BODY_HALF) {
+                return true;
+            }
+        }
+        let (dx, dy) = (x - CONE_END, y);
+        if muted {
+            // A line through it, which reads as "off" at a glance and in any language.
+            let (ax, ay) = (x - 0.48, y);
+            let across = (ax - ay) * std::f32::consts::FRAC_1_SQRT_2;
+            let along = (ax + ay) * std::f32::consts::FRAC_1_SQRT_2;
+            return across.abs() <= 0.075 && along.abs() <= 0.34;
+        }
+        // Two arcs in front of it. Bounded by angle as well as radius, so they are arcs
+        // rather than rings drawn round the back of the speaker.
+        if dx <= 0.0 {
+            return false;
+        }
+        let r = (dx * dx + dy * dy).sqrt();
+        if dy.abs() > dx * 1.30 {
+            return false;
+        }
+        [0.36f32, 0.60].iter().any(|ring| (r - ring).abs() <= 0.065)
+    };
+
+    let mut out = vec![0u8; (size * size * 4) as usize];
+    let centre = (size as f32 - 1.0) * 0.5;
+    let radius = centre;
+    // A three-by-three grid inside each pixel, which is enough at this size and costs nothing
+    // for a texture built once per session.
+    const GRID: i32 = 3;
+    for y in 0..size {
+        for x in 0..size {
+            let mut hits = 0;
+            for sy in 0..GRID {
+                for sx in 0..GRID {
+                    let ox = (sx as f32 + 0.5) / GRID as f32 - 0.5;
+                    let oy = (sy as f32 + 0.5) / GRID as f32 - 0.5;
+                    let px = (x as f32 + ox - centre) / radius;
+                    let py = (y as f32 + oy - centre) / radius;
+                    if inside(px, py) {
+                        hits += 1;
+                    }
+                }
+            }
+            if hits == 0 {
+                continue;
+            }
+            let a = (hits as f32 / (GRID * GRID) as f32 * 255.0) as u8;
+            let i = ((y * size + x) * 4) as usize;
+            // White, with the coverage in alpha: the drawing tints it.
+            out[i] = 255;
+            out[i + 1] = 255;
+            out[i + 2] = 255;
+            out[i + 3] = a;
+        }
+    }
+    out
+}
+
 fn close_glyph_image(size: u32) -> Vec<u8> {
     let mut out = vec![0u8; (size * size * 4) as usize];
     let centre = (size as f32 - 1.0) * 0.5;
@@ -2204,6 +2374,9 @@ pub fn collect_windows(
             title: None,
             icon: None,
             close_hot: false,
+            // Both filled in by the backend, which is where the audio engine lives.
+            sound: None,
+            mute_hot: false,
             popups,
         });
     }

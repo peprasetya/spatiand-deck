@@ -279,7 +279,7 @@ pub fn run(
                     }
                     ShellEvent::Launch(app) => {
                         if let Err(e) =
-                            spatiand_platform::launch(&app.exec, &runtime.state.socket_name)
+                            spatiand_platform::launch(&app.exec, &runtime.state.socket_name, &[])
                         {
                             log::warn!("could not launch {}: {e}", app.name);
                         }
@@ -321,6 +321,7 @@ pub fn run(
                                     if let Err(e) = spatiand_platform::launch(
                                         &command,
                                         &runtime.state.socket_name,
+                                        &[],
                                     ) {
                                         log::warn!("could not open {panel}: {e}");
                                     }

@@ -25,13 +25,39 @@ use serde::{Deserialize, Serialize};
 pub struct Prefs {
     /// Whether the on-screen keyboards make a sound. See [`crate::click`].
     pub keyboard_click: bool,
+    /// Whether each window's sound is placed where the window is.
+    ///
+    /// On by default, because it is the point. Off is a real choice rather than a fallback:
+    /// someone listening on the Deck's own speakers with the glasses pushed up does not want
+    /// their music moving about as they look around the room.
+    #[serde(default = "yes")]
+    pub spatial_audio: bool,
+
+    /// How much of the plain stereo fold to keep when a window is straight ahead, 0 to 1.
+    ///
+    /// The one setting here that cannot be decided by anyone but the listener. A measured head
+    /// is somebody else's, and where their ears disagree with yours the difference arrives as
+    /// a mild colouring. More of this is less colour and less placement; less is the reverse.
+    /// See `spatiand_audio::render::Directness`.
+    #[serde(default = "default_directness_centred")]
+    pub audio_directness_centred: f32,
+
+    /// The same, once the window is well round to one side, where the placement is doing real
+    /// work and is worth more than the tone.
+    #[serde(default = "default_directness_off_axis")]
+    pub audio_directness_off_axis: f32,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
         // Deliberately the same default the shell's own keyboard carries, so a session with no
         // file behaves exactly like one whose file says what the defaults are.
-        Self { keyboard_click: spatiand_shell::Keyboard::default().click }
+        Self {
+            keyboard_click: spatiand_shell::Keyboard::default().click,
+            spatial_audio: true,
+            audio_directness_centred: DEFAULT_DIRECTNESS.centred,
+            audio_directness_off_axis: DEFAULT_DIRECTNESS.off_axis,
+        }
     }
 }
 
@@ -141,4 +167,38 @@ mod tests {
     }
 
     pub(super) static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
+/// The blend the session starts with, before anyone has had an opinion about it.
+const DEFAULT_DIRECTNESS: spatiand_audio::render::Directness =
+    spatiand_audio::render::Directness {
+        centred: 0.35,
+        off_axis: 0.10,
+        fade_by: 40.0 * std::f64::consts::PI / 180.0,
+    };
+
+fn yes() -> bool {
+    true
+}
+
+fn default_directness_centred() -> f32 {
+    DEFAULT_DIRECTNESS.centred
+}
+
+fn default_directness_off_axis() -> f32 {
+    DEFAULT_DIRECTNESS.off_axis
+}
+
+impl Prefs {
+    /// The blend these preferences ask for.
+    ///
+    /// Clamped, because this file is edited by hand and a value outside nought to one is a
+    /// gain, not a blend -- it would make the sound louder rather than plainer.
+    pub fn directness(&self) -> spatiand_audio::render::Directness {
+        spatiand_audio::render::Directness {
+            centred: self.audio_directness_centred.clamp(0.0, 1.0),
+            off_axis: self.audio_directness_off_axis.clamp(0.0, 1.0),
+            ..DEFAULT_DIRECTNESS
+        }
+    }
 }

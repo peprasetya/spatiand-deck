@@ -149,7 +149,17 @@ mod tests {
     fn the_line_stays_short_enough_to_read_in_a_corner() {
         // It is sized to a fixed angular width, so length trades directly against legibility.
         // Roughly 24 characters keeps the glyphs about 2 degrees tall.
-        assert!(line(4).len() <= 28, "status line is {:?}", line(4));
+        //
+        // Counted in characters, because that is what gets drawn. Counting bytes made this
+        // pass or fail on the battery: the lightning bolt is three bytes, so a machine at
+        // 100% was two over a limit that a machine at 97% met, and neither line was any wider
+        // on the glasses than the other.
+        let text = line(4);
+        assert!(
+            text.chars().count() <= 28,
+            "status line is {text:?} ({} characters)",
+            text.chars().count()
+        );
     }
 
     #[test]

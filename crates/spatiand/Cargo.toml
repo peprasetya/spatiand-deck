@@ -12,6 +12,9 @@ spatiand-render = { path = "../spatiand-render" }
 spatiand-input = { path = "../spatiand-input" }
 spatiand-shell = { path = "../spatiand-shell" }
 spatiand-platform = { path = "../spatiand-platform" }
+# Spatial audio. The `server` feature is what talks to PipeWire; without it the crate is
+# arithmetic only, which is how it stays testable on a machine with no audio server.
+spatiand-audio = { path = "../spatiand-audio", features = ["server"] }
 
 glam.workspace = true
 log.workspace = true

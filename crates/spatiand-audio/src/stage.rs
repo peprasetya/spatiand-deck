@@ -44,7 +44,7 @@ use glam::{DQuat, DVec3};
 /// The set is what a PipeWire channel map can hold that we can place. Anything outside it
 /// (a second LFE, ambisonic components) is not a channel with a direction, and is handled by
 /// not being in this list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Channel {
     Mono,
     FrontLeft,
