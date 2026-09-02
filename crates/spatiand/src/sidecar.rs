@@ -418,8 +418,9 @@ impl Layout {
 
 /// The sidecar's own textures.
 pub struct Sidecar {
-    /// One texture per label, rebuilt only when the text changes.
-    labels: std::collections::HashMap<String, (u32, f32)>,
+    /// One texture per label, rebuilt only when the text changes, as
+    /// `(id, aspect, ink centre)`. See [`Sidecar::label`] for what the third one is for.
+    labels: std::collections::HashMap<String, (u32, f32, f32)>,
     white: u32,
     /// Landscape size, i.e. the panel's dimensions swapped if it is mounted portrait.
     size: (f32, f32),
@@ -839,14 +840,24 @@ impl Sidecar {
         })
     }
 
-    /// Get or build a text texture.
+    /// Get or build a text texture, as `(id, aspect, centre)`.
+    ///
+    /// The third number is the fraction of the image's height that should end up in the middle
+    /// of whatever box the label is placed in. For type it is a half -- the line box's own
+    /// middle, which is what keeps a row of letters on one baseline. For an icon it is where
+    /// the ink actually sits, which is not a half, because the box carries room for a descender
+    /// the icon has not got.
+    ///
+    /// The panel needs this as a fraction rather than simply cropping the image the way the 3D
+    /// keyboard does, because it does not draw these at their own size: it stretches each into
+    /// a box whose height it chose, so cropping would resize the glyph as well as move it.
     fn label(
         &mut self,
         renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
         text_renderer: &mut spatiand_render::TextRenderer,
         text: &str,
         size_px: f32,
-    ) -> Option<(u32, f32)> {
+    ) -> Option<(u32, f32, f32)> {
         // Size is part of the key: the same word at two sizes is two textures, and sharing
         // them would render one of the two blurry.
         let key = format!("{size_px:.0}|{text}");
@@ -854,7 +865,7 @@ impl Sidecar {
             return Some(*existing);
         }
         if self.labels.len() > 128 {
-            let ids: Vec<u32> = self.labels.values().map(|(id, _)| *id).collect();
+            let ids: Vec<u32> = self.labels.values().map(|(id, _, _)| *id).collect();
             let _ = renderer.with_context(|gl| unsafe {
                 for id in ids {
                     gl.DeleteTextures(1, &id);
@@ -864,11 +875,28 @@ impl Sidecar {
         }
         let image = text_renderer.render(text, size_px, 1600, [235, 240, 255, 255]);
         let aspect = image.width as f32 / image.height.max(1) as f32;
+        // Type keeps the line box's own middle, so that every label at a size lands on one
+        // baseline; only an icon is centred on its ink. See `keyboard_face::is_icon`.
+        let centre = if crate::keyboard_face::is_icon(text) {
+            image.ink_vertical_center()
+        } else {
+            0.5
+        };
         let id = renderer
             .with_context(|gl| unsafe { crate::gl::upload_rgba(gl, &image) })
             .ok()?;
-        self.labels.insert(key, (id, aspect));
-        Some((id, aspect))
+        self.labels.insert(key, (id, aspect, centre));
+        Some((id, aspect, centre))
+    }
+
+    /// The top edge of a label's box, such that its **ink** ends up centred in `rect`.
+    ///
+    /// This replaces `rect.y + (rect.h - size) * 0.5`, which centres the *box*. The difference
+    /// only shows on a lone symbol: an arrow or a speaker has no descender, so its ink sits
+    /// high in a box sized for one, and centring the box leaves the glyph riding above the
+    /// middle of its cap with the spare room stranded underneath it.
+    fn ink_centred_y(rect: Rect, size: f32, ink_centre: f32) -> f32 {
+        rect.y + rect.h * 0.5 - size * ink_centre
     }
 
     /// Draw the whole sidecar.
@@ -1205,14 +1233,14 @@ impl Sidecar {
             // the one piece of iconography everyone already reads without being taught.
             (self.exit_button(), "\u{23FB}", POWER_SYMBOL),
         ] {
-            let Some(entry) = self.label(renderer, text, glyph, size * 1.35) else {
+            let Some((id, aspect, ink)) = self.label(renderer, text, glyph, size * 1.35) else {
                 continue;
             };
-            let width = size * entry.1.max(0.01);
+            let width = size * aspect.max(0.01);
             out.push(Label {
-                texture: entry,
+                texture: (id, aspect),
                 x: rect.x + (rect.w - width) * 0.5,
-                y: rect.y + (rect.h - size) * 0.5,
+                y: Self::ink_centred_y(rect, size, ink),
                 height: size,
                 colour: INK,
             });
@@ -1221,11 +1249,12 @@ impl Sidecar {
         if self.page == Page::Keyboard {
             // The clock comes along, so the header is not an empty strip with one button in
             // it -- and it is the thing most worth glancing at while typing anyway.
-            if let Some(entry) = self.label(renderer, text, status, HEADER_TEXT * 1.35) {
+            if let Some((id, aspect, ink)) = self.label(renderer, text, status, HEADER_TEXT * 1.35)
+            {
                 out.push(Label {
-                    texture: entry,
+                    texture: (id, aspect),
                     x: self.clock_x(),
-                    y: rows.header.y + (rows.header.h - HEADER_TEXT) * 0.5,
+                    y: Self::ink_centred_y(rows.header, HEADER_TEXT, ink),
                     height: HEADER_TEXT,
                     colour: INK,
                 });
@@ -1241,14 +1270,15 @@ impl Sidecar {
                 } else {
                     cap.h * 0.48
                 };
-                let Some(entry) = self.label(renderer, text, label, size * 1.35) else {
+                let Some((id, aspect, ink)) = self.label(renderer, text, label, size * 1.35)
+                else {
                     continue;
                 };
-                let width = size * entry.1.max(0.01);
+                let width = size * aspect.max(0.01);
                 out.push(Label {
-                    texture: entry,
+                    texture: (id, aspect),
                     x: cap.x + (cap.w - width) * 0.5,
-                    y: cap.y + (cap.h - size) * 0.5,
+                    y: Self::ink_centred_y(cap, size, ink),
                     height: size,
                     // A latched key is drawn on a bright plate, so its label has to go dark to
                     // stay readable.
@@ -1263,12 +1293,12 @@ impl Sidecar {
             // the snapshot backend, the same way the header symbols above were.
             let size = cap.h * 1.05;
             let symbol = crate::keyboard_face::sound_symbol(keyboard);
-            if let Some(entry) = self.label(renderer, text, symbol, size * 1.35) {
-                let width = size * entry.1.max(0.01);
+            if let Some((id, aspect, ink)) = self.label(renderer, text, symbol, size * 1.35) {
+                let width = size * aspect.max(0.01);
                 out.push(Label {
-                    texture: entry,
+                    texture: (id, aspect),
                     x: cap.x + (cap.w - width) * 0.5,
-                    y: cap.y + (cap.h - size) * 0.5,
+                    y: Self::ink_centred_y(cap, size, ink),
                     height: size,
                     // Dimmed when off, so the control reads as inactive at a glance rather
                     // than only once the crossed-out speaker has been made out.
@@ -1292,22 +1322,29 @@ impl Sidecar {
                         colour: [f32; 4]| {
             // `s` is consumed here as the texture cache's key; nothing downstream needs the
             // characters again, only the pixels they were rasterised into.
-            if let Some(entry) = this.label(renderer, text, &s, h * 1.35) {
-                let x = if from_right { x - h * entry.1.max(0.01) } else { x };
-                out.push(Label { texture: entry, x, y, height: h, colour });
+            if let Some((id, aspect, _)) = this.label(renderer, text, &s, h * 1.35) {
+                let x = if from_right { x - h * aspect.max(0.01) } else { x };
+                out.push(Label { texture: (id, aspect), x, y, height: h, colour });
             }
         };
 
         // The clock, large, on the ground rather than on a plate.
+        //
+        // Placed on its ink like the keyboard page's copy of it, rather than on its box. The
+        // same clock sitting at two different heights depending on which page you were on
+        // would read as the header shifting when you switched pages.
         let header = rows.header;
         let clock_x = self.clock_x();
+        let clock_ink = self
+            .label(renderer, text, status, HEADER_TEXT * 1.35)
+            .map_or(0.5, |(_, _, ink)| ink);
         push(
             self,
             renderer,
             text,
             status.to_string(),
             clock_x,
-            header.y + (header.h - HEADER_TEXT) * 0.5,
+            Self::ink_centred_y(header, HEADER_TEXT, clock_ink),
             HEADER_TEXT,
             false,
             INK,
@@ -1640,6 +1677,31 @@ mod tests {
         assert!(
             !actions.iter().any(|a| matches!(a, Action::PressKey(_))),
             "tapping the speaker also typed something: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn a_label_is_placed_so_that_its_ink_lands_in_the_middle_of_the_box() {
+        // The panel stretches a label into a box of its own choosing, so it cannot crop the
+        // image the way the 3D keyboard does -- cropping would resize the glyph as well as
+        // move it. It shifts the box instead, by however far the ink sits from the middle.
+        let rect = Rect { x: 0.0, y: 100.0, w: 80.0, h: 60.0 };
+        let size = 40.0;
+        let centre = rect.y + rect.h * 0.5;
+        for ink in [0.5f32, 0.65, 0.35] {
+            let y = Sidecar::ink_centred_y(rect, size, ink);
+            // Where the ink ends up: the box's top, plus the ink's own fraction of the box.
+            assert!(
+                (y + size * ink - centre).abs() < 1e-4,
+                "ink at {ink} landed at {}, not {centre}",
+                y + size * ink
+            );
+        }
+        // And an ink centre of exactly a half has to agree with the old box-centring, or every
+        // well-behaved label on the panel would shift the day this was introduced.
+        assert_eq!(
+            Sidecar::ink_centred_y(rect, size, 0.5),
+            rect.y + (rect.h - size) * 0.5
         );
     }
 

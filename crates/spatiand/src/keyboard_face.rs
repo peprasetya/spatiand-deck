@@ -127,6 +127,28 @@ pub fn face(text: &mut TextRenderer, keyboard: &Keyboard, width_px: u32) -> Text
     TextImage { width, height, rgba }
 }
 
+/// Whether a label is an **icon** rather than type.
+///
+/// The distinction decides how the label is centred, and it is a real one rather than a
+/// convenience. Type has to keep the baseline it shares with the labels beside it: `q` and `w`
+/// are only legible as a row because their bowls sit on one line, and the thing that guarantees
+/// that is the font's own line box, which is the same height for every label at a given size.
+/// Centring each glyph on its own ink instead would push `q` up by half its descender and pull
+/// `t` down by half its ascender -- measured on the Deck at a keycap's size, about four pixels
+/// each way, which reads as a keyboard whose letters have come loose.
+///
+/// An icon has no baseline to share. It is alone in its cap and the only thing it can be
+/// aligned to is the cap, so it is centred on its own ink. Left in the line box it inherits
+/// room for a descender it does not have and sits visibly high -- which is what happened to the
+/// arrow keys and the sound toggle.
+///
+/// Single, and not ASCII: every legend on this keyboard that is *type* is ASCII, and every
+/// symbol used as an icon is not. The sidecar holds its header symbols to the same rule.
+pub fn is_icon(label: &str) -> bool {
+    let mut chars = label.chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if !c.is_ascii())
+}
+
 /// Which speaker the toggle is showing.
 pub fn sound_symbol(keyboard: &Keyboard) -> &'static str {
     if keyboard.click {
@@ -249,12 +271,26 @@ fn fit_label(
     let room_w = cap_w * 0.82;
     let room_h = cap_h * 0.54;
     let first = text.render(label, room_h, room_w.max(8.0) as u32, ink);
-    if first.width as f32 <= room_w || first.width == 0 {
-        return first;
+    let fitted = if first.width as f32 <= room_w || first.width == 0 {
+        first
+    } else {
+        // Too wide: shrink by exactly the overshoot rather than by a guess.
+        let shrink = (room_w / first.width as f32).clamp(0.25, 1.0);
+        text.render(label, room_h * shrink, room_w.max(8.0) as u32, ink)
+    };
+    // `render` crops to the ink horizontally but keeps the full line-height box vertically.
+    // For type that box is exactly what is wanted -- it is the same height for every label, so
+    // every label lands on one baseline. For an icon it is room for a descender that does not
+    // exist, and the glyph rides high in its cap. See [`is_icon`].
+    //
+    // Cropping is free here: `blit_centred` places this image by its own pixel dimensions
+    // rather than stretching it into the cap, so tightening the box moves where the pixels
+    // land without touching their size.
+    if is_icon(label) {
+        fitted.crop_to_ink_vertically()
+    } else {
+        fitted
     }
-    // Too wide: shrink by exactly the overshoot rather than by a guess.
-    let shrink = (room_w / first.width as f32).clamp(0.25, 1.0);
-    text.render(label, room_h * shrink, room_w.max(8.0) as u32, ink)
 }
 
 /// Fill a rounded rectangle, compositing over whatever is already there.
@@ -453,6 +489,56 @@ mod tests {
                 assert!(inside, "turning the sound off changed the face at ({x}, {y})");
             }
         }
+    }
+
+    #[test]
+    fn an_icon_is_cropped_to_its_ink_so_that_centring_it_actually_centres_it() {
+        // The complaint this fixes: the speaker and the arrow keys sat visibly high in their
+        // caps. `blit_centred` places a label by its image's own dimensions, so an icon is
+        // centred exactly when its image has no blank rows left on it.
+        let mut text = TextRenderer::new();
+        for symbol in [SOUND_ON, SOUND_OFF, "\u{2190}", "\u{2191}", "\u{2193}", "\u{2192}"] {
+            let image = fit_label(&mut text, symbol, 120.0, 45.0, INK);
+            let (top, bottom) = image.ink_vertical_extent();
+            assert!(
+                top < 0.02 && bottom > 0.98,
+                "{symbol:?} keeps blank rows ({top}..{bottom}), so it will sit off centre"
+            );
+        }
+    }
+
+    #[test]
+    fn letters_keep_their_shared_baseline_instead_of_each_finding_its_own_middle() {
+        // The correction to the fix above, and the reason it is not applied to everything.
+        // Cropping a letter to its ink centres *that letter* and so moves it off the line the
+        // letters beside it are standing on: a descender pushes `q` up, an ascender pulls `t`
+        // down. Measured on the Deck before this was narrowed, that was about four pixels each
+        // way at a keycap's size, which reads as lettering that has come loose from the board.
+        //
+        // What holds the row together is that every label keeps the same font-derived box, so
+        // the assertion is that the boxes are all the same height -- descender or not.
+        let mut text = TextRenderer::new();
+        let heights: Vec<u32> = ["q", "w", "t", "a", "y", "space"]
+            .iter()
+            .map(|l| fit_label(&mut text, l, 120.0, 60.0, INK).height)
+            .collect();
+        assert!(
+            heights.windows(2).all(|w| w[0] == w[1]),
+            "labels came out at different heights, so they cannot share a baseline: {heights:?}"
+        );
+    }
+
+    #[test]
+    fn what_counts_as_an_icon_is_exactly_the_symbols_and_none_of_the_type() {
+        let keyboard = Keyboard::default();
+        for (key, _) in layout() {
+            let label = keyboard.label(key);
+            let expected = matches!(label, "\u{2190}" | "\u{2191}" | "\u{2193}" | "\u{2192}");
+            assert_eq!(is_icon(label), expected, "is_icon({label:?}) is wrong");
+        }
+        assert!(is_icon(SOUND_ON) && is_icon(SOUND_OFF));
+        assert!(!is_icon("space"), "a word is type, however short");
+        assert!(!is_icon(""), "nothing at all is not an icon");
     }
 
     #[test]

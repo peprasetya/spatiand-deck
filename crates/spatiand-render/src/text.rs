@@ -47,6 +47,76 @@ impl TextImage {
         let inked = self.rgba.chunks_exact(4).filter(|p| p[3] > 8).count();
         inked as f32 / (self.rgba.len() / 4) as f32
     }
+
+    /// The ink's own top and bottom, as fractions of the image's height.
+    ///
+    /// `render` crops a line to its ink *horizontally* but keeps the full line-height box
+    /// vertically -- see its own doc comment. That box is where a font's metrics say a
+    /// descender could reach, not where this particular glyph's ink actually sits, and the two
+    /// agree only by accident. They are close enough for a word of lowercase letters, whose
+    /// x-height fills most of the box either side of the baseline, and visibly wrong for a
+    /// single glyph that has no descender at all -- an arrow, a speaker -- which then sits high
+    /// in the box with all the spare room left below it. This is what lets a caller ask "where
+    /// is the ink" instead of assuming the box's own centre.
+    ///
+    /// `(0.0, 1.0)` for an empty image: the caller's fallback is then the box's own centre,
+    /// which is what happened before this existed.
+    pub fn ink_vertical_extent(&self) -> (f32, f32) {
+        if self.height == 0 {
+            return (0.0, 1.0);
+        }
+        let mut min_y = self.height;
+        let mut max_y = 0u32;
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if self.rgba[((y * self.width + x) * 4 + 3) as usize] > 8 {
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        if min_y > max_y {
+            return (0.0, 1.0);
+        }
+        (min_y as f32 / self.height as f32, (max_y + 1) as f32 / self.height as f32)
+    }
+
+    /// Where the middle of the ink sits, as a fraction of the image's height. `0.5` — the
+    /// box's own centre — for an empty image, which is the answer a caller already assumed
+    /// before this existed.
+    ///
+    /// How far from `0.5` this gets is worth knowing before deciding it does not matter.
+    /// Measured on the Deck's own fonts: the word "space" inks at **0.65**, a sixth of the box
+    /// below its middle. Ordinary lettering was never centred either — it only looked it,
+    /// because every letter was wrong by the same amount and had nothing to be wrong against.
+    /// A symbol among letters is what made it visible.
+    pub fn ink_vertical_center(&self) -> f32 {
+        let (top, bottom) = self.ink_vertical_extent();
+        (top + bottom) * 0.5
+    }
+
+    /// The tightest rectangle that still contains every inked pixel.
+    ///
+    /// For a caller that draws this image's own pixels rather than stretching them into a box
+    /// of some other size -- see [`Self::ink_vertical_center`] for the alternative, needed
+    /// wherever stretching is unavoidable and cropping would silently change the glyph's size
+    /// along with its position.
+    pub fn crop_to_ink_vertically(&self) -> TextImage {
+        let (top, bottom) = self.ink_vertical_extent();
+        let min_y = (top * self.height as f32).round() as u32;
+        let max_y = ((bottom * self.height as f32).round() as u32)
+            .max(min_y + 1)
+            .min(self.height);
+        let new_h = max_y - min_y;
+        let row = (self.width * 4) as usize;
+        let mut out = vec![0u8; row * new_h as usize];
+        for y in 0..new_h {
+            let src = ((y + min_y) as usize) * row;
+            let dst = (y as usize) * row;
+            out[dst..dst + row].copy_from_slice(&self.rgba[src..src + row]);
+        }
+        TextImage { width: self.width, height: new_h, rgba: out }
+    }
 }
 
 pub struct TextRenderer {
@@ -357,5 +427,67 @@ mod tests {
             reddest.0 > 200 && reddest.1 < 80 && reddest.2 < 80,
             "expected red, got {reddest:?}"
         );
+    }
+
+    #[test]
+    fn a_single_glyph_does_not_fill_its_own_line_height_box() {
+        // The premise the rest of this file's centring bug rests on. `render`'s box is a
+        // font-metrics line height -- room for the tallest ascender and the deepest descender
+        // a *font* can produce, not what any one glyph actually used. A short glyph with no
+        // descender, alone on its line, leaves real margin on at least one side; which side,
+        // and by how much, is a property of the font actually installed and is deliberately
+        // not asserted here -- see the sidecar's own glyph tests for that, checked against the
+        // Deck's real font stack through the snapshot backend rather than against whatever
+        // fontconfig resolves to on the machine running `cargo test`.
+        let mut r = TextRenderer::new();
+        let img = r.render("\u{2190}", 64.0, 200, [255, 255, 255, 255]);
+        let (top, bottom) = img.ink_vertical_extent();
+        assert!(top > 0.0 || bottom < 1.0, "the arrow's ink fills the box with no margin at all");
+    }
+
+    #[test]
+    fn cropping_vertically_leaves_no_transparent_margin() {
+        let mut r = TextRenderer::new();
+        let img = r.render("\u{2190}", 64.0, 200, [255, 255, 255, 255]).crop_to_ink_vertically();
+        let (top, bottom) = img.ink_vertical_extent();
+        assert!(top < 1e-3, "a blank row survived at the top: {top}");
+        assert!(bottom > 1.0 - 1e-3, "a blank row survived at the bottom: {bottom}");
+    }
+
+    #[test]
+    fn cropping_vertically_does_not_touch_width() {
+        // The width was already cropped to the ink by `render`; this must not redo, and
+        // definitely must not undo, that.
+        let mut r = TextRenderer::new();
+        let img = r.render("\u{2190}", 64.0, 200, [255, 255, 255, 255]);
+        let width_before = img.width;
+        assert_eq!(img.crop_to_ink_vertically().width, width_before);
+    }
+
+    #[test]
+    fn an_empty_image_reports_the_box_centre_rather_than_panicking() {
+        let mut r = TextRenderer::new();
+        let img = r.render("", 48.0, 200, [255, 255, 255, 255]);
+        assert_eq!(img.ink_vertical_center(), 0.5);
+        // And cropping it must not divide by, or index, anything that is not there.
+        let cropped = img.crop_to_ink_vertically();
+        assert!(cropped.height >= 1);
+    }
+
+    #[test]
+    fn what_the_ink_centre_is_depends_on_the_glyphs_and_not_only_on_the_size() {
+        // The property that makes a hard-coded 0.5 wrong. Where the ink sits inside the box is
+        // a fact about *which glyphs* were set, not about the size they were set at -- so two
+        // labels at one size can want two different centres, and a caller cannot pick one
+        // number for both. Asserted as "the same string at two sizes agrees, and that agreement
+        // is not what makes it right", which holds whatever font is installed.
+        let mut r = TextRenderer::new();
+        let small = r.render("space", 32.0, 400, [255, 255, 255, 255]).ink_vertical_center();
+        let large = r.render("space", 64.0, 800, [255, 255, 255, 255]).ink_vertical_center();
+        assert!(
+            (small - large).abs() < 0.05,
+            "the same word gave two centres at two sizes: {small} and {large}"
+        );
+        assert!((0.0..=1.0).contains(&small), "centre outside the image: {small}");
     }
 }
