@@ -724,8 +724,15 @@ impl PointerState {
         pointer.frame(state);
     }
 
-    /// Tell clients the scroll gesture ended, so kinetic scrolling can settle.
-    pub fn scroll_stop(&mut self, state: &mut Spatiand, time_ms: u32) {
+    /// Hand the page on to the client's own inertia.
+    ///
+    /// The wire event is `axis_stop`, which reads as the opposite of what it does. It reports
+    /// the *finger* stopping, and a toolkit answers it by flinging the content on at the speed
+    /// the scroll was doing — so this is what starts kinetic scrolling, not what settles it.
+    /// Sent only when [`spatiand_input::Scroll::Fling`] asks for it; a gesture that ends
+    /// without it simply leaves the page where the thumb left it, exactly as a mouse wheel
+    /// does, since a wheel never sends `axis_stop` at all.
+    pub fn scroll_fling(&mut self, state: &mut Spatiand, time_ms: u32) {
         let Some(pointer) = state.seat.get_pointer() else {
             return;
         };

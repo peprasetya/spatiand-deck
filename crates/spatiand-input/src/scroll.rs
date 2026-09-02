@@ -47,6 +47,25 @@
 //! frames and only sent once continued contact has vouched for it, and whatever is still
 //! waiting when the thumb goes is dropped unsent. The recording is what set `LAG`: the
 //! contamination ran **four** frames deep, and the previous value of two let half of it out.
+//!
+//! ## Ending a gesture is not the same as stopping it
+//!
+//! Filtering the deltas fixed the deltas and left the page still lurching, and the reason is
+//! that the last thing a gesture sends is not a movement at all. Wayland's `axis_stop` is
+//! named for the finger, not for the page: it says the thumb has gone, and a toolkit answers
+//! it by taking the speed the scroll was doing and **throwing** the content on from there.
+//! GTK, Chromium and Gecko all do this. So the event we were sending to settle a scroll was
+//! the one starting a kinetic fling — and we sent it twice over, once when the thumb lifted
+//! and again the moment the pad was clicked, which is why a press jumped the page as surely
+//! as a release did.
+//!
+//! Nothing has to receive it. A mouse wheel never sends `axis_stop` and clients cope, so
+//! withholding it is not a protocol hole — it simply leaves the page where the thumb left it.
+//!
+//! That makes inertia a choice, and [`EDGE`] is where the choice is made: a thumb that leaves
+//! from the rim was still going when it ran out of pad, so the page keeps going; a thumb
+//! lifted in the middle of the pad has arrived where it meant to, and the page stays put. A
+//! click never flings, whatever it is over — the press is a button.
 
 use std::collections::VecDeque;
 
@@ -91,6 +110,22 @@ const SPEED_ADAPT: f32 = 0.35;
 /// would be safest.
 const LAG: usize = 4;
 
+/// How far out a thumb must be when it leaves for the page to carry on without it, as a
+/// fraction of the way from the centre of the pad to whichever side it is nearest.
+///
+/// Measured along each axis separately rather than as a distance from the centre, because the
+/// pad reports a square: at the corners [`Pad::radius`] reaches 1.41, so a distance would call
+/// a thumb resting diagonally "at the edge" while it sat further from every side than one
+/// three quarters of the way up the middle. What this asks is the question worth asking —
+/// how close to running out of pad the thumb was.
+///
+/// Three quarters, checked against the recording, where the two cases fall either side of it
+/// with room to spare: the deliberate swipe stops at 0.69 and the flick leaves at 0.84. The
+/// exact figure matters less than which way it errs, and it errs outwards on purpose — set
+/// too far out, a flick fails to carry and the wearer swipes again; set too far in, the page
+/// is thrown when nobody threw it, which is the whole complaint.
+const EDGE: f32 = 0.75;
+
 /// What the pad is asking the pointer to do this frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scroll {
@@ -98,8 +133,13 @@ pub enum Scroll {
     Idle,
     /// Scroll by this much, in pad units. The caller decides what a pad unit is worth.
     By { dx: f32, dy: f32 },
-    /// The gesture ended. Sent once, so clients can settle any kinetic scrolling.
-    Stop,
+    /// Let the page carry on from here. Sent once, and only when the thumb left from the rim.
+    ///
+    /// This is Wayland's `axis_stop`, and the rename is the point: it does not stop anything.
+    /// A toolkit hearing it flings the content on at whatever speed the scroll was doing, so
+    /// sending it at the end of every gesture — and on every click — was what threw the page.
+    /// See [`EDGE`].
+    Fling,
 }
 
 /// One pad's worth of scroll state.
@@ -153,21 +193,30 @@ impl PadScroll {
     /// leaves it: the movement either side of a press belongs to the button, not the wheel.
     pub fn update(&mut self, pad: &Pad) -> Scroll {
         if !pad.touched {
+            // Where the thumb was on its last real frame. The frame that reports the lift
+            // carries no position -- there is nothing on the pad to have one.
+            let left_from = self.last;
             let running = self.running;
             // Everything still waiting was measured across the lift. This is the whole point.
             self.forget();
             // The lift is also the one moment a press is unambiguously over.
             self.disarmed = false;
-            return if running { Scroll::Stop } else { Scroll::Idle };
+            let at_edge = left_from.is_some_and(|(x, y)| x.abs().max(y.abs()) >= EDGE);
+            return if running && at_edge {
+                Scroll::Fling
+            } else {
+                Scroll::Idle
+            };
         }
 
         if pad.clicked {
             self.disarmed = true;
         }
         if self.disarmed {
-            let running = self.running;
+            // No fling, wherever the thumb is sitting. A press is a button, and a button that
+            // threw the page it was aiming at would be unusable at the edge of the pad.
             self.forget();
-            return if running { Scroll::Stop } else { Scroll::Idle };
+            return Scroll::Idle;
         }
 
         let now = (pad.x, pad.y);
@@ -275,13 +324,62 @@ mod tests {
         let out = run(&mut s, &[at(0.06, 0.13), at(-0.05, 0.12), lifted()]);
         // Whatever those two frames measured, none of it reached the pointer. Anything that
         // did come out is a delta from the clean part of the swipe -- straight up the pad,
-        // never sideways -- and the gesture ends cleanly.
+        // never sideways -- and the gesture ends without throwing the page, because it ended
+        // in the middle of the pad.
         for step in &out {
             if let Scroll::By { dx, .. } = step {
                 assert!(dx.abs() < 1e-6, "sideways drift leaked out: {out:?}");
             }
         }
-        assert_eq!(out.last(), Some(&Scroll::Stop), "got {out:?}");
+        assert_eq!(out.last(), Some(&Scroll::Idle), "got {out:?}");
+    }
+
+    #[test]
+    fn a_thumb_lifted_in_the_middle_leaves_the_page_where_it_is() {
+        // The complaint. A swipe that ends where the wearer meant it to end has arrived, and
+        // a page that keeps travelling afterwards has overshot whatever they were reading.
+        let mut s = PadScroll::default();
+        let swipe: Vec<Pad> = (0..12).map(|i| at(0.0, -0.2 + i as f32 * STEP)).collect();
+        run(&mut s, &swipe);
+        assert_eq!(s.update(&lifted()), Scroll::Idle);
+    }
+
+    #[test]
+    fn a_thumb_that_runs_off_the_edge_hands_the_page_on() {
+        // The other half. Swiping until the pad runs out is how you ask for more than one
+        // pad's worth of page, so the content carries on from there.
+        let mut s = PadScroll::default();
+        let swipe: Vec<Pad> = (0..12)
+            .map(|i| at(0.0, EDGE - 0.1 + i as f32 * STEP))
+            .collect();
+        run(&mut s, &swipe);
+        assert_eq!(s.update(&lifted()), Scroll::Fling);
+    }
+
+    #[test]
+    fn the_edge_is_whichever_side_is_nearest_not_the_distance_from_the_centre() {
+        // A thumb parked diagonally is further from every side than one three quarters of the
+        // way straight up, even though it is further from the middle. Measuring the distance
+        // from the centre would call it an edge and fling the page off a resting thumb.
+        let mut s = PadScroll::default();
+        let corner: Vec<Pad> = (0..12)
+            .map(|i| at(0.6 + i as f32 * STEP * 0.5, 0.6 + i as f32 * STEP * 0.5))
+            .collect();
+        assert!(
+            corner.last().unwrap().radius() > EDGE,
+            "the test needs a point past EDGE as a distance but not as a side"
+        );
+        run(&mut s, &corner);
+        assert_eq!(s.update(&lifted()), Scroll::Idle);
+    }
+
+    #[test]
+    fn an_edge_that_was_only_rested_on_flings_nothing() {
+        // Sitting a thumb on the rim and taking it off again is not a gesture, and there is no
+        // speed to carry on at.
+        let mut s = PadScroll::default();
+        run(&mut s, &[at(0.0, 0.9), at(0.0, 0.9), at(0.0, 0.9)]);
+        assert_eq!(s.update(&lifted()), Scroll::Idle);
     }
 
     #[test]
@@ -323,8 +421,26 @@ mod tests {
             clicked: true,
             ..pressing(0.0, 0.2, STEADY)
         };
-        assert_eq!(s.update(&clicked), Scroll::Stop);
-        assert_eq!(s.update(&clicked), Scroll::Idle, "the stop is sent once");
+        assert_eq!(s.update(&clicked), Scroll::Idle);
+        assert_eq!(s.update(&clicked), Scroll::Idle);
+    }
+
+    #[test]
+    fn clicking_at_the_edge_of_the_pad_does_not_throw_the_page() {
+        // Pressing is aiming, and the rim is a perfectly ordinary place to aim at. The click
+        // used to end the scroll with the same event a flick ends with, which is why a press
+        // sent the page off as surely as a release did.
+        let mut s = PadScroll::default();
+        let swipe: Vec<Pad> = (0..8).map(|i| at(0.0, 0.7 + i as f32 * STEP)).collect();
+        run(&mut s, &swipe);
+        let clicked = Pad {
+            clicked: true,
+            ..pressing(0.0, 0.86, STEADY)
+        };
+        assert_eq!(s.update(&clicked), Scroll::Idle);
+        // ...and the lift that follows it does not fling either, though it is at the rim: the
+        // press is over, not a gesture that was interrupted.
+        assert_eq!(s.update(&lifted()), Scroll::Idle);
     }
 }
 
@@ -357,6 +473,15 @@ mod trace {
         // The lift itself, which is where the recording's contamination lives.
         scroll.update(&Pad::default());
         sent
+    }
+
+    /// What the recorded contact did when the thumb came off it.
+    fn ending(frames: &[(f32, f32, bool, u16)]) -> Scroll {
+        let mut scroll = PadScroll::default();
+        for &(x, y, clicked, pressure) in frames {
+            scroll.update(&Pad { x, y, touched: true, clicked, pressure });
+        }
+        scroll.update(&Pad::default())
     }
 
     fn distance(deltas: &[(f32, f32)]) -> f32 {
@@ -450,5 +575,25 @@ mod trace {
             );
         }
     }
-}
 
+    #[test]
+    fn the_recorded_swipe_ends_where_the_thumb_ended() {
+        // Contact 2: a long deliberate swipe that comes to rest 0.69 of the way up the pad,
+        // short of the rim. The thumb stopped because the reading had arrived, so the page
+        // stops with it.
+        assert_eq!(ending(CONTACT_2), Scroll::Idle);
+    }
+
+    #[test]
+    fn the_recorded_flick_carries_on_past_the_pad() {
+        // Contact 3: a quick flick that leaves the pad 0.84 of the way up, still moving. It
+        // ran out of pad rather than out of intent, which is what inertia is for.
+        assert_eq!(ending(CONTACT_3), Scroll::Fling);
+    }
+
+    #[test]
+    fn the_recorded_press_never_flings() {
+        // Contact 4: the reported symptom -- rest, press, hold, release, lift.
+        assert_eq!(ending(CONTACT_4), Scroll::Idle);
+    }
+}

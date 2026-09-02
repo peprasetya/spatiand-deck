@@ -1336,8 +1336,11 @@ pub fn run(
                                         dy as f64 * SCROLL_SCALE,
                                         time_ms,
                                     ),
-                                    spatiand_input::Scroll::Stop => {
-                                        pointers.scroll_stop(&mut runtime.state, time_ms)
+                                    // Only ever sent when the thumb left from the rim: the
+                                    // client turns this into a kinetic fling, so it is the
+                                    // pad saying "carry on", not "settle down".
+                                    spatiand_input::Scroll::Fling => {
+                                        pointers.scroll_fling(&mut runtime.state, time_ms)
                                     }
                                     spatiand_input::Scroll::Idle => {}
                                 }
