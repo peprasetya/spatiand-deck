@@ -112,7 +112,8 @@ mod tests {
     /// Point the config directory at somewhere disposable. Serialised, because the environment
     /// is process-wide and these tests all write to it.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("spatiand-prefs-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("spatiand-prefs-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::env::set_var("XDG_CONFIG_HOME", &dir);
         dir
@@ -120,7 +121,9 @@ mod tests {
 
     #[test]
     fn a_choice_survives_the_session_that_made_it() {
-        let _lock = crate::prefs::tests::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::prefs::tests::LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("roundtrip");
         let mut prefs = Prefs::default();
         prefs.keyboard_click = false;
@@ -131,7 +134,9 @@ mod tests {
 
     #[test]
     fn a_session_with_no_file_gets_the_defaults() {
-        let _lock = crate::prefs::tests::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::prefs::tests::LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("missing");
         assert_eq!(Prefs::load(), Prefs::default());
         let _ = std::fs::remove_dir_all(&dir);
@@ -142,7 +147,9 @@ mod tests {
         // Both directions at once: a setting this build has never heard of, and one of ours
         // that is not in the file. Refusing either would mean the first upgrade silently
         // resets everything the wearer had chosen.
-        let _lock = crate::prefs::tests::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::prefs::tests::LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("compat");
         std::fs::create_dir_all(&dir.join("spatiand")).unwrap();
         std::fs::write(path(), "something_from_the_future = 3\n").unwrap();
@@ -154,13 +161,17 @@ mod tests {
     fn an_unreadable_file_is_kept_rather_than_replaced() {
         // Overwriting what we could not parse is how one bad character costs the wearer every
         // setting in the file.
-        let _lock = crate::prefs::tests::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::prefs::tests::LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = scratch("broken");
         std::fs::create_dir_all(&dir.join("spatiand")).unwrap();
         std::fs::write(path(), "this is not toml = = =").unwrap();
         let _ = Prefs::load();
         assert!(
-            std::fs::read_to_string(path()).unwrap().contains("not toml"),
+            std::fs::read_to_string(path())
+                .unwrap()
+                .contains("not toml"),
             "loading destroyed the file it could not read"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -170,12 +181,11 @@ mod tests {
 }
 
 /// The blend the session starts with, before anyone has had an opinion about it.
-const DEFAULT_DIRECTNESS: spatiand_audio::render::Directness =
-    spatiand_audio::render::Directness {
-        centred: 0.35,
-        off_axis: 0.10,
-        fade_by: 40.0 * std::f64::consts::PI / 180.0,
-    };
+const DEFAULT_DIRECTNESS: spatiand_audio::render::Directness = spatiand_audio::render::Directness {
+    centred: 0.35,
+    off_axis: 0.10,
+    fade_by: 40.0 * std::f64::consts::PI / 180.0,
+};
 
 fn yes() -> bool {
     true

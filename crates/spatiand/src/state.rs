@@ -220,12 +220,20 @@ impl Spatiand {
     }
 
     /// The surface under a point, for pointer focus.
-    pub fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
-        self.space.element_under(pos).and_then(|(window, location)| {
-            window
-                .surface_under(pos - location.to_f64(), smithay::desktop::WindowSurfaceType::ALL)
-                .map(|(s, p)| (s, (p + location).to_f64()))
-        })
+    pub fn surface_under(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        self.space
+            .element_under(pos)
+            .and_then(|(window, location)| {
+                window
+                    .surface_under(
+                        pos - location.to_f64(),
+                        smithay::desktop::WindowSurfaceType::ALL,
+                    )
+                    .map(|(s, p)| (s, (p + location).to_f64()))
+            })
     }
 }
 
@@ -253,7 +261,11 @@ impl CompositorHandler for Spatiand {
             if let Some(window) = self
                 .space
                 .elements()
-                .find(|w| w.toplevel().map(|t| t.wl_surface() == &root).unwrap_or(false))
+                .find(|w| {
+                    w.toplevel()
+                        .map(|t| t.wl_surface() == &root)
+                        .unwrap_or(false)
+                })
                 .cloned()
             {
                 window.on_commit();
@@ -470,7 +482,11 @@ impl Spatiand {
         if let Some(window) = self
             .space
             .elements()
-            .find(|w| w.toplevel().map(|t| t.wl_surface() == surface).unwrap_or(false))
+            .find(|w| {
+                w.toplevel()
+                    .map(|t| t.wl_surface() == surface)
+                    .unwrap_or(false)
+            })
             .cloned()
         {
             if let Some(toplevel) = window.toplevel() {
@@ -510,7 +526,12 @@ impl SeatHandler for Spatiand {
     }
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: smithay::input::pointer::CursorImageStatus) {}
+    fn cursor_image(
+        &mut self,
+        _seat: &Seat<Self>,
+        _image: smithay::input::pointer::CursorImageStatus,
+    ) {
+    }
 }
 
 // --- output ---

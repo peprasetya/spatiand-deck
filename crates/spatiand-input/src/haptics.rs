@@ -123,7 +123,10 @@ mod tests {
         let (duration, interval, count) = Feel::Click.shape();
         let total_us = count as u32 * (duration as u32 + interval as u32);
         assert!(total_us <= 20_000, "click lasts {total_us} us");
-        assert!(total_us > 2_000, "click lasts {total_us} us, too short to feel");
+        assert!(
+            total_us > 2_000,
+            "click lasts {total_us} us, too short to feel"
+        );
     }
 
     #[test]
@@ -143,7 +146,10 @@ mod tests {
         // feedback effect, and "subtle" is one step from "absent".
         let (duration, interval, count) = Feel::Tick.shape();
         let total_us = count as u32 * (duration as u32 + interval as u32);
-        assert!(total_us >= 3_000, "tick is {total_us} us, near the threshold that failed");
+        assert!(
+            total_us >= 3_000,
+            "tick is {total_us} us, near the threshold that failed"
+        );
         assert!(count >= 2, "a single pulse was not perceptible");
     }
 

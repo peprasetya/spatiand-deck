@@ -76,7 +76,9 @@ pub fn battery() -> Option<Battery> {
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// The whole status line.

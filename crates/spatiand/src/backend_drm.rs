@@ -111,7 +111,12 @@ pub fn run(
 
     // --- gpu ---
     let gpu = udev::primary_gpu(&session.seat())?
-        .and_then(|p| DrmNode::from_path(p).ok()?.node_with_type(NodeType::Primary)?.ok())
+        .and_then(|p| {
+            DrmNode::from_path(p)
+                .ok()?
+                .node_with_type(NodeType::Primary)?
+                .ok()
+        })
         .ok_or("no primary GPU found")?;
     log::info!("gpu: {gpu:?}");
 
@@ -194,7 +199,10 @@ pub fn run(
     let mut right_trigger = spatiand_input::Trigger::default();
     let mut left_trigger = spatiand_input::Trigger::default();
     let mut prefs = crate::prefs::Prefs::load();
-    let mut keyboard = spatiand_shell::Keyboard { click: prefs.keyboard_click, ..Default::default() };
+    let mut keyboard = spatiand_shell::Keyboard {
+        click: prefs.keyboard_click,
+        ..Default::default()
+    };
     // The sound a key makes. Nothing is started here: the first press opens the stream, so a
     // session that never types -- or one where the wearer has turned the click off -- never
     // touches the sound device at all.
@@ -278,8 +286,10 @@ pub fn run(
     // the rebuild loop below.
     let stored = spatiand_track::config::load_axes();
     let mut calibration: Option<Calibration> = None;
-    let mut tracker =
-        HeadTracker::new(stored.unwrap_or(AxisMap::XREAL_AIR), TrackerConfig::default());
+    let mut tracker = HeadTracker::new(
+        stored.unwrap_or(AxisMap::XREAL_AIR),
+        TrackerConfig::default(),
+    );
 
     // Page-flip completion drives the render loop.
     //
@@ -410,7 +420,10 @@ pub fn run(
                 continue;
             }
         };
-        let allocator = GbmAllocator::new(gbm.clone(), GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
+        let allocator = GbmAllocator::new(
+            gbm.clone(),
+            GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+        );
         let formats = renderer.egl_context().dmabuf_render_formats().clone();
 
         let output = Output::new(
@@ -431,7 +444,12 @@ pub fn run(
             refresh: (mode.vrefresh() * 1000) as i32,
         };
         let _global = output.create_global::<Spatiand>(&runtime.display_handle);
-        output.change_current_state(Some(output_mode), Some(Transform::Normal), None, Some((0, 0).into()));
+        output.change_current_state(
+            Some(output_mode),
+            Some(Transform::Normal),
+            None,
+            Some((0, 0).into()),
+        );
         output.set_preferred(output_mode);
         runtime.state.space.map_output(&output, (0, 0));
 
@@ -441,29 +459,27 @@ pub fn run(
             (),
             DrmDeviceFd,
         > = DrmCompositor::new(
-                // Auto, not Static.
-                //
-                // A static mode source is fixed at construction, and construction has to happen
-                // before the stereo switch (the link must be up first). Adopting 3840x1080 later
-                // with use_mode resizes the surface and swapchain but leaves a static source
-                // still reporting 1920 - so the compositor composites into the left half of the
-                // framebuffer and never writes the right. The symptom is a perfect left eye and
-                // a black right eye, which looks like a stereo bug rather than a sizing one.
-                //
-                // Auto follows the Output, so updating the output's mode after use_mode keeps
-                // everything in step.
-                smithay::output::OutputModeSource::Auto(output.clone()),
-                surface,
-                None,
-                allocator,
-                GbmFramebufferExporter::new(gbm.clone(), None),
-                [Fourcc::Argb8888, Fourcc::Xrgb8888],
-                formats,
-                drm.cursor_size(),
-                Some(gbm.clone()),
-            )?;
-
-
+            // Auto, not Static.
+            //
+            // A static mode source is fixed at construction, and construction has to happen
+            // before the stereo switch (the link must be up first). Adopting 3840x1080 later
+            // with use_mode resizes the surface and swapchain but leaves a static source
+            // still reporting 1920 - so the compositor composites into the left half of the
+            // framebuffer and never writes the right. The symptom is a perfect left eye and
+            // a black right eye, which looks like a stereo bug rather than a sizing one.
+            //
+            // Auto follows the Output, so updating the output's mode after use_mode keeps
+            // everything in step.
+            smithay::output::OutputModeSource::Auto(output.clone()),
+            surface,
+            None,
+            allocator,
+            GbmFramebufferExporter::new(gbm.clone(), None),
+            [Fourcc::Argb8888, Fourcc::Xrgb8888],
+            formats,
+            drm.cursor_size(),
+            Some(gbm.clone()),
+        )?;
 
         // --- the sidecar, on whatever screen the glasses are not using ---
         //
@@ -587,7 +603,10 @@ pub fn run(
                     wait_for_stereo_mode(&drm, connector_info.handle(), mono_width)
                 {
                     let (sw, sh) = stereo_mode.size();
-                    log::info!("stereo mode {sw}x{sh}@{} appeared; adopting", stereo_mode.vrefresh());
+                    log::info!(
+                        "stereo mode {sw}x{sh}@{} appeared; adopting",
+                        stereo_mode.vrefresh()
+                    );
                     match compositor.use_mode(stereo_mode) {
                         Ok(()) => {
                             w = sw;
@@ -611,12 +630,14 @@ pub fn run(
         }
         log::info!("presenting at {w}x{h}, stereo: {on_glasses}");
 
-
-
         // --- scene setup ---
         let stereo = StereoConfig {
             h_fov_deg: hmd.as_ref().map(|x| x.info().h_fov_deg).unwrap_or(40.0),
-            ipd_m: hmd.as_ref().map(|x| x.info().default_ipd_mm).unwrap_or(63.0) / 1000.0,
+            ipd_m: hmd
+                .as_ref()
+                .map(|x| x.info().default_ipd_mm)
+                .unwrap_or(63.0)
+                / 1000.0,
             per_eye: if on_glasses {
                 (w as u32 / 2, h as u32)
             } else {
@@ -624,7 +645,6 @@ pub fn run(
             },
             ..Default::default()
         };
-
 
         // The scene is drawn here with raw GL, then handed to DrmCompositor as one element.
         //
@@ -634,7 +654,8 @@ pub fn run(
         // therefore land on framebuffer 0, which in a DRM/GBM context has no surface behind it,
         // and every call fails with GL_INVALID_FRAMEBUFFER_OPERATION while the screen stays
         // black. Attaching our own FBO to the same texture is the fix.
-        let frame_target: GlesTexture = renderer.create_buffer(Fourcc::Abgr8888, (w as i32, h as i32).into())?;
+        let frame_target: GlesTexture =
+            renderer.create_buffer(Fourcc::Abgr8888, (w as i32, h as i32).into())?;
         let target_fbo = renderer.with_context(|gl| unsafe {
             let mut fbo = 0;
             gl.GenFramebuffers(1, &mut fbo);
@@ -706,9 +727,9 @@ pub fn run(
             clicks.wanted(
                 keyboard.click
                     && (keyboard.open
-                        || sidecar_ui.as_ref().is_some_and(|ui| {
-                            ui.page() == crate::sidecar::Page::Keyboard
-                        })),
+                        || sidecar_ui
+                            .as_ref()
+                            .is_some_and(|ui| ui.page() == crate::sidecar::Page::Keyboard)),
             );
 
             // Whether there is anywhere the wearer can actually look at the world, and if not,
@@ -807,7 +828,8 @@ pub fn run(
                                     let current = all
                                         .iter()
                                         .position(|w| runtime.state.layout.is_focused(w))
-                                        .unwrap_or(0) as i32;
+                                        .unwrap_or(0)
+                                        as i32;
                                     let next =
                                         (current + step).rem_euclid(all.len() as i32) as usize;
                                     let window = all[next].clone();
@@ -854,11 +876,8 @@ pub fn run(
                         let claim = spatial_audio.prepare_launch();
                         let env: Vec<(String, String)> =
                             claim.iter().map(|(_, e)| e.clone()).collect();
-                        match spatiand_platform::launch(
-                            &app.exec,
-                            &runtime.state.socket_name,
-                            &env,
-                        ) {
+                        match spatiand_platform::launch(&app.exec, &runtime.state.socket_name, &env)
+                        {
                             Ok(pid) => {
                                 if let Some((slot, _)) = claim {
                                     spatial_audio.launched(pid, slot);
@@ -899,15 +918,15 @@ pub fn run(
                         // already switched mode; all that is owed is a fresh list.
                         HudAction::OpenEnvironments => {
                             environments.refresh();
-                            shell.set_environments(
-                                environments.entries(),
-                                environments.choice(),
-                            );
+                            shell.set_environments(environments.entries(), environments.choice());
                         }
                         HudAction::Screenshot => screenshot = true,
                         HudAction::ToggleKeyboard => {
                             keyboard.open = !keyboard.open;
-                            log::info!("keyboard {}", if keyboard.open { "shown" } else { "hidden" });
+                            log::info!(
+                                "keyboard {}",
+                                if keyboard.open { "shown" } else { "hidden" }
+                            );
                         }
                         HudAction::ReturnToDesktop => leaving = true,
                         HudAction::OpenSystemSettings(panel) => {
@@ -1059,7 +1078,10 @@ pub fn run(
                                 map.summary(),
                                 known.summary()
                             ),
-                            Some(_) => log::info!("calibration agrees with the hardware: {}", map.summary()),
+                            Some(_) => log::info!(
+                                "calibration agrees with the hardware: {}",
+                                map.summary()
+                            ),
                             None => {
                                 log::info!("adopting measured axes: {}", map.summary());
                                 tracker.set_axes(map);
@@ -1242,7 +1264,10 @@ pub fn run(
             // Light the close button whichever hand is over it. Either pad can press it, so
             // lighting only the one under the dominant hand would leave the other pressing a
             // control that never acknowledged it was aimed at.
-            for aim in [right_aim.as_ref(), left_aim.as_ref()].into_iter().flatten() {
+            for aim in [right_aim.as_ref(), left_aim.as_ref()]
+                .into_iter()
+                .flatten()
+            {
                 let Some((index, _)) = aim.hit else { continue };
                 let Some(quad) = windows.get_mut(index) else {
                     continue;
@@ -1292,8 +1317,8 @@ pub fn run(
                                         if p.left_pad.touched {
                                             if let Some(previous) = drag_left_y {
                                                 let delta = (p.left_pad.y - previous) as f64;
-                                                placement.radius =
-                                                    (placement.radius + delta * 2.5).clamp(0.8, 8.0);
+                                                placement.radius = (placement.radius + delta * 2.5)
+                                                    .clamp(0.8, 8.0);
                                             }
                                             drag_left_y = Some(p.left_pad.y);
                                         } else {
@@ -1334,9 +1359,7 @@ pub fn run(
                         // the pads away from pointing. Merely *resting* a thumb does not --
                         // that is common while pointing with the other hand, and the gesture's
                         // deadband is what separates the two.
-                        let gesturing = two_handed
-                            .map(|d| !d.is_negligible())
-                            .unwrap_or(false);
+                        let gesturing = two_handed.map(|d| !d.is_negligible()).unwrap_or(false);
                         if gesturing {
                             // A gesture is not a scroll.
                             left_scroll.forget();
@@ -1348,8 +1371,7 @@ pub fn run(
                                     .find(|w| runtime.state.layout.is_focused(w))
                                     .cloned();
                                 if let Some(window) = focused {
-                                    if let Some(mut placement) = runtime.state.layout.get(&window)
-                                    {
+                                    if let Some(mut placement) = runtime.state.layout.get(&window) {
                                         // Pad units are roughly a radian of arc across, so the
                                         // window follows the thumbs at about the rate they move.
                                         placement.yaw -= delta.pan.0 as f64 * 0.6;
@@ -1416,10 +1438,14 @@ pub fn run(
                     //
                     // Updated unconditionally: hysteresis is state, and `||` would skip the
                     // call on any frame the pad was already down and strand it there.
-                    let r2 = right_trigger
-                        .update(p.right_trigger, p.buttons.is_down(spatiand_input::Control::R2));
-                    let l2 = left_trigger
-                        .update(p.left_trigger, p.buttons.is_down(spatiand_input::Control::L2));
+                    let r2 = right_trigger.update(
+                        p.right_trigger,
+                        p.buttons.is_down(spatiand_input::Control::R2),
+                    );
+                    let l2 = left_trigger.update(
+                        p.left_trigger,
+                        p.buttons.is_down(spatiand_input::Control::L2),
+                    );
                     let right_click = p.right_pad.clicked || r2;
                     let left_click = p.left_pad.clicked || l2;
 
@@ -1429,7 +1455,10 @@ pub fn run(
                     // missing feedback.
                     if let Some(c) = controller.as_ref() {
                         if right_click && !right_was_down {
-                            c.pulse(spatiand_input::HapticPad::Right, spatiand_input::Feel::Click);
+                            c.pulse(
+                                spatiand_input::HapticPad::Right,
+                                spatiand_input::Feel::Click,
+                            );
                         }
                         if left_click && !left_was_down {
                             c.pulse(spatiand_input::HapticPad::Left, spatiand_input::Feel::Click);
@@ -1464,7 +1493,10 @@ pub fn run(
                     keyboard_reach = [None, None];
                     keyboard_border_hot = keyboard_resize.is_some();
                     if let Some(q) = keyboard_quad.as_ref() {
-                        for (hand, aim) in [right_aim.as_ref(), left_aim.as_ref()].into_iter().enumerate() {
+                        for (hand, aim) in [right_aim.as_ref(), left_aim.as_ref()]
+                            .into_iter()
+                            .enumerate()
+                        {
                             let Some(aim) = aim else { continue };
                             let Some(hit) = spatiand_render::intersect_quad(&aim.ray, q) else {
                                 continue;
@@ -1494,7 +1526,8 @@ pub fn run(
                     if let (Some(start), Some(q)) = (keyboard_resize, keyboard_quad.as_ref()) {
                         if right_click {
                             if let Some(a) = right_aim.as_ref() {
-                                if let Some(hit) = spatiand_render::ray::intersect_plane(&a.ray, q) {
+                                if let Some(hit) = spatiand_render::ray::intersect_plane(&a.ray, q)
+                                {
                                     // How far out from the middle the pointer is now, against
                                     // where it was when the frame was grabbed. Measured from
                                     // the centre so the gesture is "pull it bigger" in any
@@ -1503,11 +1536,10 @@ pub fn run(
                                     // could mean that this does not.
                                     let now = span(hit.u, hit.v);
                                     if start.1 > 1e-4 {
-                                        keyboard.scale =
-                                            (start.0 * (now / start.1) as f32).clamp(
-                                                spatiand_shell::keyboard::MIN_SCALE,
-                                                spatiand_shell::keyboard::MAX_SCALE,
-                                            );
+                                        keyboard.scale = (start.0 * (now / start.1) as f32).clamp(
+                                            spatiand_shell::keyboard::MIN_SCALE,
+                                            spatiand_shell::keyboard::MAX_SCALE,
+                                        );
                                     }
                                 }
                             }
@@ -1591,11 +1623,8 @@ pub fn run(
                             // the bar first would start a drag and never reach this.
                             Some(a) if a.zone == Some(Zone::Mute) => {
                                 if let Some(quad) = a.hit.and_then(|(i, _)| windows.get(i)) {
-                                    if let Some(id) =
-                                        runtime.state.layout.id_of(&quad.window)
-                                    {
-                                        let now =
-                                            quad.sound.map(|s| s.muted).unwrap_or(false);
+                                    if let Some(id) = runtime.state.layout.id_of(&quad.window) {
+                                        let now = quad.sound.map(|s| s.muted).unwrap_or(false);
                                         spatial_audio.set_muted(id, !now);
                                         log::info!(
                                             "{} {}",
@@ -1610,10 +1639,13 @@ pub fn run(
                             }
                             Some(a) if a.zone == Some(Zone::Close) => {
                                 if let Some(quad) = a.hit.and_then(|(i, _)| windows.get(i)) {
-                                    log::info!("closing {}", runtime
-                                        .state
-                                        .title_of(&quad.window)
-                                        .unwrap_or_else(|| "a window".into()));
+                                    log::info!(
+                                        "closing {}",
+                                        runtime
+                                            .state
+                                            .title_of(&quad.window)
+                                            .unwrap_or_else(|| "a window".into())
+                                    );
                                     runtime.state.close_window(&quad.window);
                                 }
                             }
@@ -1853,10 +1885,8 @@ pub fn run(
                         // a thumb on it is the normal state while the other hand does
                         // something -- during a two-thumb zoom, for instance -- and blanking
                         // the left beam then removes the pointer you are working with.
-                        let right_owns = pads
-                            .as_ref()
-                            .map(|p| p.right_pad.clicked)
-                            .unwrap_or(false);
+                        let right_owns =
+                            pads.as_ref().map(|p| p.right_pad.clicked).unwrap_or(false);
                         for (aim, right_hand, on_keys) in [
                             (right_aim.as_ref(), true, keyboard_reach[0]),
                             (left_aim.as_ref(), false, keyboard_reach[1]),
@@ -2018,8 +2048,15 @@ pub fn run(
                         }
                     }
                 }
-                let prepared =
-                    ui.prepare(&mut renderer, &mut text, &monitors, &status_text, levels, &audio, &keyboard);
+                let prepared = ui.prepare(
+                    &mut renderer,
+                    &mut text,
+                    &monitors,
+                    &status_text,
+                    levels,
+                    &audio,
+                    &keyboard,
+                );
                 let (sw, sh) = (side.size.0 as i32, side.size.1 as i32);
                 let fbo = side.fbo;
                 let quads = scene.quads();
@@ -2032,7 +2069,16 @@ pub fn run(
                     gl.Viewport(0, 0, sw, sh);
                     gl.ClearColor(0.02, 0.03, 0.05, 1.0);
                     gl.Clear(ffi::COLOR_BUFFER_BIT);
-                    ui.draw(gl, quads, rounded, &monitors, levels, &audio, keyboard_for_panel, &prepared);
+                    ui.draw(
+                        gl,
+                        quads,
+                        rounded,
+                        &monitors,
+                        levels,
+                        &audio,
+                        keyboard_for_panel,
+                        &prepared,
+                    );
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
                 })?;
 
@@ -2213,7 +2259,11 @@ fn external_connector_present(drm: &DrmDevice) -> bool {
 
 fn pick_output(
     drm: &DrmDevice,
-) -> Option<(connector::Info, crtc::Handle, smithay::reexports::drm::control::Mode)> {
+) -> Option<(
+    connector::Info,
+    crtc::Handle,
+    smithay::reexports::drm::control::Mode,
+)> {
     let resources = drm.resource_handles().ok()?;
     let mut connected: Vec<connector::Info> = resources
         .connectors()
@@ -2329,9 +2379,14 @@ fn first_free_crtc(
 /// Failure is not fatal and barely worth a warning at error level: a Deck has a touchscreen,
 /// a desktop with glasses attached does not, and the sidecar is perfectly readable either way.
 fn open_touchscreen(session: &mut LibSeatSession) -> Option<spatiand_input::Touchscreen> {
-    let node = spatiand_input::touch::find_touchscreens().into_iter().next()?;
+    let node = spatiand_input::touch::find_touchscreens()
+        .into_iter()
+        .next()?;
     log::info!("touchscreen: {} at {}", node.name, node.path.display());
-    let fd = match session.open(&node.path, OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK) {
+    let fd = match session.open(
+        &node.path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+    ) {
         Ok(fd) => fd,
         Err(e) => {
             log::warn!("could not open {}: {e}", node.path.display());
@@ -2386,9 +2441,7 @@ fn build_sidecar(
         .iter()
         .filter_map(|c| drm.get_connector(*c, true).ok())
         .filter(|c| {
-            c.handle() != used
-                && c.state() == connector::State::Connected
-                && !c.modes().is_empty()
+            c.handle() != used && c.state() == connector::State::Connected && !c.modes().is_empty()
         })
         .collect();
 
@@ -2434,7 +2487,12 @@ fn build_sidecar(
             size: (w as i32, h as i32).into(),
             refresh: (mode.vrefresh() * 1000) as i32,
         };
-        output.change_current_state(Some(output_mode), Some(Transform::Normal), None, Some((0, 0).into()));
+        output.change_current_state(
+            Some(output_mode),
+            Some(Transform::Normal),
+            None,
+            Some((0, 0).into()),
+        );
         output.set_preferred(output_mode);
 
         let compositor = DrmCompositor::new(
@@ -2480,7 +2538,9 @@ fn build_sidecar(
             pending: false,
             failures: 0,
             _global: output.create_global::<Spatiand>(&GLOBAL_DISPLAY_HANDLE.with(|h| {
-                h.borrow().clone().expect("display handle set before build_sidecar")
+                h.borrow()
+                    .clone()
+                    .expect("display handle set before build_sidecar")
             })),
             _output: output,
         }));
@@ -2560,7 +2620,12 @@ mod tests {
     use spatiand_render::ray::Hit;
 
     fn hit(distance: f64) -> Hit {
-        Hit { distance, u: 0.5, v: 0.5, point: DVec3::ZERO }
+        Hit {
+            distance,
+            u: 0.5,
+            v: 0.5,
+            point: DVec3::ZERO,
+        }
     }
 
     #[test]
@@ -2664,7 +2729,6 @@ fn send_key_state(state: &mut Spatiand, evdev_code: u32, pressed: bool, time_ms:
         |_, _, _| smithay::input::keyboard::FilterResult::Forward,
     );
 }
-
 
 /// Decide which sensor axis convention to track with, now that a headset is open.
 ///
@@ -2850,7 +2914,12 @@ pub fn fit_panel(aspect: f32, h_fov_deg: f64, v_fov_deg: f64, portrait: bool) ->
 /// degrees below where you are looking - enough that a correctly-sized panel still loses its
 /// bottom line off the edge of the field. That was the bug behind "the text is off screen":
 /// the panel was the right size and in the wrong place.
-pub fn head_locked_panel_sized(orientation: DQuat, width: f32, height: f32, portrait: bool) -> Mat4 {
+pub fn head_locked_panel_sized(
+    orientation: DQuat,
+    width: f32,
+    height: f32,
+    portrait: bool,
+) -> Mat4 {
     let _ = PANEL_WIDTH;
     let cfg = StereoConfig::default();
     let centre = Vec3::new(

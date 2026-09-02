@@ -127,7 +127,10 @@ mod tests {
         // offering to quit before the wearer has looked up, and it was reported as a crash.
         for had in [true, false] {
             let hint = exit_hint(true, had);
-            assert!(hint.contains("Hold"), "{hint:?} offers something other than a hold");
+            assert!(
+                hint.contains("Hold"),
+                "{hint:?} offers something other than a hold"
+            );
             assert!(!hint.contains("Press any"), "{hint:?} still offers a press");
         }
     }
@@ -157,10 +160,16 @@ mod tests {
         // their own, and a screen that only mentions the cable sends them hunting for a
         // second cable they do not need.
         for expected in ["cable", "powered off"] {
-            assert!(text.contains(expected), "no mention of {expected:?}: {text}");
+            assert!(
+                text.contains(expected),
+                "no mention of {expected:?}: {text}"
+            );
         }
         // Specifically not a restart, which leaves the port controller powered and wedged.
-        assert!(text.contains("not restart"), "does not rule out a plain restart: {text}");
+        assert!(
+            text.contains("not restart"),
+            "does not rule out a plain restart: {text}"
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! to press, only characters arranged in a grid.
 
 use spatiand_render::{TextImage, TextRenderer};
-use spatiand_shell::keyboard::{layout, Key, Keyboard, KeyRect, Role};
+use spatiand_shell::keyboard::{layout, Key, KeyRect, Keyboard, Role};
 
 /// Gap between neighbouring keycaps, as a fraction of a cell's shorter side.
 ///
@@ -120,11 +120,22 @@ pub fn face(text: &mut TextRenderer, keyboard: &Keyboard, width_px: u32) -> Text
     } else {
         (CAP_MODIFIER, INK_MODIFIER)
     };
-    rounded_rect(&mut rgba, width, height, cap, cap.2.min(cap.3) * RADIUS, fill);
+    rounded_rect(
+        &mut rgba,
+        width,
+        height,
+        cap,
+        cap.2.min(cap.3) * RADIUS,
+        fill,
+    );
     let glyphs = fit_label(text, sound_symbol(keyboard), cap.2, cap.3, ink);
     blit_centred(&mut rgba, width, height, &glyphs, cap);
 
-    TextImage { width, height, rgba }
+    TextImage {
+        width,
+        height,
+        rgba,
+    }
 }
 
 /// Whether a label is an **icon** rather than type.
@@ -169,12 +180,15 @@ pub fn sound_symbol(keyboard: &Keyboard) -> &'static str {
 /// lettering. Nothing here is drawn twice, so neither can happen.
 pub fn cap(text: &mut TextRenderer, keyboard: &Keyboard, key: &Key, width_px: u32) -> TextImage {
     let Some((_, cell)) = layout().into_iter().find(|(k, _)| k.code == key.code) else {
-        return TextImage { width: 0, height: 0, rgba: Vec::new() };
+        return TextImage {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+        };
     };
     // The cell's own shape, in pixels rather than in the face's units. Growing it by the margin
     // on all four sides leaves the aspect alone, so this is the image's aspect too.
-    let cell_aspect =
-        (cell.half_u / cell.half_v) * spatiand_shell::keyboard::face_aspect();
+    let cell_aspect = (cell.half_u / cell.half_v) * spatiand_shell::keyboard::face_aspect();
     let width = width_px.max(16);
     let height = ((width as f64 / cell_aspect).round() as u32).max(16);
 
@@ -200,7 +214,16 @@ pub fn cap(text: &mut TextRenderer, keyboard: &Keyboard, key: &Key, width_px: u3
     // the parallax between them is far below what the eye can pick out.
     let under = (rect.0, rect.1 + short * SHADOW_DROP, rect.2, rect.3);
     let (fill, ink) = appearance(keyboard, key);
-    rounded_rect_with(&mut rgba, width, height, under, radius, SHADOW, short * SHADOW_BLUR, false);
+    rounded_rect_with(
+        &mut rgba,
+        width,
+        height,
+        under,
+        radius,
+        SHADOW,
+        short * SHADOW_BLUR,
+        false,
+    );
 
     let raised = [
         (fill[0] * RAISE).min(1.0),
@@ -215,7 +238,11 @@ pub fn cap(text: &mut TextRenderer, keyboard: &Keyboard, key: &Key, width_px: u3
         let glyphs = fit_label(text, label, rect.2, rect.3, ink);
         blit_centred(&mut rgba, width, height, &glyphs, rect);
     }
-    TextImage { width, height, rgba }
+    TextImage {
+        width,
+        height,
+        rgba,
+    }
 }
 
 /// What a raised cap's picture depends on: which key it is, what it currently reads, and
@@ -225,7 +252,12 @@ pub fn cap(text: &mut TextRenderer, keyboard: &Keyboard, key: &Key, width_px: u3
 pub fn cap_id(keyboard: &Keyboard, key: &Key) -> String {
     // The toggle is not a key and never rises, so it is deliberately not part of this. What
     // *does* depend on it is the face, whose cache lives in `Scene::sync_keyboard`.
-    format!("{}|{}|{}", key.code, keyboard.label(key), keyboard.is_latched(key))
+    format!(
+        "{}|{}|{}",
+        key.code,
+        keyboard.label(key),
+        keyboard.is_latched(key)
+    )
 }
 
 /// How a key is coloured: its cap and its ink.
@@ -236,7 +268,14 @@ fn appearance(keyboard: &Keyboard, key: &Key) -> ([f32; 4], [u8; 4]) {
     match (keyboard.is_latched(key), key.role) {
         (true, _) => (CAP_LATCHED, INK_LATCHED),
         (false, Role::Modifier(_)) => (CAP_MODIFIER, INK_MODIFIER),
-        (false, Role::Normal) => (CAP, if key.label.len() > 1 { INK_MODIFIER } else { INK }),
+        (false, Role::Normal) => (
+            CAP,
+            if key.label.len() > 1 {
+                INK_MODIFIER
+            } else {
+                INK
+            },
+        ),
     }
 }
 
@@ -453,7 +492,10 @@ mod tests {
         for (s, image) in [(SOUND_ON, &on), (SOUND_OFF, &off)] {
             assert_eq!(s.chars().count(), 1, "{s:?} is not a single symbol");
             assert!(!s.is_ascii(), "{s:?} should be a symbol, not a letter");
-            assert!(image.width > 0 && image.height > 0, "{s:?} rendered nothing at all");
+            assert!(
+                image.width > 0 && image.height > 0,
+                "{s:?} rendered nothing at all"
+            );
         }
         assert!(
             on.width != off.width || on.rgba != off.rgba,
@@ -468,14 +510,21 @@ mod tests {
         let on = face(&mut text, &keyboard, 900);
         keyboard.click = false;
         let off = face(&mut text, &keyboard, 900);
-        assert_ne!(on.rgba, off.rgba, "the face looks the same with the sound off");
+        assert_ne!(
+            on.rgba, off.rgba,
+            "the face looks the same with the sound off"
+        );
 
         // Everything that changed has to be inside the toggle's own cell. This is the check
         // that a change to the toggle has not quietly restyled the keys as well — which would
         // not show up in "the images differ" and is exactly the kind of thing that only gets
         // noticed once it is in a headset.
         let (w, h) = (on.width as usize, on.height as usize);
-        let cell = cap_rect(&spatiand_shell::keyboard::toggle_rect(), on.width, on.height);
+        let cell = cap_rect(
+            &spatiand_shell::keyboard::toggle_rect(),
+            on.width,
+            on.height,
+        );
         for y in 0..h {
             for x in 0..w {
                 let i = (y * w + x) * 4;
@@ -486,7 +535,10 @@ mod tests {
                     && (x as f32) <= cell.0 + cell.2 + 2.0
                     && (y as f32) >= cell.1 - 2.0
                     && (y as f32) <= cell.1 + cell.3 + 2.0;
-                assert!(inside, "turning the sound off changed the face at ({x}, {y})");
+                assert!(
+                    inside,
+                    "turning the sound off changed the face at ({x}, {y})"
+                );
             }
         }
     }
@@ -497,7 +549,9 @@ mod tests {
         // caps. `blit_centred` places a label by its image's own dimensions, so an icon is
         // centred exactly when its image has no blank rows left on it.
         let mut text = TextRenderer::new();
-        for symbol in [SOUND_ON, SOUND_OFF, "\u{2190}", "\u{2191}", "\u{2193}", "\u{2192}"] {
+        for symbol in [
+            SOUND_ON, SOUND_OFF, "\u{2190}", "\u{2191}", "\u{2193}", "\u{2192}",
+        ] {
             let image = fit_label(&mut text, symbol, 120.0, 45.0, INK);
             let (top, bottom) = image.ink_vertical_extent();
             assert!(
@@ -569,9 +623,17 @@ mod tests {
             .count() as f32
             / (image.rgba.len() / 4) as f32;
         // Gaps exist, so it reads as keys...
-        assert!(on_ground > 0.05, "only {:.1}% is gap; the caps have run together", on_ground * 100.0);
+        assert!(
+            on_ground > 0.05,
+            "only {:.1}% is gap; the caps have run together",
+            on_ground * 100.0
+        );
         // ...but the caps are most of it.
-        assert!(on_ground < 0.6, "{:.1}% is bare ground; the caps are too small", on_ground * 100.0);
+        assert!(
+            on_ground < 0.6,
+            "{:.1}% is bare ground; the caps are too small",
+            on_ground * 100.0
+        );
     }
 
     #[test]
@@ -603,7 +665,11 @@ mod tests {
         // the fitted label is narrower than the room it was given.
         let mut text = TextRenderer::new();
         let fitted = fit_label(&mut text, "space", 200.0, 40.0, INK);
-        assert!(fitted.width as f32 <= 200.0 * 0.82 + 1.0, "label is {} wide", fitted.width);
+        assert!(
+            fitted.width as f32 <= 200.0 * 0.82 + 1.0,
+            "label is {} wide",
+            fitted.width
+        );
         assert!(fitted.width > 0, "the label rasterised to nothing");
     }
 

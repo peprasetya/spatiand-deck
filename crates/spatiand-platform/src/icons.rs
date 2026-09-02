@@ -32,8 +32,8 @@ const THEMES: &[&str] = &["breeze", "Breeze_Light", "Adwaita", "hicolor"];
 /// icons, because those live exclusively in Breeze — which presented as the launcher's group
 /// bubbles all falling back to a letter while the app bubbles were fine.
 const SIZES: &[&str] = &[
-    "scalable", "512x512", "512", "256x256", "256", "128x128", "128", "96x96", "96", "64x64",
-    "64", "48x48", "48", "32x32", "32", "24", "22",
+    "scalable", "512x512", "512", "256x256", "256", "128x128", "128", "96x96", "96", "64x64", "64",
+    "48x48", "48", "32x32", "32", "24", "22",
 ];
 
 fn icon_roots() -> Vec<PathBuf> {
@@ -169,7 +169,10 @@ mod tests {
         let numeric: Vec<u32> = SIZES
             .iter()
             .filter(|s| **s != "scalable")
-            .filter_map(|s| s.split_once('x').map_or_else(|| s.parse().ok(), |(w, _)| w.parse().ok()))
+            .filter_map(|s| {
+                s.split_once('x')
+                    .map_or_else(|| s.parse().ok(), |(w, _)| w.parse().ok())
+            })
             .collect();
         assert!(
             numeric.windows(2).all(|w| w[0] >= w[1]),

@@ -280,7 +280,12 @@ pub fn face_aspect() -> f64 {
 pub fn toggle_rect() -> KeyRect {
     let w = TOGGLE_UNITS as f64 / ROW_UNITS as f64;
     let h = chrome_fraction();
-    KeyRect { u: w * 0.5, v: h * 0.5, half_u: w * 0.5, half_v: h * 0.5 }
+    KeyRect {
+        u: w * 0.5,
+        v: h * 0.5,
+        half_u: w * 0.5,
+        half_v: h * 0.5,
+    }
 }
 
 /// Aspect ratio of the whole plate, border included.
@@ -299,10 +304,7 @@ pub fn outer_aspect() -> f64 {
 pub fn face_fraction() -> (f64, f64) {
     let face_w = face_aspect();
     let border = BORDER_FRACTION;
-    (
-        face_w / (face_w + border * 2.0),
-        1.0 / (1.0 + border * 2.0),
-    )
+    (face_w / (face_w + border * 2.0), 1.0 / (1.0 + border * 2.0))
 }
 
 /// Every key with the cell it occupies.
@@ -544,7 +546,11 @@ mod tests {
         let kb = Keyboard::default();
         for (k, rect) in layout() {
             let hit = kb.key_at(rect.u, rect.v).expect("a cell centre must hit");
-            assert_eq!(hit.code, k.code, "cell for {:?} hits {:?}", k.label, hit.label);
+            assert_eq!(
+                hit.code, k.code,
+                "cell for {:?} hits {:?}",
+                k.label, hit.label
+            );
         }
     }
 
@@ -552,8 +558,14 @@ mod tests {
     fn the_cells_tile_the_face_without_gaps_or_overlap() {
         // Everything below the strip, and nothing above it.
         let want = 1.0 - chrome_fraction();
-        let total: f64 = layout().iter().map(|(_, r)| r.half_u * 2.0 * r.half_v * 2.0).sum();
-        assert!((total - want).abs() < 1e-9, "cells cover {total} of the face, wanted {want}");
+        let total: f64 = layout()
+            .iter()
+            .map(|(_, r)| r.half_u * 2.0 * r.half_v * 2.0)
+            .sum();
+        assert!(
+            (total - want).abs() < 1e-9,
+            "cells cover {total} of the face, wanted {want}"
+        );
     }
 
     #[test]
@@ -603,7 +615,10 @@ mod tests {
         assert_eq!(kb.label(&a), "A");
         let stroke = kb.press(&a).expect("a letter types");
         assert_eq!(stroke.code, 30);
-        assert!(stroke.shift, "the latch must reach the keystroke, not just the label");
+        assert!(
+            stroke.shift,
+            "the latch must reach the keystroke, not just the label"
+        );
         kb.after_press(&a);
         assert!(!kb.shift, "a latch releases after one key");
         assert_eq!(kb.label(&a), "a");
@@ -632,7 +647,10 @@ mod tests {
         let shift = ROWS[3][0];
         kb.press(&shift);
         kb.press(&shift);
-        assert!(!kb.shift, "a modifier must be escapable without typing something");
+        assert!(
+            !kb.shift,
+            "a modifier must be escapable without typing something"
+        );
     }
 
     #[test]
@@ -680,7 +698,10 @@ mod tests {
         // And the shifted symbols above them. The "1" is the second cell, so it starts one
         // key-width in — aiming at 0.03 lands on the backtick.
         let one = kb
-            .key_at(UNIT as f64 * 1.5 / ROW_UNITS as f64, chrome_fraction() + 0.05)
+            .key_at(
+                UNIT as f64 * 1.5 / ROW_UNITS as f64,
+                chrome_fraction() + 0.05,
+            )
             .unwrap();
         assert_eq!(one.label, "1");
         assert_eq!(one.shifted, "!");
@@ -726,7 +747,10 @@ mod tests {
         let kb = Keyboard::default();
         assert!(!kb.open);
         assert_eq!(kb.scale, 1.0);
-        assert!(kb.click, "a keyboard with no travel should confirm a press somehow");
+        assert!(
+            kb.click,
+            "a keyboard with no travel should confirm a press somehow"
+        );
     }
 
     #[test]
@@ -764,7 +788,10 @@ mod tests {
         let kb = Keyboard::default();
         let t = toggle_rect();
         // On the face it is not a key...
-        assert!(kb.key_at(t.u, t.v).is_none(), "the toggle is being read as a key");
+        assert!(
+            kb.key_at(t.u, t.v).is_none(),
+            "the toggle is being read as a key"
+        );
         // ...and on the plate it is the toggle rather than the frame.
         let (fw, fh) = face_fraction();
         let plate = |u: f64, v: f64| (u * fw + (1.0 - fw) * 0.5, v * fh + (1.0 - fh) * 0.5);

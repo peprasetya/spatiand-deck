@@ -122,12 +122,7 @@ pub fn eyes_for(orientation: DQuat, head_position: DVec3, cfg: &StereoConfig) ->
     EyeSide::both().map(|side| eye_for(side, orientation, head_position, cfg))
 }
 
-pub fn eye_for(
-    side: EyeSide,
-    orientation: DQuat,
-    head_position: DVec3,
-    cfg: &StereoConfig,
-) -> Eye {
+pub fn eye_for(side: EyeSide, orientation: DQuat, head_position: DVec3, cfg: &StereoConfig) -> Eye {
     // In the canonical frame: +X forward, +Y left, +Z up.
     let forward = orientation * DVec3::X;
     let left = orientation * DVec3::Y;
@@ -310,7 +305,11 @@ mod tests {
         assert_eq!((lx, lw), (0, 1920));
         assert_eq!((rx, rw), (1920, 1920));
         assert_eq!(lx + lw, rx, "the halves must abut with no gap or overlap");
-        assert_eq!(rx + rw, 3840, "together they must fill the 3840 wide signal");
+        assert_eq!(
+            rx + rw,
+            3840,
+            "together they must fill the 3840 wide signal"
+        );
         assert_eq!(lh, 1080);
     }
 

@@ -19,9 +19,7 @@ use glam::DVec3;
 
 use crate::device::{self, DeviceSpec};
 use crate::hid::{self, HidDevice, HidNode};
-use crate::{
-    DisplayMode, Hmd, HmdButton, HmdError, HmdEvent, HmdInfo, ImuSample, Result,
-};
+use crate::{DisplayMode, Hmd, HmdButton, HmdError, HmdEvent, HmdInfo, ImuSample, Result};
 
 // --- MCU (interface 4) ---
 const MCU_HEAD: u8 = 0xFD;
@@ -295,7 +293,11 @@ impl XrealGlasses {
         // 24-bit little-endian, sign-extended.
         let i24le = |o: usize| {
             let v = packet[o] as i32 | (packet[o + 1] as i32) << 8 | (packet[o + 2] as i32) << 16;
-            (if v & 0x0080_0000 != 0 { v - (1 << 24) } else { v }) as f64
+            (if v & 0x0080_0000 != 0 {
+                v - (1 << 24)
+            } else {
+                v
+            }) as f64
         };
 
         let timestamp_ns = u64::from_le_bytes(packet[4..12].try_into().ok()?);
@@ -341,18 +343,24 @@ impl Hmd for XrealGlasses {
             DisplayMode::Stereo => (self.spec.mode_stereo, Some(self.spec.mode_stereo_fallback)),
         };
 
-        let mut err = match self.mcu_command(MSG_W_DISP_MODE, &[primary], "display mode", &mut pending) {
-            Ok(_) => {
-                self.mode = mode;
-                return Ok(mode);
-            }
-            Err(e) => e,
-        };
+        let mut err =
+            match self.mcu_command(MSG_W_DISP_MODE, &[primary], "display mode", &mut pending) {
+                Ok(_) => {
+                    self.mode = mode;
+                    return Ok(mode);
+                }
+                Err(e) => e,
+            };
         // The preferred stereo mode is the higher refresh rate. If the link cannot carry it,
         // a lower one is much better than staying flat, so try it before giving up.
         if let Some(alt) = fallback {
             log::warn!("display mode {primary:#04x} not acknowledged ({err}); trying {alt:#04x}");
-            match self.mcu_command(MSG_W_DISP_MODE, &[alt], "display mode (fallback)", &mut pending) {
+            match self.mcu_command(
+                MSG_W_DISP_MODE,
+                &[alt],
+                "display mode (fallback)",
+                &mut pending,
+            ) {
                 Ok(_) => {
                     self.mode = mode;
                     return Ok(mode);
@@ -425,7 +433,10 @@ impl Hmd for XrealGlasses {
         }
 
         // A hangup on either interface means the glasses were unplugged.
-        if fds.iter().any(|f| f.revents & (libc::POLLHUP | libc::POLLERR) != 0) {
+        if fds
+            .iter()
+            .any(|f| f.revents & (libc::POLLHUP | libc::POLLERR) != 0)
+        {
             return Ok(Some(HmdEvent::Disconnected));
         }
 
@@ -513,7 +524,10 @@ mod tests {
         // that broke it looked like a floor and was one, for a different device.
         for level in [0.0, 0.01, 0.05, 0.07, -1.0, f32::MIN] {
             let step = XrealGlasses::unit_to_brightness(level).max(DIMMEST_STEP);
-            assert!(step >= 1, "{level} selects step {step}, which is the panel off");
+            assert!(
+                step >= 1,
+                "{level} selects step {step}, which is the panel off"
+            );
         }
         // And it is a floor, not a rescaling: everything above it is untouched.
         for step in 1..BRIGHTNESS_LEVELS {
@@ -572,7 +586,10 @@ mod tests {
         let mut pkt = vec![IMU_HEAD];
         pkt.extend_from_slice(&hid::crc32(&body).to_le_bytes());
         pkt.extend_from_slice(&body);
-        assert_eq!(pkt, vec![0xaa, 0xc5, 0xd1, 0x21, 0x42, 0x04, 0x00, 0x19, 0x01]);
+        assert_eq!(
+            pkt,
+            vec![0xaa, 0xc5, 0xd1, 0x21, 0x42, 0x04, 0x00, 0x19, 0x01]
+        );
     }
 
     // Scalers as reported by this hardware, confirmed by the spike and by docs §5.

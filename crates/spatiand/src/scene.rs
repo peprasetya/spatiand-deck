@@ -29,7 +29,10 @@ use spatiand_shell::{Mode, Shell};
 
 use smithay::backend::renderer::gles::ffi;
 
-use crate::gl::{upload_raw, upload_rgba, BubbleParams, BubblePipeline, QuadPipeline, RoundedPipeline, SkyPipeline};
+use crate::gl::{
+    upload_raw, upload_rgba, BubbleParams, BubblePipeline, QuadPipeline, RoundedPipeline,
+    SkyPipeline,
+};
 
 /// Angular size of the pointer reticle, degrees. Constant in *angle*, not in metres, so it
 /// stays the same size on screen wherever it lands.
@@ -623,13 +626,21 @@ impl Scene {
                         image
                     }
                     None => {
-                        let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                        let initial = name
+                            .chars()
+                            .next()
+                            .unwrap_or('?')
+                            .to_uppercase()
+                            .to_string();
                         text.render(&initial, px_per_degree * 4.0, 256, [255, 255, 255, 235])
                     }
                 }
             })
             .collect();
-        log::info!("launcher icons: {resolved} of {} from the icon theme", entries.len());
+        log::info!(
+            "launcher icons: {resolved} of {} from the icon theme",
+            entries.len()
+        );
 
         let old: Vec<u32> = self
             .app_labels
@@ -738,7 +749,8 @@ impl Scene {
         let id = renderer
             .with_context(|gl| unsafe { upload_rgba(gl, &image) })
             .ok()?;
-        self.titles.insert(title.to_string(), Texture { id, aspect });
+        self.titles
+            .insert(title.to_string(), Texture { id, aspect });
         Some(TitleTexture { id, aspect })
     }
 
@@ -852,8 +864,8 @@ impl Scene {
         let window_height = window.width / aspect.max(0.01);
         // The window's chrome hangs below its content by the frame's thickness.
         let below = window_height * (0.5 + crate::pointer::BORDER_FRACTION);
-        let drop = (below / window.radius) + KEYBOARD_GAP as f64
-            + (height as f64 * 0.5 / window.radius);
+        let drop =
+            (below / window.radius) + KEYBOARD_GAP as f64 + (height as f64 * 0.5 / window.radius);
 
         let placement = crate::window::Placement {
             yaw: window.yaw,
@@ -970,7 +982,10 @@ impl Scene {
             if !hovered.iter().any(|k| k.code == key.code) {
                 continue;
             }
-            let Some(cap) = self.key_caps.get(&crate::keyboard_face::cap_id(keyboard, key)) else {
+            let Some(cap) = self
+                .key_caps
+                .get(&crate::keyboard_face::cap_id(keyboard, key))
+            else {
                 continue;
             };
             // The cell's middle, in the face's plane. `v` runs down and the world's z runs up.
@@ -1137,9 +1152,7 @@ impl Scene {
                 .map(|row| {
                     (
                         line(text, &row.label, panel::ROW_EM),
-                        row.trailing
-                            .as_deref()
-                            .map(|t| line(text, t, TRAILING_EM)),
+                        row.trailing.as_deref().map(|t| line(text, t, TRAILING_EM)),
                     )
                 })
                 .collect();
@@ -1157,8 +1170,8 @@ impl Scene {
                     spatiand_render::TextAlign::Left,
                 )
             });
-            let footer = (!model.footer.is_empty())
-                .then(|| line(text, &model.footer, panel::FOOTER_EM));
+            let footer =
+                (!model.footer.is_empty()).then(|| line(text, &model.footer, panel::FOOTER_EM));
 
             let old = self.menu.take();
             let built = renderer
@@ -1242,8 +1255,7 @@ impl Scene {
             // is above or below the horizon. Rebuilding it from yaw alone here would quietly
             // undo that for the drawing while leaving the hit-test spherical.
             let o = window.placement.orientation();
-            let orientation =
-                Quat::from_xyzw(o.x as f32, o.y as f32, o.z as f32, o.w as f32);
+            let orientation = Quat::from_xyzw(o.x as f32, o.y as f32, o.z as f32, o.w as f32);
             let model = self.panel_model(centre, orientation, width, height);
             let mvp = eye.view_projection() * model;
 
@@ -1430,13 +1442,22 @@ impl Scene {
             gl.BindTexture(ffi::TEXTURE_2D, window.texture);
             gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
             gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
-            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
-            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_S,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_T,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
 
             // The surface itself. Fully opaque: a client's own transparency would otherwise
             // let the environment through, and a half-transparent terminal floating in a room
             // is unreadable.
-            self.quads.draw(gl, window.texture, &mvp, [1.0, 1.0, 1.0, 1.0], (0.0, 1.0));
+            self.quads
+                .draw(gl, window.texture, &mvp, [1.0, 1.0, 1.0, 1.0], (0.0, 1.0));
 
             // Menus and dropdowns, on the window's own plane and a hair in front of it.
             //
@@ -1457,18 +1478,27 @@ impl Scene {
                 // runs down from the top and the world's z runs up, hence the sign -- the same
                 // arithmetic as the title bar's furniture, and for the same reason: what is
                 // drawn and what can be pressed must not be able to drift apart.
-                let u = (popup.offset.0 as f32 + popup.pixels.0 as f32 * 0.5) / window.pixels.0.max(1) as f32;
-                let v = (popup.offset.1 as f32 + popup.pixels.1 as f32 * 0.5) / window.pixels.1.max(1) as f32;
-                let offset = orientation
-                    * Vec3::new(0.0, -(u - 0.5) * width, (0.5 - v) * height);
+                let u = (popup.offset.0 as f32 + popup.pixels.0 as f32 * 0.5)
+                    / window.pixels.0.max(1) as f32;
+                let v = (popup.offset.1 as f32 + popup.pixels.1 as f32 * 0.5)
+                    / window.pixels.1.max(1) as f32;
+                let offset = orientation * Vec3::new(0.0, -(u - 0.5) * width, (0.5 - v) * height);
                 // Submenus stack, so each one steps a little further forward than the last.
                 let lift = normal * (POPUP_LIFT_M * (depth as f32 + 1.0));
                 let model = self.panel_model(centre + offset + lift, orientation, popup_w, popup_h);
                 gl.BindTexture(ffi::TEXTURE_2D, popup.texture);
                 gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
                 gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
-                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
-                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
+                gl.TexParameteri(
+                    ffi::TEXTURE_2D,
+                    ffi::TEXTURE_WRAP_S,
+                    ffi::CLAMP_TO_EDGE as i32,
+                );
+                gl.TexParameteri(
+                    ffi::TEXTURE_2D,
+                    ffi::TEXTURE_WRAP_T,
+                    ffi::CLAMP_TO_EDGE as i32,
+                );
                 self.quads.draw(
                     gl,
                     popup.texture,
@@ -1574,22 +1604,27 @@ impl Scene {
         // A label wider than its band is scaled down rather than clipped or ellipsised. A long
         // filename is the case: shrinking one row is ugly, and cutting a name off in the middle
         // is worse, because the end of a filename is the part that says what it is.
-        let text_in = |band: panel::Rect, tex: &Texture, em: f32, tint: [f32; 4], right_edge: bool| {
-            let mut h = em * 1.4;
-            let mut w = h * tex.aspect.max(0.01);
-            if w > band.w {
-                h *= band.w / w;
-                w = band.w;
-            }
-            let r = panel::Rect {
-                x: if right_edge { band.x + band.w - w } else { band.x },
-                y: band.y + (band.h - h) * 0.5,
-                w,
-                h,
+        let text_in =
+            |band: panel::Rect, tex: &Texture, em: f32, tint: [f32; 4], right_edge: bool| {
+                let mut h = em * 1.4;
+                let mut w = h * tex.aspect.max(0.01);
+                if w > band.w {
+                    h *= band.w / w;
+                    w = band.w;
+                }
+                let r = panel::Rect {
+                    x: if right_edge {
+                        band.x + band.w - w
+                    } else {
+                        band.x
+                    },
+                    y: band.y + (band.h - h) * 0.5,
+                    w,
+                    h,
+                };
+                self.quads
+                    .draw(gl, tex.id, &(vp * place(r)), fade(tint), (0.0, 1.0));
             };
-            self.quads
-                .draw(gl, tex.id, &(vp * place(r)), fade(tint), (0.0, 1.0));
-        };
 
         text_in(layout.title, &menu.title, panel::TITLE_EM, INK, false);
         if let (Some(band), Some(tex)) = (layout.footer, menu.footer.as_ref()) {
@@ -1654,8 +1689,13 @@ impl Scene {
         }
         if let (Some(rect), Some(tex)) = (layout.detail, menu.detail.as_ref()) {
             // Already padded to the content width, so it goes exactly where the layout says.
-            self.quads
-                .draw(gl, tex.id, &(vp * place(rect)), fade(INK_DETAIL), (0.0, 1.0));
+            self.quads.draw(
+                gl,
+                tex.id,
+                &(vp * place(rect)),
+                fade(INK_DETAIL),
+                (0.0, 1.0),
+            );
         }
     }
 
@@ -1750,7 +1790,8 @@ impl Scene {
             let height = 0.022f32;
             let width = height * label.aspect.max(0.01);
             let model = self.panel_model(centre, orientation, width, height);
-            let alpha = if placement.scale > 1.0 { 1.0 } else { 0.55 } * self.appear_progress(index);
+            let alpha =
+                if placement.scale > 1.0 { 1.0 } else { 0.55 } * self.appear_progress(index);
             self.quads.draw(
                 gl,
                 label.id,
@@ -1900,8 +1941,13 @@ impl Scene {
             to_eye.extend(0.0),
             middle.extend(1.0),
         );
-        self.quads
-            .draw(gl, self.white, &(eye.view_projection() * model), colour, (0.0, 1.0));
+        self.quads.draw(
+            gl,
+            self.white,
+            &(eye.view_projection() * model),
+            colour,
+            (0.0, 1.0),
+        );
     }
 
     /// Where a beam should appear to come from, for one hand.
@@ -2136,11 +2182,15 @@ fn speaker_glyph_image(size: u32, muted: bool) -> Vec<u8> {
         }
         let (dx, dy) = (x - CONE_END, y);
         if muted {
-            // A line through it, which reads as "off" at a glance and in any language.
-            let (ax, ay) = (x - 0.48, y);
-            let across = (ax - ay) * std::f32::consts::FRAC_1_SQRT_2;
-            let along = (ax + ay) * std::f32::consts::FRAC_1_SQRT_2;
-            return across.abs() <= 0.075 && along.abs() <= 0.34;
+            // A cross where the waves would be. A single slash was tried first and read as
+            // one more wave at the size this is actually drawn -- the two strokes are what
+            // make it unmistakably "not sounding" rather than "sounding a bit".
+            let (ax, ay) = (x - 0.52, y);
+            let arm = |across: f32, along: f32| {
+                across.abs() * std::f32::consts::FRAC_1_SQRT_2 <= 0.075
+                    && along.abs() * std::f32::consts::FRAC_1_SQRT_2 <= 0.30
+            };
+            return arm(ax - ay, ax + ay) || arm(ax + ay, ax - ay);
         }
         // Two arcs in front of it. Bounded by angle as well as radius, so they are arcs
         // rather than rings drawn round the back of the speaker.
@@ -2187,6 +2237,101 @@ fn speaker_glyph_image(size: u32, muted: bool) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod glyph_tests {
+    use super::*;
+
+    /// Coverage of the glyph inside a box, as a fraction, for asking where the ink is.
+    fn ink(image: &[u8], size: u32, x0: f32, x1: f32, y0: f32, y1: f32) -> f32 {
+        let mut sum = 0.0;
+        let mut count = 0.0;
+        for y in 0..size {
+            for x in 0..size {
+                let px = x as f32 / size as f32;
+                let py = y as f32 / size as f32;
+                if px >= x0 && px < x1 && py >= y0 && py < y1 {
+                    sum += image[((y * size + x) * 4 + 3) as usize] as f32 / 255.0;
+                    count += 1.0;
+                }
+            }
+        }
+        if count > 0.0 {
+            sum / count
+        } else {
+            0.0
+        }
+    }
+
+    #[test]
+    fn the_speaker_has_a_body_on_the_left_and_waves_on_the_right() {
+        // Not a picture test -- it asserts the thing is the shape of a speaker rather than a
+        // blob, which is what would be left if the arithmetic were wrong in a way that still
+        // produced ink.
+        let g = speaker_glyph_image(64, false);
+        let body = ink(&g, 64, 0.20, 0.36, 0.42, 0.58);
+        let cone = ink(&g, 64, 0.40, 0.52, 0.30, 0.70);
+        let waves = ink(&g, 64, 0.62, 0.90, 0.35, 0.65);
+        let above = ink(&g, 64, 0.20, 0.36, 0.02, 0.18);
+        assert!(body > 0.9, "the body is not solid: {body}");
+        assert!(cone > 0.5, "the cone is missing: {cone}");
+        assert!(waves > 0.05, "there are no waves: {waves}");
+        assert!(above < 0.02, "there is ink above the body: {above}");
+    }
+
+    #[test]
+    fn the_muted_speaker_keeps_its_body_and_loses_its_waves() {
+        // The two have to read as the same object in two states, or the button appears to
+        // change into something else when pressed.
+        let on = speaker_glyph_image(64, false);
+        let off = speaker_glyph_image(64, true);
+        let body = |g: &[u8]| ink(g, 64, 0.20, 0.36, 0.42, 0.58);
+        assert!((body(&on) - body(&off)).abs() < 0.02, "the body moved");
+        // The cross sits where the near wave was, so compare the far one, which only the
+        // sounding glyph reaches.
+        let far = |g: &[u8]| ink(g, 64, 0.80, 0.95, 0.36, 0.64);
+        assert!(
+            far(&on) > far(&off) + 0.03,
+            "muting did not remove the waves"
+        );
+    }
+
+    #[test]
+    fn the_glyph_stays_inside_its_own_square() {
+        // It is drawn into a round disc, so anything reaching the corners is clipped by the
+        // glass rather than by the design.
+        for muted in [false, true] {
+            let g = speaker_glyph_image(64, muted);
+            for edge in [
+                ink(&g, 64, 0.0, 0.04, 0.0, 1.0),
+                ink(&g, 64, 0.96, 1.0, 0.0, 1.0),
+                ink(&g, 64, 0.0, 1.0, 0.0, 0.04),
+                ink(&g, 64, 0.0, 1.0, 0.96, 1.0),
+            ] {
+                assert!(edge < 0.01, "muted={muted}: ink at the very edge: {edge}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "writes a picture to look at rather than asserting anything"]
+    fn draw_the_speaker_glyphs() {
+        for (name, muted) in [("speaker-on", false), ("speaker-off", true)] {
+            let g = speaker_glyph_image(256, muted);
+            // On a mid grey, because the glyph is white and its alpha is the whole shape.
+            let mut flat = vec![0u8; 256 * 256 * 3];
+            for i in 0..256 * 256 {
+                let a = g[i * 4 + 3] as f32 / 255.0;
+                for c in 0..3 {
+                    flat[i * 3 + c] = (60.0 + a * 195.0) as u8;
+                }
+            }
+            let path = format!("/tmp/{name}.png");
+            image::save_buffer(&path, &flat, 256, 256, image::ColorType::Rgb8).unwrap();
+            println!("wrote {path}");
+        }
+    }
 }
 
 fn close_glyph_image(size: u32) -> Vec<u8> {
@@ -2337,18 +2482,14 @@ pub fn collect_windows(
         // surface with its own buffer -- importing the toplevel's tree does not reach them,
         // which is why a window whose menu was open still drew as if it were not.
         let mut popups = Vec::new();
-        for (popup, offset) in
-            smithay::desktop::PopupManager::popups_for_surface(&surface)
-        {
+        for (popup, offset) in smithay::desktop::PopupManager::popups_for_surface(&surface) {
             let popup_surface = popup.wl_surface().clone();
             if import_surface_tree(renderer, &popup_surface).is_err() {
                 continue;
             }
             let imported = with_renderer_surface_state(&popup_surface, |st| {
-                st.texture::<smithay::backend::renderer::gles::GlesTexture>(
-                    renderer.context_id(),
-                )
-                .map(|t| (t.tex_id(), t.width(), t.height()))
+                st.texture::<smithay::backend::renderer::gles::GlesTexture>(renderer.context_id())
+                    .map(|t| (t.tex_id(), t.width(), t.height()))
             })
             .flatten();
             let Some((texture, pw, ph)) = imported else {
@@ -2410,8 +2551,16 @@ mod tests {
         for aspect in [0.4f32, 1.0, 1.73, 4.0] {
             let (w, h) = fit_to_fov(aspect, 40.0, 23.14, 1.6);
             let angular = |extent: f32| 2.0 * (extent / 2.0 / 1.6).atan().to_degrees();
-            assert!(angular(w) <= 40.0, "aspect {aspect}: {} deg wide", angular(w));
-            assert!(angular(h) <= 23.14, "aspect {aspect}: {} deg tall", angular(h));
+            assert!(
+                angular(w) <= 40.0,
+                "aspect {aspect}: {} deg wide",
+                angular(w)
+            );
+            assert!(
+                angular(h) <= 23.14,
+                "aspect {aspect}: {} deg tall",
+                angular(h)
+            );
             assert!((w / h - aspect).abs() < 1e-4, "aspect not preserved");
         }
     }
@@ -2421,7 +2570,10 @@ mod tests {
         // Filling the nominal field exactly is already too much: the optics are worst there.
         let (_, h) = fit_to_fov(1.0, 40.0, 23.14, 1.6);
         let angular = 2.0 * (h / 2.0 / 1.6).atan().to_degrees();
-        assert!(angular < 23.14 * 0.8, "no margin left: {angular} deg of 23.14");
+        assert!(
+            angular < 23.14 * 0.8,
+            "no margin left: {angular} deg of 23.14"
+        );
     }
 
     #[test]
@@ -2432,7 +2584,10 @@ mod tests {
         let img = reticle_image(size);
         let alpha_at = |x: u32, y: u32| img[((y * size + x) * 4 + 3) as usize];
         assert_eq!(alpha_at(0, 0), 0, "corners must be clear");
-        assert!(alpha_at(size / 2, size / 2) > 200, "centre dot must be solid");
+        assert!(
+            alpha_at(size / 2, size / 2) > 200,
+            "centre dot must be solid"
+        );
     }
 
     #[test]

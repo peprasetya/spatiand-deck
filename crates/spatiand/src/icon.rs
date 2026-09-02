@@ -16,7 +16,12 @@ use spatiand_render::text::TextImage;
 
 /// Rasterise an icon to `size` x `size` RGBA.
 pub fn load(path: &Path, size: u32) -> Option<TextImage> {
-    match path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .as_deref()
+    {
         Some("svg") => load_svg(path, size),
         Some("png") => load_bitmap(path, size),
         // .xpm and anything else: not worth a decoder for the handful that use them.
@@ -139,9 +144,16 @@ mod tests {
         .unwrap();
         let img = load(&path, 32).expect("should rasterise");
         assert_eq!((img.width, img.height), (32, 32));
-        assert!(img.ink_fraction() > 0.9, "a filled square should cover the image");
+        assert!(
+            img.ink_fraction() > 0.9,
+            "a filled square should cover the image"
+        );
         let centre = ((16 * 32 + 16) * 4) as usize;
-        assert!(img.rgba[centre] > 200, "should be red, got {:?}", &img.rgba[centre..centre + 4]);
+        assert!(
+            img.rgba[centre] > 200,
+            "should be red, got {:?}",
+            &img.rgba[centre..centre + 4]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

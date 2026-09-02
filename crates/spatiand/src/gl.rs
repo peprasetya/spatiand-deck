@@ -320,7 +320,10 @@ impl RoundedPipeline {
         // A radius past half the shorter side would make the distance field fold back on
         // itself and pinch the shape; clamping means "very round" is expressible as a large
         // number rather than as an exact one the caller has to work out.
-        gl.Uniform1f(self.loc_radius, radius.min(size.0.abs().min(size.1.abs()) * 0.5));
+        gl.Uniform1f(
+            self.loc_radius,
+            radius.min(size.0.abs().min(size.1.abs()) * 0.5),
+        );
         gl.DrawArrays(ffi::TRIANGLES, 0, 6);
         gl.BindVertexArray(0);
     }
@@ -606,7 +609,10 @@ impl BubblePipeline {
         gl.ActiveTexture(ffi::TEXTURE1);
         gl.BindTexture(ffi::TEXTURE_2D, params.icon.unwrap_or(0));
         gl.Uniform1i(self.loc_icon, 1);
-        gl.Uniform1f(self.loc_has_icon, if params.icon.is_some() { 1.0 } else { 0.0 });
+        gl.Uniform1f(
+            self.loc_has_icon,
+            if params.icon.is_some() { 1.0 } else { 0.0 },
+        );
         gl.ActiveTexture(ffi::TEXTURE0);
 
         gl.DrawArrays(ffi::TRIANGLES, 0, 6);
@@ -661,7 +667,11 @@ pub unsafe fn upload_raw(
         ffi::CLAMP_TO_EDGE
     };
     gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, wrap_s as i32);
-    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
+    gl.TexParameteri(
+        ffi::TEXTURE_2D,
+        ffi::TEXTURE_WRAP_T,
+        ffi::CLAMP_TO_EDGE as i32,
+    );
     tex
 }
 
@@ -688,7 +698,12 @@ unsafe fn link(gl: &ffi::Gles2, vert: &str, frag: &str) -> Result<u32, String> {
         let mut len = 0;
         gl.GetProgramiv(program, ffi::INFO_LOG_LENGTH, &mut len);
         let mut buf = vec![0u8; len.max(1) as usize];
-        gl.GetProgramInfoLog(program, len, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _);
+        gl.GetProgramInfoLog(
+            program,
+            len,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr() as *mut _,
+        );
         return Err(format!("link failed: {}", String::from_utf8_lossy(&buf)));
     }
     gl.DeleteShader(vs);
@@ -709,7 +724,12 @@ unsafe fn compile(gl: &ffi::Gles2, kind: u32, source: &str) -> Result<u32, Strin
         let mut len = 0;
         gl.GetShaderiv(shader, ffi::INFO_LOG_LENGTH, &mut len);
         let mut buf = vec![0u8; len.max(1) as usize];
-        gl.GetShaderInfoLog(shader, len, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _);
+        gl.GetShaderInfoLog(
+            shader,
+            len,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr() as *mut _,
+        );
         return Err(format!("compile failed: {}", String::from_utf8_lossy(&buf)));
     }
     Ok(shader)

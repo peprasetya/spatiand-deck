@@ -90,13 +90,15 @@ impl Environments {
     /// a particular world — for a snapshot, or for anyone who wants the same one every time —
     /// and a remembered choice quietly overriding it would make it useless.
     fn opening(files: Vec<PathBuf>, data: Option<PathBuf>) -> Self {
-        let named = std::env::var("SPATIAND_ENVIRONMENT").ok().and_then(|wanted| {
-            let wanted = wanted.to_lowercase();
-            files
-                .iter()
-                .position(|p| p.to_string_lossy().to_lowercase().contains(&wanted))
-                .map(EnvironmentChoice::File)
-        });
+        let named = std::env::var("SPATIAND_ENVIRONMENT")
+            .ok()
+            .and_then(|wanted| {
+                let wanted = wanted.to_lowercase();
+                files
+                    .iter()
+                    .position(|p| p.to_string_lossy().to_lowercase().contains(&wanted))
+                    .map(EnvironmentChoice::File)
+            });
         let choice = named
             .or_else(|| {
                 data.as_ref()
@@ -130,7 +132,10 @@ impl Environments {
             Some(path) => match self.files.iter().position(|p| *p == path) {
                 Some(i) => EnvironmentChoice::File(i),
                 None => {
-                    log::info!("{} is gone; falling back to the generated one", path.display());
+                    log::info!(
+                        "{} is gone; falling back to the generated one",
+                        path.display()
+                    );
                     EnvironmentChoice::Studio
                 }
             },
@@ -221,7 +226,10 @@ impl Environments {
             std::fs::write(path, format!("{STATE_HEADER}{line}\n"))
         };
         if let Err(e) = write(&path) {
-            log::warn!("could not record the environment in {}: {e}", path.display());
+            log::warn!(
+                "could not record the environment in {}: {e}",
+                path.display()
+            );
         }
     }
 
@@ -538,7 +546,14 @@ pub fn guess_source(path: &Path, width: u32, height: u32) -> SkySource {
 
     // The name wins where it says anything, because it is the author's own statement about the
     // file; shape is only a fallback.
-    let stereo = if has(&["_ou", "_tb", "over-under", "over_under", "top-bottom", "top_bottom"]) {
+    let stereo = if has(&[
+        "_ou",
+        "_tb",
+        "over-under",
+        "over_under",
+        "top-bottom",
+        "top_bottom",
+    ]) {
         SkyStereo::OverUnder
     } else if has(&["_sbs", "side-by-side", "side_by_side"]) {
         SkyStereo::SideBySide
@@ -587,10 +602,8 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "spatiand-env-{}-{name}",
-                std::process::id()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("spatiand-env-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("could not make a scratch directory");
             Self(dir)
@@ -751,7 +764,10 @@ mod tests {
         let scratch = Scratch::new("blank");
         let mut session = reopen(&scratch, &["/a/one.jpg"]);
         session.select(EnvironmentChoice::Blank);
-        assert_eq!(reopen(&scratch, &["/a/one.jpg"]).choice(), EnvironmentChoice::Blank);
+        assert_eq!(
+            reopen(&scratch, &["/a/one.jpg"]).choice(),
+            EnvironmentChoice::Blank
+        );
     }
 
     #[test]
@@ -771,7 +787,10 @@ mod tests {
         // half-written by a machine that lost power mid-save.
         let scratch = Scratch::new("junk");
         std::fs::write(scratch.state(), "\u{0}not a choice at all").unwrap();
-        assert_eq!(reopen(&scratch, &["/a/one.jpg"]).choice(), EnvironmentChoice::Studio);
+        assert_eq!(
+            reopen(&scratch, &["/a/one.jpg"]).choice(),
+            EnvironmentChoice::Studio
+        );
     }
 
     #[test]
@@ -784,7 +803,10 @@ mod tests {
         let text = std::fs::read_to_string(scratch.state()).unwrap();
         assert!(text.starts_with('#'), "no explanation for whoever finds it");
         assert!(text.contains("/a/one.jpg"));
-        assert_eq!(reopen(&scratch, &["/a/one.jpg"]).choice(), EnvironmentChoice::File(0));
+        assert_eq!(
+            reopen(&scratch, &["/a/one.jpg"]).choice(),
+            EnvironmentChoice::File(0)
+        );
     }
 
     #[test]

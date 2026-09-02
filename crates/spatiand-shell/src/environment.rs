@@ -169,20 +169,32 @@ mod tests {
         // The complaint that motivated this: a cycle makes "the fourth one" cost three
         // environment loads, each of which uploads a texture.
         let mut p = picker();
-        assert_eq!(p.activate(), EnvironmentAction::Choose(EnvironmentChoice::Studio));
+        assert_eq!(
+            p.activate(),
+            EnvironmentAction::Choose(EnvironmentChoice::Studio)
+        );
         p.step(Direction::Down);
         p.step(Direction::Down);
-        assert_eq!(p.activate(), EnvironmentAction::Choose(EnvironmentChoice::File(1)));
+        assert_eq!(
+            p.activate(),
+            EnvironmentAction::Choose(EnvironmentChoice::File(1))
+        );
         // And back up, which a cycle cannot do at all.
         p.step(Direction::Up);
-        assert_eq!(p.activate(), EnvironmentAction::Choose(EnvironmentChoice::File(0)));
+        assert_eq!(
+            p.activate(),
+            EnvironmentAction::Choose(EnvironmentChoice::File(0))
+        );
     }
 
     #[test]
     fn blank_is_a_choice_like_any_other() {
         let mut p = picker();
         p.step(Direction::Up);
-        assert_eq!(p.activate(), EnvironmentAction::Choose(EnvironmentChoice::Blank));
+        assert_eq!(
+            p.activate(),
+            EnvironmentAction::Choose(EnvironmentChoice::Blank)
+        );
     }
 
     #[test]

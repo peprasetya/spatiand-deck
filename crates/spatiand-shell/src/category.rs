@@ -109,7 +109,10 @@ mod tests {
 
     #[test]
     fn a_browser_files_under_internet() {
-        assert_eq!(group_for(&cats(&["Network", "WebBrowser"])).label, "Internet");
+        assert_eq!(
+            group_for(&cats(&["Network", "WebBrowser"])).label,
+            "Internet"
+        );
     }
 
     #[test]

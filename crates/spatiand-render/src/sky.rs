@@ -406,7 +406,11 @@ mod tests {
             };
             let (lu0, lv0, lu1, lv1) = s.eye_rect(SkyEye::Left);
             let (ru0, rv0, ru1, rv1) = s.eye_rect(SkyEye::Right);
-            assert_ne!((lu0, lv0, lu1, lv1), (ru0, rv0, ru1, rv1), "{stereo:?} gave both eyes the same half");
+            assert_ne!(
+                (lu0, lv0, lu1, lv1),
+                (ru0, rv0, ru1, rv1),
+                "{stereo:?} gave both eyes the same half"
+            );
             let area = |(u0, v0, u1, v1): UvRect| (u1 - u0) * (v1 - v0);
             assert!(close(area((lu0, lv0, lu1, lv1)), 0.5, 1e-6));
             assert!(close(area((ru0, rv0, ru1, rv1)), 0.5, 1e-6));
@@ -441,7 +445,10 @@ mod tests {
     fn the_generated_sky_is_a_well_formed_image() {
         let sky = Sky::studio(64, 32);
         assert_eq!(sky.rgba.len(), 64 * 32 * 4);
-        assert!(sky.rgba.chunks_exact(4).all(|p| p[3] == 255), "must be opaque");
+        assert!(
+            sky.rgba.chunks_exact(4).all(|p| p[3] == 255),
+            "must be opaque"
+        );
     }
 
     #[test]
@@ -457,7 +464,12 @@ mod tests {
             }
             total / sky.width
         };
-        assert!(luma(8) > luma(56), "zenith {} vs nadir {}", luma(8), luma(56));
+        assert!(
+            luma(8) > luma(56),
+            "zenith {} vs nadir {}",
+            luma(8),
+            luma(56)
+        );
     }
 
     #[test]

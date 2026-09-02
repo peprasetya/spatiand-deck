@@ -201,7 +201,11 @@ impl Backlight {
     }
 
     pub fn level(&self) -> Option<f32> {
-        let value: u32 = std::fs::read_to_string(&self.path).ok()?.trim().parse().ok()?;
+        let value: u32 = std::fs::read_to_string(&self.path)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
         Some(value as f32 / self.max.max(1) as f32)
     }
 
@@ -301,7 +305,10 @@ mod tests {
             s.push(i as f32 / (HISTORY * 3) as f32);
         }
         assert_eq!(s.len(), HISTORY);
-        assert!(s.latest() > 0.9, "the newest sample should be the last pushed");
+        assert!(
+            s.latest() > 0.9,
+            "the newest sample should be the last pushed"
+        );
     }
 
     #[test]

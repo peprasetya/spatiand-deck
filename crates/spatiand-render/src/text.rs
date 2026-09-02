@@ -78,7 +78,10 @@ impl TextImage {
         if min_y > max_y {
             return (0.0, 1.0);
         }
-        (min_y as f32 / self.height as f32, (max_y + 1) as f32 / self.height as f32)
+        (
+            min_y as f32 / self.height as f32,
+            (max_y + 1) as f32 / self.height as f32,
+        )
     }
 
     /// Where the middle of the ink sits, as a fraction of the image's height. `0.5` — the
@@ -115,7 +118,11 @@ impl TextImage {
             let dst = (y as usize) * row;
             out[dst..dst + row].copy_from_slice(&self.rgba[src..src + row]);
         }
-        TextImage { width: self.width, height: new_h, rgba: out }
+        TextImage {
+            width: self.width,
+            height: new_h,
+            rgba: out,
+        }
     }
 }
 
@@ -140,7 +147,13 @@ impl TextRenderer {
     /// Rasterise `text` into an image `max_width` px wide, wrapping as needed.
     ///
     /// `size_px` is the em size; `color` is straight RGBA.
-    pub fn render(&mut self, text: &str, size_px: f32, max_width: u32, color: [u8; 4]) -> TextImage {
+    pub fn render(
+        &mut self,
+        text: &str,
+        size_px: f32,
+        max_width: u32,
+        color: [u8; 4],
+    ) -> TextImage {
         self.render_inner(text, size_px, max_width, color, false, TextAlign::Center)
     }
 
@@ -230,40 +243,36 @@ impl TextRenderer {
         let mut rgba = vec![0u8; (width * height * 4) as usize];
         let text_color = cosmic_text::Color::rgba(color[0], color[1], color[2], color[3]);
         let mut drawable = buffer.borrow_with(&mut self.font_system);
-        drawable.draw(
-            &mut self.swash_cache,
-            text_color,
-            |x, y, w, h, c| {
-                let a = c.a();
-                if a == 0 {
-                    return;
-                }
-                for dy in 0..h as i32 {
-                    for dx in 0..w as i32 {
-                        let (px, py) = (x + dx - x_offset, y + dy);
-                        if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
-                            continue;
-                        }
-                        let i = ((py as u32 * width + px as u32) * 4) as usize;
-                        // Source-over against what is already there, so overlapping glyphs
-                        // (accents, tight scripts) composite instead of punching holes.
-                        let sa = a as u32;
-                        let da = rgba[i + 3] as u32;
-                        let out_a = sa + da * (255 - sa) / 255;
-                        if out_a == 0 {
-                            continue;
-                        }
-                        for k in 0..3 {
-                            let sc = [c.r(), c.g(), c.b()][k] as u32;
-                            let dc = rgba[i + k] as u32;
-                            rgba[i + k] =
-                                ((sc * sa + dc * da * (255 - sa) / 255) / out_a).min(255) as u8;
-                        }
-                        rgba[i + 3] = out_a.min(255) as u8;
+        drawable.draw(&mut self.swash_cache, text_color, |x, y, w, h, c| {
+            let a = c.a();
+            if a == 0 {
+                return;
+            }
+            for dy in 0..h as i32 {
+                for dx in 0..w as i32 {
+                    let (px, py) = (x + dx - x_offset, y + dy);
+                    if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+                        continue;
                     }
+                    let i = ((py as u32 * width + px as u32) * 4) as usize;
+                    // Source-over against what is already there, so overlapping glyphs
+                    // (accents, tight scripts) composite instead of punching holes.
+                    let sa = a as u32;
+                    let da = rgba[i + 3] as u32;
+                    let out_a = sa + da * (255 - sa) / 255;
+                    if out_a == 0 {
+                        continue;
+                    }
+                    for k in 0..3 {
+                        let sc = [c.r(), c.g(), c.b()][k] as u32;
+                        let dc = rgba[i + k] as u32;
+                        rgba[i + k] =
+                            ((sc * sa + dc * da * (255 - sa) / 255) / out_a).min(255) as u8;
+                    }
+                    rgba[i + 3] = out_a.min(255) as u8;
                 }
-            },
-        );
+            }
+        });
 
         // Keeping the full width is the whole point for a padded render: the text is already
         // centred within it, so there is nothing further to do.
@@ -332,7 +341,12 @@ mod padded_tests {
     fn a_padded_render_is_always_the_width_it_was_asked_for() {
         let mut t = TextRenderer::new();
         let short = t.render_padded("i", 24.0, 512, [255, 255, 255, 255]);
-        let long = t.render_padded("a much longer line of text", 24.0, 512, [255, 255, 255, 255]);
+        let long = t.render_padded(
+            "a much longer line of text",
+            24.0,
+            512,
+            [255, 255, 255, 255],
+        );
         assert_eq!(short.width, 512);
         assert_eq!(long.width, 512);
     }
@@ -442,16 +456,24 @@ mod tests {
         let mut r = TextRenderer::new();
         let img = r.render("\u{2190}", 64.0, 200, [255, 255, 255, 255]);
         let (top, bottom) = img.ink_vertical_extent();
-        assert!(top > 0.0 || bottom < 1.0, "the arrow's ink fills the box with no margin at all");
+        assert!(
+            top > 0.0 || bottom < 1.0,
+            "the arrow's ink fills the box with no margin at all"
+        );
     }
 
     #[test]
     fn cropping_vertically_leaves_no_transparent_margin() {
         let mut r = TextRenderer::new();
-        let img = r.render("\u{2190}", 64.0, 200, [255, 255, 255, 255]).crop_to_ink_vertically();
+        let img = r
+            .render("\u{2190}", 64.0, 200, [255, 255, 255, 255])
+            .crop_to_ink_vertically();
         let (top, bottom) = img.ink_vertical_extent();
         assert!(top < 1e-3, "a blank row survived at the top: {top}");
-        assert!(bottom > 1.0 - 1e-3, "a blank row survived at the bottom: {bottom}");
+        assert!(
+            bottom > 1.0 - 1e-3,
+            "a blank row survived at the bottom: {bottom}"
+        );
     }
 
     #[test]
@@ -482,12 +504,19 @@ mod tests {
         // number for both. Asserted as "the same string at two sizes agrees, and that agreement
         // is not what makes it right", which holds whatever font is installed.
         let mut r = TextRenderer::new();
-        let small = r.render("space", 32.0, 400, [255, 255, 255, 255]).ink_vertical_center();
-        let large = r.render("space", 64.0, 800, [255, 255, 255, 255]).ink_vertical_center();
+        let small = r
+            .render("space", 32.0, 400, [255, 255, 255, 255])
+            .ink_vertical_center();
+        let large = r
+            .render("space", 64.0, 800, [255, 255, 255, 255])
+            .ink_vertical_center();
         assert!(
             (small - large).abs() < 0.05,
             "the same word gave two centres at two sizes: {small} and {large}"
         );
-        assert!((0.0..=1.0).contains(&small), "centre outside the image: {small}");
+        assert!(
+            (0.0..=1.0).contains(&small),
+            "centre outside the image: {small}"
+        );
     }
 }

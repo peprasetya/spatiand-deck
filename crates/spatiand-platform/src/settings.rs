@@ -27,12 +27,19 @@ const KCM_RUNNERS: [&str; 2] = ["/usr/bin/kcmshell6", "/usr/bin/systemsettings"]
 /// The program that runs a desktop panel applet as an ordinary window.
 const APPLET_RUNNER: &str = "/usr/bin/plasmawindowed";
 /// Where applets live. Two directories because a locally installed one shadows a packaged one.
-const APPLET_DIRS: [&str; 2] = ["/usr/share/plasma/plasmoids", "/usr/local/share/plasma/plasmoids"];
+const APPLET_DIRS: [&str; 2] = [
+    "/usr/share/plasma/plasmoids",
+    "/usr/local/share/plasma/plasmoids",
+];
 
 /// What the shell can ask for. Deliberately not KDE's names — those are this module's business.
 const PANELS: [(&str, &str, &str); 2] = [
     // (what the shell asks for, the applet, the settings module)
-    ("wifi", "org.kde.plasma.networkmanagement", "kcm_networkmanagement"),
+    (
+        "wifi",
+        "org.kde.plasma.networkmanagement",
+        "kcm_networkmanagement",
+    ),
     ("bluetooth", "org.kde.plasma.bluetooth", "kcm_bluetooth"),
 ];
 
@@ -103,8 +110,12 @@ mod tests {
         // that is installed, which presents as the feature having been dropped.
         let dirs = vec![PathBuf::from("/usr/share/applications")];
         let paths = candidates_in(&dirs, "kcm_bluetooth");
-        assert!(paths.contains(&PathBuf::from("/usr/share/applications/kcm_bluetooth.desktop")));
-        assert!(paths.contains(&PathBuf::from("/usr/share/kservices6/kcm_bluetooth.desktop")));
+        assert!(paths.contains(&PathBuf::from(
+            "/usr/share/applications/kcm_bluetooth.desktop"
+        )));
+        assert!(paths.contains(&PathBuf::from(
+            "/usr/share/kservices6/kcm_bluetooth.desktop"
+        )));
     }
 
     #[test]
@@ -119,8 +130,14 @@ mod tests {
         // silently vanish on the next.
         for (name, applet, module) in PANELS {
             assert!(!name.is_empty());
-            assert!(applet.starts_with("org.kde.plasma."), "{applet} is not an applet id");
-            assert!(module.starts_with("kcm_"), "{module} is not a settings module");
+            assert!(
+                applet.starts_with("org.kde.plasma."),
+                "{applet} is not an applet id"
+            );
+            assert!(
+                module.starts_with("kcm_"),
+                "{module} is not a settings module"
+            );
         }
     }
 

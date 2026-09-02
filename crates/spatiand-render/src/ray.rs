@@ -184,8 +184,18 @@ mod tests {
 
     #[test]
     fn a_centred_thumb_points_straight_ahead() {
-        let r = ray_from_pad(0.0, 0.0, DQuat::IDENTITY, DVec3::ZERO, &PointerConfig::default());
-        assert!((r.direction - DVec3::X).length() < 1e-12, "{:?}", r.direction);
+        let r = ray_from_pad(
+            0.0,
+            0.0,
+            DQuat::IDENTITY,
+            DVec3::ZERO,
+            &PointerConfig::default(),
+        );
+        assert!(
+            (r.direction - DVec3::X).length() < 1e-12,
+            "{:?}",
+            r.direction
+        );
     }
 
     #[test]
@@ -196,7 +206,11 @@ mod tests {
         let right = ray_from_pad(1.0, 0.0, DQuat::IDENTITY, DVec3::ZERO, &cfg);
         let up = ray_from_pad(0.0, 1.0, DQuat::IDENTITY, DVec3::ZERO, &cfg);
         // +Y is left, so pointing right means a negative Y component.
-        assert!(right.direction.y < -0.2, "thumb right gave {:?}", right.direction);
+        assert!(
+            right.direction.y < -0.2,
+            "thumb right gave {:?}",
+            right.direction
+        );
         assert!(up.direction.z > 0.1, "thumb up gave {:?}", up.direction);
     }
 
@@ -207,8 +221,14 @@ mod tests {
         // the pivot rather than at the eye -- so the whole reachable area sat low.
         let cfg = PointerConfig::default();
         // One eye of the glasses: 40 deg across, 23.14 deg tall.
-        assert!(cfg.half_fov_x_deg >= 40.0 / 2.0 * 0.9, "cannot reach the sides");
-        assert!(cfg.half_fov_y_deg >= 23.14 / 2.0 * 0.9, "cannot reach the top or bottom");
+        assert!(
+            cfg.half_fov_x_deg >= 40.0 / 2.0 * 0.9,
+            "cannot reach the sides"
+        );
+        assert!(
+            cfg.half_fov_y_deg >= 23.14 / 2.0 * 0.9,
+            "cannot reach the top or bottom"
+        );
     }
 
     #[test]
@@ -225,14 +245,21 @@ mod tests {
         // pinned to the world and aiming becomes impossible.
         let head = DQuat::from_axis_angle(DVec3::Z, std::f64::consts::FRAC_PI_2);
         let r = ray_from_pad(0.0, 0.0, head, DVec3::ZERO, &PointerConfig::default());
-        assert!((r.direction - DVec3::Y).length() < 1e-9, "{:?}", r.direction);
+        assert!(
+            (r.direction - DVec3::Y).length() < 1e-9,
+            "{:?}",
+            r.direction
+        );
     }
 
     #[test]
     fn a_forward_ray_hits_a_forward_quad_dead_centre() {
         let hit = intersect_quad(&forward_ray(), &ahead()).expect("should hit");
         assert!(close(hit.distance, 2.0, 1e-12));
-        assert!(close(hit.u, 0.5, 1e-12) && close(hit.v, 0.5, 1e-12), "{hit:?}");
+        assert!(
+            close(hit.u, 0.5, 1e-12) && close(hit.v, 0.5, 1e-12),
+            "{hit:?}"
+        );
     }
 
     #[test]
@@ -316,6 +343,9 @@ mod tests {
             direction: (orientation * DVec3::X).normalize(),
         };
         let hit = intersect_quad(&ray, &quad).expect("should hit");
-        assert!(close(hit.u, 0.5, 1e-9) && close(hit.v, 0.5, 1e-9), "{hit:?}");
+        assert!(
+            close(hit.u, 0.5, 1e-9) && close(hit.v, 0.5, 1e-9),
+            "{hit:?}"
+        );
     }
 }

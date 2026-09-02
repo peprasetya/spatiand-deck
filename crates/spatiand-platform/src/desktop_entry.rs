@@ -38,8 +38,8 @@ pub fn search_directories() -> Vec<PathBuf> {
     } else if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".local/share/applications"));
     }
-    let system = std::env::var("XDG_DATA_DIRS")
-        .unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
+    let system =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
     for dir in system.split(':').filter(|d| !d.is_empty()) {
         dirs.push(PathBuf::from(dir).join("applications"));
     }
@@ -300,9 +300,8 @@ mod tests {
         // This is the difference between a launcher and a directory listing. Without it the
         // home screen fills with MIME handlers, URL protocol stubs and settings modules.
         for flag in ["NoDisplay=true", "Hidden=true", "NoDisplay=True"] {
-            let text = format!(
-                "[Desktop Entry]\nType=Application\nName=Hidden\nExec=/bin/true\n{flag}\n"
-            );
+            let text =
+                format!("[Desktop Entry]\nType=Application\nName=Hidden\nExec=/bin/true\n{flag}\n");
             assert!(parse(&text, &p()).is_none(), "{flag} should hide the entry");
         }
     }
@@ -367,7 +366,10 @@ mod tests {
     #[test]
     fn scanning_a_missing_directory_is_empty_not_an_error() {
         // Half the XDG_DATA_DIRS entries do not exist on any given machine.
-        let dirs = vec![PathBuf::from("/nonexistent-a"), PathBuf::from("/nonexistent-b")];
+        let dirs = vec![
+            PathBuf::from("/nonexistent-a"),
+            PathBuf::from("/nonexistent-b"),
+        ];
         assert!(scan_in(&dirs).is_empty());
     }
 

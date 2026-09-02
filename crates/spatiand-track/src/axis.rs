@@ -224,7 +224,9 @@ mod tests_mounting {
         // Same claim, but reading the actual shipped row rather than a literal, so an edit to
         // `devices.toml` cannot quietly diverge from the constant.
         let air = spatiand_hmd::device::lookup(0x3318, 0x0424).expect("the Air is in the table");
-        let mounting = air.sensor_axes.expect("the Air's mounting has been measured");
+        let mounting = air
+            .sensor_axes
+            .expect("the Air's mounting has been measured");
         assert_eq!(AxisMap::from_mounting(mounting), Some(AxisMap::XREAL_AIR));
     }
 
@@ -262,9 +264,18 @@ mod tests_mounting {
         // of the head and must come out as canonical +Z, and sensor +Y points backwards so it
         // must come out as canonical -X.
         let map = AxisMap::from_mounting([D::Left, D::Back, D::Up]).expect("a valid frame");
-        assert_eq!(map.apply(DVec3::new(0.0, 0.0, 1.0)), DVec3::new(0.0, 0.0, 1.0));
-        assert_eq!(map.apply(DVec3::new(0.0, 1.0, 0.0)), DVec3::new(-1.0, 0.0, 0.0));
-        assert_eq!(map.apply(DVec3::new(1.0, 0.0, 0.0)), DVec3::new(0.0, 1.0, 0.0));
+        assert_eq!(
+            map.apply(DVec3::new(0.0, 0.0, 1.0)),
+            DVec3::new(0.0, 0.0, 1.0)
+        );
+        assert_eq!(
+            map.apply(DVec3::new(0.0, 1.0, 0.0)),
+            DVec3::new(-1.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            map.apply(DVec3::new(1.0, 0.0, 0.0)),
+            DVec3::new(0.0, 1.0, 0.0)
+        );
     }
 
     #[test]
@@ -274,7 +285,10 @@ mod tests_mounting {
         // notice it was wrong for these glasses.
         let derived = AxisMap::from_mounting([D::Left, D::Back, D::Up]).expect("a valid frame");
         assert_ne!(derived, AxisMap::IDENTITY);
-        assert!(AxisMap::IDENTITY.is_right_handed(), "which is exactly why it went unnoticed");
+        assert!(
+            AxisMap::IDENTITY.is_right_handed(),
+            "which is exactly why it went unnoticed"
+        );
     }
 }
 

@@ -345,7 +345,10 @@ impl Touchscreen {
         let range_y = axis_range(raw, ABS_MT_POSITION_Y)?;
         log::info!(
             "touchscreen: x {}..{}, y {}..{}",
-            range_x.min, range_x.max, range_y.min, range_y.max
+            range_x.min,
+            range_x.max,
+            range_y.min,
+            range_y.max
         );
         Ok(Self {
             fd,
@@ -516,18 +519,41 @@ B: MSC=10
         let events = mt.feed(EV_SYN, SYN_REPORT, 0);
         assert_eq!(
             events,
-            vec![TouchEvent::Down(Contact { slot: 0, id: 7, x: 0.5, y: 0.5 })]
+            vec![TouchEvent::Down(Contact {
+                slot: 0,
+                id: 7,
+                x: 0.5,
+                y: 0.5
+            })]
         );
     }
 
     #[test]
     fn a_finger_goes_down_moves_and_lifts() {
         let mut mt = decoder();
-        packet(&mut mt, &[(EV_ABS, ABS_MT_TRACKING_ID, 1), (EV_ABS, ABS_MT_POSITION_X, 0), (EV_ABS, ABS_MT_POSITION_Y, 0)]);
-        let moved = packet(&mut mt, &[(EV_ABS, ABS_MT_POSITION_X, 800), (EV_ABS, ABS_MT_POSITION_Y, 1280)]);
+        packet(
+            &mut mt,
+            &[
+                (EV_ABS, ABS_MT_TRACKING_ID, 1),
+                (EV_ABS, ABS_MT_POSITION_X, 0),
+                (EV_ABS, ABS_MT_POSITION_Y, 0),
+            ],
+        );
+        let moved = packet(
+            &mut mt,
+            &[
+                (EV_ABS, ABS_MT_POSITION_X, 800),
+                (EV_ABS, ABS_MT_POSITION_Y, 1280),
+            ],
+        );
         assert_eq!(
             moved,
-            vec![TouchEvent::Motion(Contact { slot: 0, id: 1, x: 1.0, y: 1.0 })]
+            vec![TouchEvent::Motion(Contact {
+                slot: 0,
+                id: 1,
+                x: 1.0,
+                y: 1.0
+            })]
         );
         let lifted = packet(&mut mt, &[(EV_ABS, ABS_MT_TRACKING_ID, -1)]);
         assert_eq!(lifted, vec![TouchEvent::Up { slot: 0 }]);
@@ -539,7 +565,13 @@ B: MSC=10
         // Panels resend the same coordinates while a finger rests. Reporting motion for those
         // would make a still finger look like a drag, and a slider under it would jitter.
         let mut mt = decoder();
-        packet(&mut mt, &[(EV_ABS, ABS_MT_TRACKING_ID, 1), (EV_ABS, ABS_MT_POSITION_X, 100)]);
+        packet(
+            &mut mt,
+            &[
+                (EV_ABS, ABS_MT_TRACKING_ID, 1),
+                (EV_ABS, ABS_MT_POSITION_X, 100),
+            ],
+        );
         assert!(packet(&mut mt, &[(EV_ABS, ABS_MT_POSITION_X, 100)]).is_empty());
     }
 
@@ -548,11 +580,14 @@ B: MSC=10
         // The driver sends ABS_MT_SLOT only when the slot changes, so a decoder that resets it
         // per packet attributes the second finger's whole drag to the first.
         let mut mt = decoder();
-        packet(&mut mt, &[
-            (EV_ABS, ABS_MT_SLOT, 1),
-            (EV_ABS, ABS_MT_TRACKING_ID, 9),
-            (EV_ABS, ABS_MT_POSITION_X, 200),
-        ]);
+        packet(
+            &mut mt,
+            &[
+                (EV_ABS, ABS_MT_SLOT, 1),
+                (EV_ABS, ABS_MT_TRACKING_ID, 9),
+                (EV_ABS, ABS_MT_POSITION_X, 200),
+            ],
+        );
         let moved = packet(&mut mt, &[(EV_ABS, ABS_MT_POSITION_X, 400)]);
         assert_eq!(moved.len(), 1);
         assert!(matches!(moved[0], TouchEvent::Motion(c) if c.slot == 1 && c.id == 9));
@@ -561,20 +596,26 @@ B: MSC=10
     #[test]
     fn two_fingers_are_tracked_separately() {
         let mut mt = decoder();
-        let down = packet(&mut mt, &[
-            (EV_ABS, ABS_MT_SLOT, 0),
-            (EV_ABS, ABS_MT_TRACKING_ID, 4),
-            (EV_ABS, ABS_MT_POSITION_X, 200),
-            (EV_ABS, ABS_MT_POSITION_Y, 320),
-            (EV_ABS, ABS_MT_SLOT, 1),
-            (EV_ABS, ABS_MT_TRACKING_ID, 5),
-            (EV_ABS, ABS_MT_POSITION_X, 600),
-            (EV_ABS, ABS_MT_POSITION_Y, 960),
-        ]);
+        let down = packet(
+            &mut mt,
+            &[
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_TRACKING_ID, 4),
+                (EV_ABS, ABS_MT_POSITION_X, 200),
+                (EV_ABS, ABS_MT_POSITION_Y, 320),
+                (EV_ABS, ABS_MT_SLOT, 1),
+                (EV_ABS, ABS_MT_TRACKING_ID, 5),
+                (EV_ABS, ABS_MT_POSITION_X, 600),
+                (EV_ABS, ABS_MT_POSITION_Y, 960),
+            ],
+        );
         assert_eq!(down.len(), 2);
         assert_eq!(mt.contacts().count(), 2);
         // Lifting one leaves the other exactly where it was.
-        let lift = packet(&mut mt, &[(EV_ABS, ABS_MT_SLOT, 0), (EV_ABS, ABS_MT_TRACKING_ID, -1)]);
+        let lift = packet(
+            &mut mt,
+            &[(EV_ABS, ABS_MT_SLOT, 0), (EV_ABS, ABS_MT_TRACKING_ID, -1)],
+        );
         assert_eq!(lift, vec![TouchEvent::Up { slot: 0 }]);
         let left: Vec<Contact> = mt.contacts().collect();
         assert_eq!(left.len(), 1);
@@ -586,8 +627,20 @@ B: MSC=10
         // Otherwise the old contact appears to travel to wherever the new finger landed, and
         // anything holding a drag follows it there.
         let mut mt = decoder();
-        packet(&mut mt, &[(EV_ABS, ABS_MT_TRACKING_ID, 1), (EV_ABS, ABS_MT_POSITION_X, 0)]);
-        let swapped = packet(&mut mt, &[(EV_ABS, ABS_MT_TRACKING_ID, 2), (EV_ABS, ABS_MT_POSITION_X, 800)]);
+        packet(
+            &mut mt,
+            &[
+                (EV_ABS, ABS_MT_TRACKING_ID, 1),
+                (EV_ABS, ABS_MT_POSITION_X, 0),
+            ],
+        );
+        let swapped = packet(
+            &mut mt,
+            &[
+                (EV_ABS, ABS_MT_TRACKING_ID, 2),
+                (EV_ABS, ABS_MT_POSITION_X, 800),
+            ],
+        );
         assert_eq!(swapped.len(), 2);
         assert_eq!(swapped[0], TouchEvent::Up { slot: 0 });
         assert!(matches!(swapped[1], TouchEvent::Down(c) if c.id == 2));
@@ -598,11 +651,14 @@ B: MSC=10
         // After SYN_DROPPED our slot table is fiction. A finger left stuck down holds a
         // slider forever; a drag cut short is merely annoying.
         let mut mt = decoder();
-        packet(&mut mt, &[
-            (EV_ABS, ABS_MT_TRACKING_ID, 1),
-            (EV_ABS, ABS_MT_SLOT, 1),
-            (EV_ABS, ABS_MT_TRACKING_ID, 2),
-        ]);
+        packet(
+            &mut mt,
+            &[
+                (EV_ABS, ABS_MT_TRACKING_ID, 1),
+                (EV_ABS, ABS_MT_SLOT, 1),
+                (EV_ABS, ABS_MT_TRACKING_ID, 2),
+            ],
+        );
         let dropped = mt.feed(EV_SYN, SYN_DROPPED, 0);
         assert_eq!(dropped.len(), 2, "both contacts should be released");
         assert!(dropped.iter().all(|e| matches!(e, TouchEvent::Up { .. })));
@@ -612,11 +668,14 @@ B: MSC=10
     #[test]
     fn a_slot_beyond_the_array_cannot_write_past_the_end() {
         let mut mt = decoder();
-        let events = packet(&mut mt, &[
-            (EV_ABS, ABS_MT_SLOT, 9999),
-            (EV_ABS, ABS_MT_TRACKING_ID, 3),
-            (EV_ABS, ABS_MT_POSITION_X, 400),
-        ]);
+        let events = packet(
+            &mut mt,
+            &[
+                (EV_ABS, ABS_MT_SLOT, 9999),
+                (EV_ABS, ABS_MT_TRACKING_ID, 3),
+                (EV_ABS, ABS_MT_POSITION_X, 400),
+            ],
+        );
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], TouchEvent::Down(c) if c.slot == MAX_SLOTS - 1));
     }

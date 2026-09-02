@@ -85,7 +85,10 @@ pub enum HmdButton {
 pub enum HmdEvent {
     Imu(ImuSample),
     Pose(Pose),
-    Button { button: HmdButton, pressed: bool },
+    Button {
+        button: HmdButton,
+        pressed: bool,
+    },
     /// The wearer changed the mode with a physical button, or the device changed it itself.
     DisplayModeChanged(DisplayMode),
     Disconnected,

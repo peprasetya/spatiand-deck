@@ -156,7 +156,11 @@ pub fn wayland_arguments(program: &str, existing: &[String]) -> Vec<String> {
 /// belongs to, without the app knowing anything about it. Inherited by grandchildren, which
 /// is the whole reason it is the environment rather than an argument: a browser plays its
 /// sound from a process it forks itself.
-pub fn launch(exec: &str, wayland_display: &str, extra: &[(String, String)]) -> Result<u32, String> {
+pub fn launch(
+    exec: &str,
+    wayland_display: &str,
+    extra: &[(String, String)],
+) -> Result<u32, String> {
     let parts = split_command(exec);
     let (program, args) = parts
         .split_first()
@@ -165,7 +169,10 @@ pub fn launch(exec: &str, wayland_display: &str, extra: &[(String, String)]) -> 
     args.extend(wayland_arguments(program, &args));
 
     let log = open_app_log(program);
-    let (out, err) = match log.as_ref().and_then(|f| Some((f.try_clone().ok()?, f.try_clone().ok()?))) {
+    let (out, err) = match log
+        .as_ref()
+        .and_then(|f| Some((f.try_clone().ok()?, f.try_clone().ok()?)))
+    {
         Some((a, b)) => (Stdio::from(a), Stdio::from(b)),
         None => (Stdio::null(), Stdio::null()),
     };
@@ -304,14 +311,20 @@ mod tests {
             .map(String::from)
             .collect();
         let extra = wayland_arguments("/usr/bin/flatpak", &args);
-        assert!(extra.iter().any(|a| a == "--ozone-platform=wayland"), "got {extra:?}");
+        assert!(
+            extra.iter().any(|a| a == "--ozone-platform=wayland"),
+            "got {extra:?}"
+        );
     }
 
     #[test]
     fn ordinary_programs_are_left_alone() {
         // A flag Chromium understands is a fatal unknown-argument error to most other things.
         for program in ["/usr/bin/kate", "dolphin", "/usr/bin/firefox"] {
-            assert!(wayland_arguments(program, &[]).is_empty(), "{program} was modified");
+            assert!(
+                wayland_arguments(program, &[]).is_empty(),
+                "{program} was modified"
+            );
         }
         // And a Flatpak of something that is not Chromium-based must stay untouched too.
         let args = vec!["run".to_string(), "org.videolan.VLC".to_string()];
@@ -344,8 +357,12 @@ mod tests {
         };
         let before = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let marker = "spatiand-launch-test-marker";
-        launch(&format!("/bin/sh -c \"echo {marker} >&2\""), "wayland-test", &[])
-            .expect("sh should start");
+        launch(
+            &format!("/bin/sh -c \"echo {marker} >&2\""),
+            "wayland-test",
+            &[],
+        )
+        .expect("sh should start");
         // The child writes and exits immediately, but "immediately" is not "before this line".
         for _ in 0..50 {
             std::thread::sleep(std::time::Duration::from_millis(20));

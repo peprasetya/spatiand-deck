@@ -164,10 +164,16 @@ impl Audio {
         };
         // How far the window is from straight ahead, which decides how much of the plain
         // stereo fold is kept.
-        let ahead = (head.inverse() * placement.position().normalize()).x.clamp(-1.0, 1.0);
+        let ahead = (head.inverse() * placement.position().normalize())
+            .x
+            .clamp(-1.0, 1.0);
         // Every window's sink is the widest layout, whatever the app is using of it; the
         // renderer skips whatever is silent.
-        engine.aim(*slot, place(Layout::Surround714, &stage, head), ahead.acos());
+        engine.aim(
+            *slot,
+            place(Layout::Surround714, &stage, head),
+            ahead.acos(),
+        );
     }
 
     /// What a window's sound is doing, for its title bar to show.
@@ -228,7 +234,10 @@ mod tests {
             ..Default::default()
         };
         let honest = (tiny.width * 0.5).atan2(tiny.radius);
-        assert!(honest < MIN_HALF_WIDTH, "the test window is not small enough");
+        assert!(
+            honest < MIN_HALF_WIDTH,
+            "the test window is not small enough"
+        );
         assert!(honest.max(MIN_HALF_WIDTH) >= MIN_HALF_WIDTH);
     }
 

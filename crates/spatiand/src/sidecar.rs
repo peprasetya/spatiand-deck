@@ -109,7 +109,6 @@ const DANGER: [f32; 4] = [0.90, 0.32, 0.30, 1.0];
 /// looking like the wrong one was chosen.
 const KEY_GAP: f32 = 0.16;
 
-
 /// The lowest the brightness slider will go.
 ///
 /// Not a taste decision. At zero the panel is dark, and the control you need in order to
@@ -596,7 +595,10 @@ impl Sidecar {
         if !area.contains(x, y) {
             return None;
         }
-        Some((((x - area.x) / area.w) as f64, ((y - area.y) / area.h) as f64))
+        Some((
+            ((x - area.x) / area.w) as f64,
+            ((y - area.y) / area.h) as f64,
+        ))
     }
 
     /// Where every row sits. See [`Rows`].
@@ -612,7 +614,12 @@ impl Sidecar {
         let (width, height) = self.size;
         let full = width - MARGIN * 2.0;
 
-        let header = Rect { x: MARGIN, y: MARGIN, w: full, h: HEADER_HEIGHT };
+        let header = Rect {
+            x: MARGIN,
+            y: MARGIN,
+            w: full,
+            h: HEADER_HEIGHT,
+        };
         let top = MARGIN + HEADER_HEIGHT + HEADER_GAP;
 
         // Three columns: what the machine is doing, what the wearer can change, and where the
@@ -654,7 +661,12 @@ impl Sidecar {
             })
         });
 
-        Rows { header, graphs, sliders, devices }
+        Rows {
+            header,
+            graphs,
+            sliders,
+            devices,
+        }
     }
 
     /// A touch, in the digitiser's 0..1, as a point in landscape pixels.
@@ -980,7 +992,12 @@ impl Sidecar {
             // end is at that x, so it visibly pokes out through the curve.
             let h = full.min(w);
             round(
-                Rect { x: exit.x + inset, y: exit.y + (exit.h - h) * 0.5, w, h },
+                Rect {
+                    x: exit.x + inset,
+                    y: exit.y + (exit.h - h) * 0.5,
+                    w,
+                    h,
+                },
                 DANGER,
                 h * 0.5,
             );
@@ -1084,7 +1101,12 @@ impl Sidecar {
         for (_, x, y) in &self.touches {
             let size = 56.0;
             round(
-                Rect { x: x - size * 0.5, y: y - size * 0.5, w: size, h: size },
+                Rect {
+                    x: x - size * 0.5,
+                    y: y - size * 0.5,
+                    w: size,
+                    h: size,
+                },
                 [1.0, 1.0, 1.0, 0.22],
                 size * 0.5,
             );
@@ -1151,7 +1173,11 @@ impl Sidecar {
         // that on a keyboard whose default is "on" it is not the brightest thing on the panel.
         // The speaker itself is what says which way it is; see `prepare`.
         let cap = self.cap_rect(area, &spatiand_shell::keyboard::toggle_rect());
-        round(cap, if keyboard.click { TRACK } else { CARD }, cap.h.min(cap.w) * 0.22);
+        round(
+            cap,
+            if keyboard.click { TRACK } else { CARD },
+            cap.h.min(cap.w) * 0.22,
+        );
     }
 
     /// A key's drawn cap: its cell inset by the gap.
@@ -1201,12 +1227,7 @@ impl Sidecar {
                 gl,
                 self.white,
                 &(*projection
-                    * layout.rect(
-                        plot.x + offset * column,
-                        plot.y + plot.h - bar,
-                        width,
-                        bar,
-                    )),
+                    * layout.rect(plot.x + offset * column, plot.y + plot.h - bar, width, bar)),
                 GRAPH_INK,
                 (0.0, 1.0),
             );
@@ -1276,8 +1297,7 @@ impl Sidecar {
                 } else {
                     cap.h * 0.48
                 };
-                let Some((id, aspect, ink)) = self.label(renderer, text, label, size * 1.35)
-                else {
+                let Some((id, aspect, ink)) = self.label(renderer, text, label, size * 1.35) else {
                     continue;
                 };
                 let width = size * aspect.max(0.01);
@@ -1288,7 +1308,11 @@ impl Sidecar {
                     height: size,
                     // A latched key is drawn on a bright plate, so its label has to go dark to
                     // stay readable.
-                    colour: if keyboard.is_latched(key) { GROUND } else { INK },
+                    colour: if keyboard.is_latched(key) {
+                        GROUND
+                    } else {
+                        INK
+                    },
                 });
             }
             let cap = self.cap_rect(area, &spatiand_shell::keyboard::toggle_rect());
@@ -1329,8 +1353,18 @@ impl Sidecar {
             // `s` is consumed here as the texture cache's key; nothing downstream needs the
             // characters again, only the pixels they were rasterised into.
             if let Some((id, aspect, _)) = this.label(renderer, text, &s, h * 1.35) {
-                let x = if from_right { x - h * aspect.max(0.01) } else { x };
-                out.push(Label { texture: (id, aspect), x, y, height: h, colour });
+                let x = if from_right {
+                    x - h * aspect.max(0.01)
+                } else {
+                    x
+                };
+                out.push(Label {
+                    texture: (id, aspect),
+                    x,
+                    y,
+                    height: h,
+                    colour,
+                });
             }
         };
 
@@ -1502,7 +1536,12 @@ mod tests {
     }
 
     fn motion(slot: usize, x: f32, y: f32) -> spatiand_input::TouchEvent {
-        spatiand_input::TouchEvent::Motion(spatiand_input::Contact { slot, id: slot as i32, x, y })
+        spatiand_input::TouchEvent::Motion(spatiand_input::Contact {
+            slot,
+            id: slot as i32,
+            x,
+            y,
+        })
     }
 
     fn centre(r: Rect) -> (f32, f32) {
@@ -1517,8 +1556,14 @@ mod tests {
         let mut s = sidecar((800, 1280));
         let (cx, cy) = centre(s.exit_button());
         let (u, v) = touch_at(&s, cx, cy);
-        assert!(s.touch(&[down(0, u, v)], all(), &Audio::default()).is_empty());
-        assert_eq!(s.settle(), None, "a hold that has just begun has not finished");
+        assert!(s
+            .touch(&[down(0, u, v)], all(), &Audio::default())
+            .is_empty());
+        assert_eq!(
+            s.settle(),
+            None,
+            "a hold that has just begun has not finished"
+        );
         s.touch(&[up(0)], all(), &Audio::default());
         assert_eq!(s.settle(), None, "lifting abandons the hold");
         assert_eq!(s.exit_progress(), 0.0);
@@ -1552,7 +1597,11 @@ mod tests {
         s.exit_hold = Some((0, std::time::Instant::now() - HOLD_TO_EXIT));
         assert_eq!(s.exit_progress(), 1.0);
         assert_eq!(s.settle(), Some(Action::LeaveSession));
-        assert_eq!(s.settle(), None, "leaving twice would run the teardown twice");
+        assert_eq!(
+            s.settle(),
+            None,
+            "leaving twice would run the teardown twice"
+        );
     }
 
     #[test]
@@ -1565,7 +1614,11 @@ mod tests {
             let page = s.page_button();
             let header = s.rows(all()).header;
             assert_eq!(exit.x, header.x, "exit sits at the left edge of the header");
-            assert_eq!(page.x + page.w, header.x + header.w, "the page button sits at the right");
+            assert_eq!(
+                page.x + page.w,
+                header.x + header.w,
+                "the page button sits at the right"
+            );
             assert!(
                 exit.x + exit.w < page.x,
                 "{panel:?}: the header buttons overlap"
@@ -1579,7 +1632,10 @@ mod tests {
         // is. Text drawn under a button is unreadable and the button takes the touch.
         let s = sidecar((800, 1280));
         let exit = s.exit_button();
-        assert!(s.clock_x() >= exit.x + exit.w, "the clock would overlap the exit button");
+        assert!(
+            s.clock_x() >= exit.x + exit.w,
+            "the clock would overlap the exit button"
+        );
     }
 
     #[test]
@@ -1598,8 +1654,15 @@ mod tests {
         // this size would have to be set too small to glance at.
         for page in [Page::Dashboard, Page::Keyboard] {
             let (label, size) = page.button_label();
-            assert_eq!(label.chars().count(), 1, "{label:?} should be a single symbol");
-            assert!(!label.is_ascii(), "{label:?} should be a symbol, not a letter");
+            assert_eq!(
+                label.chars().count(),
+                1,
+                "{label:?} should be a single symbol"
+            );
+            assert!(
+                !label.is_ascii(),
+                "{label:?} should be a symbol, not a letter"
+            );
             assert!(size > 0.0, "{label:?} has no size");
         }
     }
@@ -1654,7 +1717,11 @@ mod tests {
             let hit = s
                 .key_at(cap.x + cap.w * 0.5, cap.y + cap.h * 0.5)
                 .expect("the middle of a cap must be a key");
-            assert_eq!(hit.code, key.code, "cap for {:?} hits {:?}", key.label, hit.label);
+            assert_eq!(
+                hit.code, key.code,
+                "cap for {:?} hits {:?}",
+                key.label, hit.label
+            );
         }
     }
 
@@ -1667,12 +1734,12 @@ mod tests {
         s.page = Page::Keyboard;
         let area = s.keyboard_area();
         let t = spatiand_shell::keyboard::toggle_rect();
-        let (cx, cy) = (
-            area.x + t.u as f32 * area.w,
-            area.y + t.v as f32 * area.h,
-        );
+        let (cx, cy) = (area.x + t.u as f32 * area.w, area.y + t.v as f32 * area.h);
         assert!(s.on_sound_toggle(cx, cy));
-        assert!(s.key_at(cx, cy).is_none(), "the toggle is being read as a key");
+        assert!(
+            s.key_at(cx, cy).is_none(),
+            "the toggle is being read as a key"
+        );
 
         let (u, v) = touch_at(&s, cx, cy);
         let actions = s.touch(&[down(0, u, v)], all(), &Audio::default());
@@ -1691,7 +1758,12 @@ mod tests {
         // The panel stretches a label into a box of its own choosing, so it cannot crop the
         // image the way the 3D keyboard does -- cropping would resize the glyph as well as
         // move it. It shifts the box instead, by however far the ink sits from the middle.
-        let rect = Rect { x: 0.0, y: 100.0, w: 80.0, h: 60.0 };
+        let rect = Rect {
+            x: 0.0,
+            y: 100.0,
+            w: 80.0,
+            h: 60.0,
+        };
         let size = 40.0;
         let centre = rect.y + rect.h * 0.5;
         for ink in [0.5f32, 0.65, 0.35] {
@@ -1776,7 +1848,10 @@ mod tests {
     fn the_dashboard_still_answers_a_slider_when_the_keyboard_is_shut() {
         // The page split must not have taken the original panel with it.
         let mut s = sidecar((800, 1280));
-        let card = s.rows(all()).slider(Knob::Volume).expect("volume has a reading");
+        let card = s
+            .rows(all())
+            .slider(Knob::Volume)
+            .expect("volume has a reading");
         let (u, v) = touch_at(&s, card.x + card.w * 0.5, card.y + card.h * 0.5);
         let actions = s.touch(&[down(0, u, v)], all(), &Audio::default());
         assert_eq!(actions, vec![Action::Moved(Knob::Volume)]);
@@ -1944,7 +2019,10 @@ mod tests {
                 card.w
             );
         }
-        assert_eq!(rows.header.w, full, "the header is the one thing that should span");
+        assert_eq!(
+            rows.header.w, full,
+            "the header is the one thing that should span"
+        );
     }
 
     #[test]
@@ -1954,7 +2032,11 @@ mod tests {
         // version that looked assembled out of whatever fitted.
         let s = sidecar((800, 1280));
         let rows = s.rows(all());
-        for (graph, slider) in rows.graphs.into_iter().zip(rows.sliders.into_iter().flatten()) {
+        for (graph, slider) in rows
+            .graphs
+            .into_iter()
+            .zip(rows.sliders.into_iter().flatten())
+        {
             assert_eq!(graph.y, slider.y, "rows should share a baseline");
             assert_eq!(graph.h, slider.h);
             assert!(graph.x + graph.w < slider.x, "the columns should not touch");
@@ -1967,11 +2049,17 @@ mod tests {
         // exactly the moment someone wants to turn it back up.
         let s = sidecar((800, 1280));
         let card = s
-            .rows(Levels { volume: Some(0.0), ..all() })
+            .rows(Levels {
+                volume: Some(0.0),
+                ..all()
+            })
             .slider(Knob::Volume)
             .expect("volume card");
         let track = Rows::track(card);
-        assert!(track.h > 0.0 && track.w > track.h, "a track should be a capsule, not a dot");
+        assert!(
+            track.h > 0.0 && track.w > track.h,
+            "a track should be a capsule, not a dot"
+        );
     }
 
     fn some_audio() -> Audio {
@@ -2000,7 +2088,9 @@ mod tests {
         let rows = s.rows(all());
         let card = rows.device_card(Direction::Output);
         // The second entry: Deck Speaker, id 66.
-        let row = Rows::device_rows(card, audio.outputs.len()).nth(1).expect("a second row");
+        let row = Rows::device_rows(card, audio.outputs.len())
+            .nth(1)
+            .expect("a second row");
         let event = press(&s, 0, row.x + row.w * 0.5, row.y + row.h * 0.5);
         assert_eq!(
             s.touch(&[event], all(), &audio),
@@ -2070,7 +2160,10 @@ mod tests {
         let rows = s.rows(all());
         let empty = Audio::default();
         assert!(rows.device_at(400.0, 400.0, &empty).is_none());
-        assert_eq!(Rows::device_rows(rows.device_card(Direction::Input), 0).count(), 0);
+        assert_eq!(
+            Rows::device_rows(rows.device_card(Direction::Input), 0).count(),
+            0
+        );
     }
 
     #[test]
@@ -2098,7 +2191,10 @@ mod tests {
                 card.y + card.h,
                 s.size.1
             );
-            assert!(card.x + card.w <= s.size.0 - MARGIN + 0.5, "a card runs off the side");
+            assert!(
+                card.x + card.w <= s.size.0 - MARGIN + 0.5,
+                "a card runs off the side"
+            );
         }
     }
 
@@ -2116,10 +2212,8 @@ mod tests {
             .collect();
         for (i, a) in cards.iter().enumerate() {
             for b in &cards[i + 1..] {
-                let apart = a.x + a.w <= b.x
-                    || b.x + b.w <= a.x
-                    || a.y + a.h <= b.y
-                    || b.y + b.h <= a.y;
+                let apart =
+                    a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
                 assert!(apart, "{a:?} overlaps {b:?}");
             }
         }
@@ -2146,7 +2240,10 @@ mod tests {
         // A machine with no backlight, or a session with no glasses, should not offer a
         // slider that moves nothing.
         let s = sidecar((800, 1280));
-        let no_glasses = s.rows(Levels { glasses: None, ..all() });
+        let no_glasses = s.rows(Levels {
+            glasses: None,
+            ..all()
+        });
         assert!(no_glasses.slider(Knob::Glasses).is_none());
         // The two that remain close up rather than leaving a hole where the third was. The
         // glasses are drawn first, so with them gone everything below shifts up one slot.
@@ -2203,7 +2300,12 @@ mod tests {
         };
         let (px, py) = draws_at(s, panel, lx, ly);
         let (u, v) = digitiser_reports(panel, px, py);
-        make(spatiand_input::Contact { slot, id: slot as i32, x: u, y: v })
+        make(spatiand_input::Contact {
+            slot,
+            id: slot as i32,
+            x: u,
+            y: v,
+        })
     }
 
     #[test]
@@ -2215,7 +2317,10 @@ mod tests {
         // same rectangle.
         let track = Rows::track(card);
         let event = press(&s, 0, track.x + track.w * 0.25, card.y + card.h * 0.5);
-        assert_eq!(s.touch(&[event], all(), &Audio::default()), vec![Action::Moved(Knob::Volume)]);
+        assert_eq!(
+            s.touch(&[event], all(), &Audio::default()),
+            vec![Action::Moved(Knob::Volume)]
+        );
         let value = s.knob_value(Knob::Volume, all()).expect("a value");
         assert!((value - 0.25).abs() < 0.02, "got {value}");
     }
@@ -2231,7 +2336,10 @@ mod tests {
         s.touch(&[down], all(), &Audio::default());
         // Well clear of the card, and three quarters of the way across the track.
         let away = drag(&s, 0, track.x + track.w * 0.75, card.y - 120.0);
-        assert_eq!(s.touch(&[away], all(), &Audio::default()), vec![Action::Moved(Knob::Volume)]);
+        assert_eq!(
+            s.touch(&[away], all(), &Audio::default()),
+            vec![Action::Moved(Knob::Volume)]
+        );
         let value = s.knob_value(Knob::Volume, all()).expect("still held");
         assert!((value - 0.75).abs() < 0.02, "got {value}");
     }
@@ -2240,8 +2348,16 @@ mod tests {
     fn lifting_releases_the_knob() {
         let mut s = sidecar((800, 1280));
         let volume = s.rows(all()).slider(Knob::Volume).expect("volume card");
-        s.touch(&[press(&s, 0, volume.x + 40.0, volume.y + 20.0)], all(), &Audio::default());
-        s.touch(&[spatiand_input::TouchEvent::Up { slot: 0 }], all(), &Audio::default());
+        s.touch(
+            &[press(&s, 0, volume.x + 40.0, volume.y + 20.0)],
+            all(),
+            &Audio::default(),
+        );
+        s.touch(
+            &[spatiand_input::TouchEvent::Up { slot: 0 }],
+            all(),
+            &Audio::default(),
+        );
         assert!(s.knob_value(Knob::Volume, all()).is_none());
         assert!(s.touches.is_empty(), "the dot should go with the finger");
     }
@@ -2252,11 +2368,18 @@ mod tests {
         // and jump the value to wherever it touched.
         let mut s = sidecar((800, 1280));
         let volume = s.rows(all()).slider(Knob::Volume).expect("volume card");
-        s.touch(&[press(&s, 0, volume.x + 10.0, volume.y + 20.0)], all(), &Audio::default());
+        s.touch(
+            &[press(&s, 0, volume.x + 10.0, volume.y + 20.0)],
+            all(),
+            &Audio::default(),
+        );
         let intruder = press(&s, 1, volume.x + volume.w - 10.0, volume.y + 20.0);
         s.touch(&[intruder], all(), &Audio::default());
         let value = s.knob_value(Knob::Volume, all()).expect("still ours");
-        assert!(value < 0.1, "the first finger should still own it, got {value}");
+        assert!(
+            value < 0.1,
+            "the first finger should still own it, got {value}"
+        );
     }
 
     #[test]
@@ -2274,10 +2397,22 @@ mod tests {
         // on that panel.
         let mut s = sidecar((800, 1280));
         let bar = s.rows(all()).slider(Knob::Screen).expect("screen card");
-        s.touch(&[press(&s, 0, bar.x - 200.0, bar.y + 20.0)], all(), &Audio::default());
+        s.touch(
+            &[press(&s, 0, bar.x - 200.0, bar.y + 20.0)],
+            all(),
+            &Audio::default(),
+        );
         // Pressing left of the bar still grabs nothing; press on it, then drag off the left.
-        s.touch(&[press(&s, 1, bar.x + 40.0, bar.y + 20.0)], all(), &Audio::default());
-        s.touch(&[drag(&s, 1, bar.x - 500.0, bar.y + 20.0)], all(), &Audio::default());
+        s.touch(
+            &[press(&s, 1, bar.x + 40.0, bar.y + 20.0)],
+            all(),
+            &Audio::default(),
+        );
+        s.touch(
+            &[drag(&s, 1, bar.x - 500.0, bar.y + 20.0)],
+            all(),
+            &Audio::default(),
+        );
         let value = s.knob_value(Knob::Screen, all()).expect("held");
         assert!(value >= MINIMUM_BRIGHTNESS, "got {value}");
     }

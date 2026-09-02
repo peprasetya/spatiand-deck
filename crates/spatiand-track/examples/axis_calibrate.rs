@@ -19,11 +19,7 @@ const COLLECT_SECONDS: f64 = 4.0;
 const MAX_ATTEMPTS: u32 = 4;
 
 /// Drain samples for `seconds`, optionally accumulating them, returning the peak rate seen.
-fn pump(
-    hmd: &mut Box<dyn Hmd>,
-    seconds: f64,
-    collector: Option<&mut PhaseCollector>,
-) -> f64 {
+fn pump(hmd: &mut Box<dyn Hmd>, seconds: f64, collector: Option<&mut PhaseCollector>) -> f64 {
     let end = Instant::now() + Duration::from_secs_f64(seconds);
     let mut peak: f64 = 0.0;
     let mut sink = collector;
@@ -58,8 +54,15 @@ fn main() {
 
     if std::env::args().any(|a| a == "--show") {
         match config::load_axes() {
-            Some(m) => println!("{}\n  stored at {}", m.summary(), config::axes_path().display()),
-            None => println!("no stored calibration (would use identity: {})", AxisMap::IDENTITY.summary()),
+            Some(m) => println!(
+                "{}\n  stored at {}",
+                m.summary(),
+                config::axes_path().display()
+            ),
+            None => println!(
+                "no stored calibration (would use identity: {})",
+                AxisMap::IDENTITY.summary()
+            ),
         }
         return;
     }
@@ -126,7 +129,11 @@ fn main() {
             println!(
                 "        too small (need {:.0} deg){}",
                 calibration::MINIMUM_DEGREES,
-                if attempt < MAX_ATTEMPTS { " — again" } else { "" }
+                if attempt < MAX_ATTEMPTS {
+                    " — again"
+                } else {
+                    ""
+                }
             );
         }
 

@@ -81,7 +81,12 @@ mod tests {
             Control::RPadTouch,
             Control::LPadTouch,
         ] {
-            assert_eq!(intent_for(c), None, "{} should not be a menu intent", c.name());
+            assert_eq!(
+                intent_for(c),
+                None,
+                "{} should not be a menu intent",
+                c.name()
+            );
         }
     }
 

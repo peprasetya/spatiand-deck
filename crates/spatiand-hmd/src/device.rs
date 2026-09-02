@@ -93,7 +93,10 @@ mod tests {
     fn table_parses_and_has_the_verified_device() {
         let air = lookup(0x3318, 0x0424).expect("XREAL Air must be in the table");
         assert_eq!(air.name, "XREAL Air");
-        assert!(air.verified, "the Air gen 1 is the one we confirmed on hardware");
+        assert!(
+            air.verified,
+            "the Air gen 1 is the one we confirmed on hardware"
+        );
         assert_eq!((air.imu_interface, air.mcu_interface), (3, 4));
         // 0x04 is 3840x1080@72 — confirmed working on the Deck. Guard against a careless
         // edit silently downgrading everyone to 60 Hz.

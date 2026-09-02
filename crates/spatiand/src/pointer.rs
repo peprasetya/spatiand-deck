@@ -501,7 +501,10 @@ pub fn aim(ray: Ray, windows: &[WindowQuad]) -> Aim {
             ) else {
                 continue;
             };
-            if popup.as_ref().map_or(true, |(_, _, best)| h.distance < best.distance) {
+            if popup
+                .as_ref()
+                .map_or(true, |(_, _, best)| h.distance < best.distance)
+            {
                 popup = Some((w, p, h));
             }
         }
@@ -553,11 +556,7 @@ pub fn popup_quad(
     let u = (offset.0 as f64 + popup_pixels.0 as f64 * 0.5) / w;
     let v = (offset.1 as f64 + popup_pixels.1 as f64 * 0.5) / h;
     let orientation = placement.orientation();
-    let local = glam::DVec3::new(
-        0.0,
-        -(u - 0.5) * content_width,
-        (0.5 - v) * content_height,
-    );
+    let local = glam::DVec3::new(0.0, -(u - 0.5) * content_width, (0.5 - v) * content_height);
     Quad {
         centre: placement.position() + orientation * local,
         orientation,
@@ -639,10 +638,8 @@ impl PointerState {
         // wrong row -- or, where the menu overhangs the window, no row at all.
         let on_popup = aim.popup.and_then(|(w, p, hit)| {
             let popup = windows.get(w)?.popups.get(p)?;
-            let position = Point::from((
-                hit.u * popup.pixels.0 as f64,
-                hit.v * popup.pixels.1 as f64,
-            ));
+            let position =
+                Point::from((hit.u * popup.pixels.0 as f64, hit.v * popup.pixels.1 as f64));
             Some((popup.surface.clone(), position))
         });
 
@@ -930,7 +927,10 @@ mod tests {
         let close = f.close();
         assert_eq!(f.zone(close.u, close.v, false), Zone::Close);
         // A little to the left of it is ordinary bar.
-        assert_eq!(f.zone(close.u - close.half_u * 3.0, close.v, false), Zone::Title);
+        assert_eq!(
+            f.zone(close.u - close.half_u * 3.0, close.v, false),
+            Zone::Title
+        );
     }
 
     #[test]
@@ -1036,11 +1036,19 @@ mod tests {
         let mid_content = f.border + f.bar + 0.5;
         let just_inside = |t: f64| t * 0.5;
         assert_eq!(
-            f.zone(just_inside(f.border) / f.width(), mid_content / f.height(), false),
+            f.zone(
+                just_inside(f.border) / f.width(),
+                mid_content / f.height(),
+                false
+            ),
             Zone::Resize(Edge::Left)
         );
         assert_eq!(
-            f.zone(1.0 - just_inside(f.border) / f.width(), mid_content / f.height(), false),
+            f.zone(
+                1.0 - just_inside(f.border) / f.width(),
+                mid_content / f.height(),
+                false
+            ),
             Zone::Resize(Edge::Right)
         );
         // Middle of the bottom strip, horizontally centred so it is a side rather than a corner.
@@ -1050,7 +1058,10 @@ mod tests {
         );
         // Anything above the content is the bar, frame included.
         assert_eq!(f.zone(0.5, 0.0, false), Zone::Title);
-        assert_eq!(f.zone(0.5, (f.border + f.bar * 0.5) / f.height(), false), Zone::Title);
+        assert_eq!(
+            f.zone(0.5, (f.border + f.bar * 0.5) / f.height(), false),
+            Zone::Title
+        );
     }
 
     #[test]
@@ -1061,10 +1072,16 @@ mod tests {
         let below = 1.0 - (f.border * 0.5) / f.height();
         let beside = (f.border * 0.5) / f.width();
         assert_eq!(f.zone(beside, below, false), Zone::Resize(Edge::BottomLeft));
-        assert_eq!(f.zone(1.0 - beside, below, false), Zone::Resize(Edge::BottomRight));
+        assert_eq!(
+            f.zone(1.0 - beside, below, false),
+            Zone::Resize(Edge::BottomRight)
+        );
         // From along the bottom, just inside the content's own width.
         let inside_left = (f.border + f.border * 0.5) / f.width();
-        assert_eq!(f.zone(inside_left, below, false), Zone::Resize(Edge::BottomLeft));
+        assert_eq!(
+            f.zone(inside_left, below, false),
+            Zone::Resize(Edge::BottomLeft)
+        );
         // From up the side, above the corner, is the plain side.
         let up_the_side = (f.border + f.bar + 0.5) / f.height();
         assert_eq!(f.zone(beside, up_the_side, false), Zone::Resize(Edge::Left));
@@ -1083,7 +1100,10 @@ mod tests {
         // On a narrow window the two corner regions could meet in the middle, leaving no
         // bottom edge at all.
         let f = Frame::of((400, 900));
-        assert_eq!(f.zone(0.5, 1.0 - f.border * 0.5 / f.height(), false), Zone::Resize(Edge::Bottom));
+        assert_eq!(
+            f.zone(0.5, 1.0 - f.border * 0.5 / f.height(), false),
+            Zone::Resize(Edge::Bottom)
+        );
     }
 
     #[test]
@@ -1093,12 +1113,14 @@ mod tests {
         // aimed -- which is what happened when the title bar was first added.
         // Both probes sit a hair inside their corner. The corners themselves are the zone
         // boundaries, and which side of one a float lands on is not a property worth asserting.
-        let top_left =
-            surface_position(&at_content(PIXELS, 0.001, 0.001), PIXELS).expect("inside");
+        let top_left = surface_position(&at_content(PIXELS, 0.001, 0.001), PIXELS).expect("inside");
         assert!(top_left.x < 3.0 && top_left.y < 3.0, "{top_left:?}");
         let bottom_right =
             surface_position(&at_content(PIXELS, 0.999, 0.999), PIXELS).expect("inside");
-        assert!(bottom_right.x > 1277.0 && bottom_right.y > 798.0, "{bottom_right:?}");
+        assert!(
+            bottom_right.x > 1277.0 && bottom_right.y > 798.0,
+            "{bottom_right:?}"
+        );
     }
 
     #[test]
@@ -1123,7 +1145,10 @@ mod tests {
         // more of it fits, which is the whole distinction from the two-thumb gesture.
         let before = PIXELS.0 as f64 / start.width;
         let after = out.pixels.0 as f64 / out.placement.width;
-        assert!((before - after).abs() / before < 0.01, "{before} vs {after}");
+        assert!(
+            (before - after).abs() / before < 0.01,
+            "{before} vs {after}"
+        );
     }
 
     #[test]
@@ -1134,7 +1159,10 @@ mod tests {
         let out = resize(Edge::Right, &start, PIXELS, 0.2, 0.0);
         let left_before = start.yaw + (start.width * 0.5) / start.radius;
         let left_after = out.placement.yaw + (out.placement.width * 0.5) / out.placement.radius;
-        assert!((left_before - left_after).abs() < 1e-9, "{left_before} vs {left_after}");
+        assert!(
+            (left_before - left_after).abs() < 1e-9,
+            "{left_before} vs {left_after}"
+        );
     }
 
     #[test]
@@ -1147,7 +1175,10 @@ mod tests {
         let right_before = start.yaw - (start.width * 0.5) / start.radius;
         let right_after = out.placement.yaw - (out.placement.width * 0.5) / out.placement.radius;
         assert!((right_before - right_after).abs() < 1e-9);
-        assert!(out.placement.yaw > start.yaw, "growing leftwards moves the centre left");
+        assert!(
+            out.placement.yaw > start.yaw,
+            "growing leftwards moves the centre left"
+        );
     }
 
     #[test]
@@ -1156,11 +1187,17 @@ mod tests {
         let content_height = start.width / (PIXELS.0 as f64 / PIXELS.1 as f64);
         let out = resize(Edge::Bottom, &start, PIXELS, 0.0, 0.15);
         assert!(out.pixels.1 > PIXELS.1);
-        assert_eq!(out.placement.width, start.width, "the bottom edge is not a width");
+        assert_eq!(
+            out.placement.width, start.width,
+            "the bottom edge is not a width"
+        );
         let new_height = out.pixels.1 as f64 / (out.pixels.0 as f64 / out.placement.width);
         let top_before = start.pitch + (content_height * 0.5) / start.radius;
         let top_after = out.placement.pitch + (new_height * 0.5) / out.placement.radius;
-        assert!((top_before - top_after).abs() < 1e-3, "{top_before} vs {top_after}");
+        assert!(
+            (top_before - top_after).abs() < 1e-3,
+            "{top_before} vs {top_after}"
+        );
     }
 
     #[test]
@@ -1175,7 +1212,10 @@ mod tests {
         // The frame is the only thing you can grab to undo it, and it shrinks with the window.
         let start = placement(0.0);
         let out = resize(Edge::Right, &start, PIXELS, -100.0, 0.0);
-        let angle = 2.0 * (out.placement.width / 2.0 / out.placement.radius).atan().to_degrees();
+        let angle = 2.0
+            * (out.placement.width / 2.0 / out.placement.radius)
+                .atan()
+                .to_degrees();
         assert!(angle >= MINIMUM_ANGLE_DEG - 0.01, "shrank to {angle} deg");
         assert!(out.pixels.0 >= 160 && out.pixels.1 >= 120);
     }
@@ -1184,7 +1224,10 @@ mod tests {
     fn a_window_cannot_be_dragged_over_the_whole_sky() {
         let start = placement(0.0);
         let out = resize(Edge::Right, &start, PIXELS, 100.0, 0.0);
-        let angle = 2.0 * (out.placement.width / 2.0 / out.placement.radius).atan().to_degrees();
+        let angle = 2.0
+            * (out.placement.width / 2.0 / out.placement.radius)
+                .atan()
+                .to_degrees();
         assert!(angle <= MAXIMUM_ANGLE_DEG + 0.01, "grew to {angle} deg");
     }
 
@@ -1204,7 +1247,13 @@ mod tests {
         // Resizing is not the depth drag. Changing radius here would make the window appear to
         // resize while actually flying towards you.
         let start = placement(0.3);
-        for edge in [Edge::Left, Edge::Right, Edge::Bottom, Edge::BottomLeft, Edge::BottomRight] {
+        for edge in [
+            Edge::Left,
+            Edge::Right,
+            Edge::Bottom,
+            Edge::BottomLeft,
+            Edge::BottomRight,
+        ] {
             let out = resize(edge, &start, PIXELS, 0.1, 0.1);
             assert_eq!(out.placement.radius, start.radius, "{edge:?}");
         }

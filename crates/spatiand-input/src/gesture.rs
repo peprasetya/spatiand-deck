@@ -90,10 +90,7 @@ impl TwoPadGesture {
         }
 
         let current = Anchor {
-            centroid: (
-                (left.x + right.x) * 0.5,
-                (left.y + right.y) * 0.5,
-            ),
+            centroid: ((left.x + right.x) * 0.5, (left.y + right.y) * 0.5),
             separation: right.x - left.x,
         };
 
@@ -157,7 +154,9 @@ mod tests {
         // Thumbs land wherever they land. Reporting that as movement would fling whatever is
         // being held clear across the world the instant you touch down.
         let mut g = TwoPadGesture::new();
-        let d = g.update(&touch(-0.7, 0.3), &touch(0.6, -0.2)).expect("gesture started");
+        let d = g
+            .update(&touch(-0.7, 0.3), &touch(0.6, -0.2))
+            .expect("gesture started");
         assert_eq!(d, GestureDelta::NONE);
         assert!(g.is_active());
     }
@@ -168,7 +167,11 @@ mod tests {
         g.update(&touch(0.0, 0.0), &touch(0.0, 0.0));
         let d = g.update(&touch(-0.5, 0.0), &touch(0.5, 0.0)).unwrap();
         assert!(d.scale > 1.0, "spreading should grow, got {}", d.scale);
-        assert!(d.pan.0.abs() < 1e-6, "a symmetric spread must not pan: {:?}", d.pan);
+        assert!(
+            d.pan.0.abs() < 1e-6,
+            "a symmetric spread must not pan: {:?}",
+            d.pan
+        );
     }
 
     #[test]
@@ -211,7 +214,9 @@ mod tests {
         // on its own, which looks like tracking drift rather than an input problem.
         let mut g = TwoPadGesture::new();
         g.update(&touch(0.0, 0.0), &touch(0.0, 0.0));
-        let d = g.update(&touch(0.001, -0.002), &touch(-0.001, 0.002)).unwrap();
+        let d = g
+            .update(&touch(0.001, -0.002), &touch(-0.001, 0.002))
+            .unwrap();
         assert!(d.is_negligible(), "jitter leaked through as {d:?}");
     }
 

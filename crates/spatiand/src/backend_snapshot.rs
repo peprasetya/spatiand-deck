@@ -138,8 +138,12 @@ pub fn run(
     log::info!("snapshot: {view:?} at {width}x{height}, yaw {yaw_deg}, pitch {pitch_deg}, portrait {portrait} -> {}", out.display());
 
     // --- a GL context with no display attached ---
-    let node = std::env::var("SPATIAND_RENDER_NODE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
-    let file = std::fs::OpenOptions::new().read(true).write(true).open(&node)?;
+    let node =
+        std::env::var("SPATIAND_RENDER_NODE").unwrap_or_else(|_| "/dev/dri/renderD128".into());
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&node)?;
     let gbm = GbmDevice::new(DeviceFd::from(std::os::fd::OwnedFd::from(file)))?;
     let egl_display = unsafe { EGLDisplay::new(gbm)? };
     let egl_context = EGLContext::new(&egl_display)?;
@@ -234,7 +238,8 @@ pub fn run(
         log::info!("launching {command:?} into the snapshot, waiting up to {seconds}s");
         match spatiand_platform::launch(&command, &runtime.state.socket_name, &[]) {
             Ok(pid) => {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f32(seconds);
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs_f32(seconds);
                 while std::time::Instant::now() < deadline {
                     // Pumping the display is what lets the client bind globals, get its
                     // configure, and commit. Without this it blocks on the first roundtrip and
@@ -336,7 +341,10 @@ pub fn run(
             gl.DeleteFramebuffers(1, &fbo);
             st
         })?;
-        let ink = raw.chunks_exact(4).filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8).count();
+        let ink = raw
+            .chunks_exact(4)
+            .filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8)
+            .count();
         log::info!(
             "window texture {tex}: fbo status {status:#x}, {tw}x{th}, {:.1}% non-black",
             ink as f32 / (tw * th) as f32 * 100.0
@@ -507,9 +515,13 @@ pub fn run(
                 portrait,
             );
             let model = crate::backend_drm::head_locked_panel_sized(orientation, pw, ph, portrait);
-            scene_ref
-                .quads()
-                .draw(gl, tex, &(eye.view_projection() * model), [1.0; 4], (0.0, 1.0));
+            scene_ref.quads().draw(
+                gl,
+                tex,
+                &(eye.view_projection() * model),
+                [1.0; 4],
+                (0.0, 1.0),
+            );
         }
 
         gl.ReadPixels(
@@ -604,7 +616,9 @@ fn draw_sidecar(
         gl.Viewport(0, 0, panel.0 as i32, panel.1 as i32);
         gl.ClearColor(0.02, 0.03, 0.05, 1.0);
         gl.Clear(ffi::COLOR_BUFFER_BIT);
-        ui.draw(gl, quads, rounded, &monitors, levels, &audio, keyboard, &prepared);
+        ui.draw(
+            gl, quads, rounded, &monitors, levels, &audio, keyboard, &prepared,
+        );
         gl.ReadPixels(
             0,
             0,

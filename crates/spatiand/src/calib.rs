@@ -178,7 +178,9 @@ impl Calibration {
                 log::info!("calibration built: {}", map.summary());
                 self.result = Some(map);
                 match spatiand_track::config::save_axes(&map) {
-                    Ok(path) => log::info!("calibration saved to {}: {}", path.display(), map.summary()),
+                    Ok(path) => {
+                        log::info!("calibration saved to {}: {}", path.display(), map.summary())
+                    }
                     Err(e) => log::warn!("calibrated but could not save: {e}"),
                 }
                 self.enter(Stage::Done);
@@ -314,8 +316,8 @@ mod tests {
     fn samples_are_only_collected_during_the_move_window() {
         let mut c = Calibration::new();
         c.feed(&sample(0, DVec3::new(0.0, 0.0, 120.0))); // shake -> countdown
-        // Movement during the countdown must not count, or an eager wearer poisons the
-        // measurement before it has started.
+                                                         // Movement during the countdown must not count, or an eager wearer poisons the
+                                                         // measurement before it has started.
         for i in 1..100u64 {
             c.feed(&sample(i * 1_000_000, DVec3::new(0.0, 0.0, 50.0)));
         }

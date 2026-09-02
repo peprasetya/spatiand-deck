@@ -135,14 +135,20 @@ mod tests {
         }
         let s = got.expect("null headset should produce samples");
         assert!(s.is_plausible());
-        assert!((s.accel.length() - 1.0).abs() < 1e-6, "must read 1 g at rest");
+        assert!(
+            (s.accel.length() - 1.0).abs() < 1e-6,
+            "must read 1 g at rest"
+        );
         assert!((s.mag.length() - 0.3).abs() < 0.01, "must read ~0.3 G");
     }
 
     #[test]
     fn stereo_is_accepted_so_the_renderer_can_be_exercised() {
         let mut hmd = NullHmd::new();
-        assert_eq!(hmd.set_display_mode(DisplayMode::Stereo).unwrap(), DisplayMode::Stereo);
+        assert_eq!(
+            hmd.set_display_mode(DisplayMode::Stereo).unwrap(),
+            DisplayMode::Stereo
+        );
         assert_eq!(hmd.display_mode(), DisplayMode::Stereo);
     }
 }

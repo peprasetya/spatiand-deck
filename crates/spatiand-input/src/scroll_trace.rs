@@ -522,4 +522,3 @@ pub(crate) const CONTACT_4: &[(f32, f32, bool, u16)] = &[
     (0.50465, 0.02637, false, 0),
     (0.50392, -0.04376, false, 0),
 ];
-

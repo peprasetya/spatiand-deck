@@ -101,9 +101,15 @@ pub struct DesktopPanels {
 
 impl DesktopPanels {
     /// Nothing to shell out to. What a machine without a desktop session gets.
-    pub const NONE: Self = Self { network: false, bluetooth: false };
+    pub const NONE: Self = Self {
+        network: false,
+        bluetooth: false,
+    };
     /// Everything present. The Deck, and what the tests assume unless they say otherwise.
-    pub const ALL: Self = Self { network: true, bluetooth: true };
+    pub const ALL: Self = Self {
+        network: true,
+        bluetooth: true,
+    };
 }
 
 /// One row.
@@ -231,7 +237,10 @@ mod tests {
         let recentre = labels.iter().position(|a| *a == HudAction::Recentre);
         let calibrate = labels.iter().position(|a| *a == HudAction::Calibrate);
         assert_eq!(recentre, Some(0));
-        assert!(calibrate.unwrap() <= 2, "calibrate should be reachable at a glance");
+        assert!(
+            calibrate.unwrap() <= 2,
+            "calibrate should be reachable at a glance"
+        );
     }
 
     #[test]
@@ -269,17 +278,17 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            modules,
-            vec![("Wi-Fi", "wifi"), ("Bluetooth", "bluetooth")]
-        );
+        assert_eq!(modules, vec![("Wi-Fi", "wifi"), ("Bluetooth", "bluetooth")]);
     }
 
     #[test]
     fn bluetooth_can_be_absent_while_wifi_is_present() {
         // The reason this is two flags: the runner and the network module ship with Plasma,
         // the Bluetooth one ships with bluedevil. One installed without the other is ordinary.
-        let hud = Hud::new(DesktopPanels { network: true, bluetooth: false });
+        let hud = Hud::new(DesktopPanels {
+            network: true,
+            bluetooth: false,
+        });
         let modules: Vec<_> = hud
             .items()
             .iter()
@@ -297,10 +306,10 @@ mod tests {
         // "just a resolution setting" back is constant, and on a headset it means nothing.
         // Apparent size comes from where a window sits in the world.
         for panels in [DesktopPanels::ALL, DesktopPanels::NONE] {
-            assert!(!Hud::new(panels).items().iter().any(|i| matches!(
-                i.action,
-                HudAction::OpenSystemSettings("display")
-            )));
+            assert!(!Hud::new(panels)
+                .items()
+                .iter()
+                .any(|i| matches!(i.action, HudAction::OpenSystemSettings("display"))));
         }
     }
 
@@ -310,7 +319,10 @@ mod tests {
         // or not the optional rows are present.
         for panels in [DesktopPanels::ALL, DesktopPanels::NONE] {
             let hud = Hud::new(panels);
-            assert_eq!(hud.items().last().map(|i| i.action.clone()), Some(HudAction::ReturnToDesktop));
+            assert_eq!(
+                hud.items().last().map(|i| i.action.clone()),
+                Some(HudAction::ReturnToDesktop)
+            );
         }
     }
 
@@ -348,7 +360,11 @@ mod tests {
         // A bare verb is not enough for something you reach for once a month, in a headset.
         for item in Hud::default().items() {
             assert!(!item.label.is_empty());
-            assert!(item.detail.len() > 10, "{} has no useful detail", item.label);
+            assert!(
+                item.detail.len() > 10,
+                "{} has no useful detail",
+                item.label
+            );
         }
     }
 }

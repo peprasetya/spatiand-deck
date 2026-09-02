@@ -96,7 +96,10 @@ impl EyeMode {
             // so that what you see is exactly one of the two real views, half an IPD off
             // centre — honest about the geometry rather than a third rendering path.
             Self::Mono => vec![(EyeSide::Left, 0, width)],
-            Self::Stereo => vec![(EyeSide::Left, 0, width / 2), (EyeSide::Right, width / 2, width / 2)],
+            Self::Stereo => vec![
+                (EyeSide::Left, 0, width / 2),
+                (EyeSide::Right, width / 2, width / 2),
+            ],
         }
     }
 }
@@ -124,7 +127,12 @@ pub fn run(
         },
     );
     let _global = output.create_global::<Spatiand>(&runtime.display_handle);
-    output.change_current_state(Some(mode), Some(Transform::Flipped180), None, Some((0, 0).into()));
+    output.change_current_state(
+        Some(mode),
+        Some(Transform::Flipped180),
+        None,
+        Some((0, 0).into()),
+    );
     output.set_preferred(mode);
     runtime.state.space.map_output(&output, (0, 0));
 
@@ -143,7 +151,11 @@ pub fn run(
     log::info!("eye mode: {eye_mode:?} (set SPATIAND_EYES=stereo for the side-by-side pair)");
     let stereo = StereoConfig {
         h_fov_deg: hmd.as_ref().map(|h| h.info().h_fov_deg).unwrap_or(40.0),
-        ipd_m: hmd.as_ref().map(|h| h.info().default_ipd_mm).unwrap_or(63.0) / 1000.0,
+        ipd_m: hmd
+            .as_ref()
+            .map(|h| h.info().default_ipd_mm)
+            .unwrap_or(63.0)
+            / 1000.0,
         ..Default::default()
     };
 
@@ -153,7 +165,10 @@ pub fn run(
     // every restart.
     let stored = spatiand_track::config::load_axes();
     let mut calibration: Option<Calibration> = None;
-    let mut tracker = HeadTracker::new(stored.unwrap_or(AxisMap::XREAL_AIR), TrackerConfig::default());
+    let mut tracker = HeadTracker::new(
+        stored.unwrap_or(AxisMap::XREAL_AIR),
+        TrackerConfig::default(),
+    );
     if let Some(h) = hmd.as_ref() {
         crate::backend_drm::settle_axes(h.info(), stored, &mut tracker, &mut calibration);
     }
@@ -265,7 +280,11 @@ pub fn run(
             let input = *c.state();
             let two_handed = gesture.update(&input.left_pad, &input.right_pad);
             if two_handed.is_none() && !shell.menu_is_open() && input.right_pad.touched {
-                pointer = Some((input.right_pad.x, input.right_pad.y, input.right_pad.clicked));
+                pointer = Some((
+                    input.right_pad.x,
+                    input.right_pad.y,
+                    input.right_pad.clicked,
+                ));
             }
 
             for event in events {
@@ -274,7 +293,8 @@ pub fn run(
                         if mode == spatiand_shell::Mode::World {
                             scene.forget_anchor();
                         } else {
-                            scene.anchor_menu(mode, tracker.euler_degrees().yaw.to_radians() as f32);
+                            scene
+                                .anchor_menu(mode, tracker.euler_degrees().yaw.to_radians() as f32);
                         }
                     }
                     ShellEvent::Launch(app) => {
@@ -330,7 +350,8 @@ pub fn run(
                             }
                         }
                         // Nothing to hand back in a window on someone else's desktop.
-                        HudAction::ToggleKeyboard | HudAction::ReturnToDesktop
+                        HudAction::ToggleKeyboard
+                        | HudAction::ReturnToDesktop
                         | HudAction::Screenshot => {
                             log::info!("{action:?} does nothing in the nested backend");
                         }
@@ -443,8 +464,15 @@ pub fn run(
 
         let panel_snapshot = panel.as_ref().map(|p| (p.id, p.aspect));
         // Where the pointer is aiming, latched with the pose this frame.
-        let pointer_ray = pointer
-            .map(|(px, py, _)| ray_from_pad(px, py, orientation, eye_centre(orientation, &stereo), &pointer_config));
+        let pointer_ray = pointer.map(|(px, py, _)| {
+            ray_from_pad(
+                px,
+                py,
+                orientation,
+                eye_centre(orientation, &stereo),
+                &pointer_config,
+            )
+        });
         let scene = &scene;
         let shell = &shell;
         renderer.with_context(|gl| unsafe {

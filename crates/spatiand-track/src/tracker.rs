@@ -359,7 +359,8 @@ impl HeadTracker {
             // anchor to. Better to stay on gyro alone than to nail yaw to a fiction.
             if coherence > 0.9 {
                 self.mag_reference = Some(mean / coherence);
-                self.mag_reference_strength = self.mag_strength_accumulator / self.mag_samples as f64;
+                self.mag_reference_strength =
+                    self.mag_strength_accumulator / self.mag_samples as f64;
                 self.mag_reference_inclination =
                     self.mag_inclination_accumulator / self.mag_samples as f64;
             } else {
@@ -375,7 +376,8 @@ impl HeadTracker {
         // Both gates compare against what was measured when the anchor was set, never against
         // textbook values for Earth's field. A permanently distorted but uniform field is
         // fine; a field that has CHANGED is not, and that is the real distinction.
-        let strength_off = (strength - self.mag_reference_strength).abs() / self.mag_reference_strength;
+        let strength_off =
+            (strength - self.mag_reference_strength).abs() / self.mag_reference_strength;
         let inclination_off =
             (inclination - self.mag_reference_inclination).abs() * 180.0 / std::f64::consts::PI;
         if strength_off >= self.config.mag_strength_tolerance
@@ -538,7 +540,11 @@ fn quat_from_to(from: DVec3, to: DVec3) -> DQuat {
     if dot < -1.0 + 1e-12 {
         // Antiparallel: any perpendicular axis is a valid 180 degree rotation, but it must
         // actually be perpendicular, so pick whichever basis vector is least aligned.
-        let axis = if from.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+        let axis = if from.x.abs() < 0.9 {
+            DVec3::X
+        } else {
+            DVec3::Y
+        };
         let perp = from.cross(axis).normalize();
         return DQuat::from_axis_angle(perp, std::f64::consts::PI);
     }
@@ -576,7 +582,12 @@ mod tests {
     fn seeds_immediately_from_gravity() {
         let mut t = HeadTracker::new(AxisMap::IDENTITY, TrackerConfig::default());
         assert!(!t.has_samples());
-        t.integrate(&sample(0, DVec3::ZERO, DVec3::new(0.0, 0.0, 1.0), DVec3::ZERO));
+        t.integrate(&sample(
+            0,
+            DVec3::ZERO,
+            DVec3::new(0.0, 0.0, 1.0),
+            DVec3::ZERO,
+        ));
         assert!(t.has_samples(), "must not need seconds of swim to settle");
     }
 
@@ -632,7 +643,12 @@ mod tests {
         // The sign trap: comparing specific force against world-DOWN makes the correction
         // quietly do nothing, and getting the inverse backwards drives the estimate away.
         let mut t = HeadTracker::new(AxisMap::IDENTITY, TrackerConfig::default());
-        t.integrate(&sample(0, DVec3::ZERO, DVec3::new(0.0, 0.0, 1.0), DVec3::ZERO));
+        t.integrate(&sample(
+            0,
+            DVec3::ZERO,
+            DVec3::new(0.0, 0.0, 1.0),
+            DVec3::ZERO,
+        ));
         // Inject a false pitch by integrating a burst, then feed level gravity and check the
         // error shrinks rather than grows.
         for i in 1..200u64 {
@@ -674,7 +690,11 @@ mod tests {
         t.recenter();
         let e = t.euler_degrees();
         assert!(e.yaw.abs() < 1e-6, "yaw should be zeroed, got {}", e.yaw);
-        assert!(e.pitch.abs() < 1e-6, "pitch should be zeroed, got {}", e.pitch);
+        assert!(
+            e.pitch.abs() < 1e-6,
+            "pitch should be zeroed, got {}",
+            e.pitch
+        );
     }
 
     #[test]
@@ -729,7 +749,7 @@ mod tests {
         };
         let mut t = HeadTracker::new(AxisMap::IDENTITY, cfg);
         still_stream(&mut t, DVec3::ZERO, 2100); // get calibrated first
-        // A field pointing somewhere different every sample averages to nothing.
+                                                 // A field pointing somewhere different every sample averages to nothing.
         for i in 0..400u64 {
             let a = i as f64;
             t.integrate(&sample(
@@ -740,8 +760,14 @@ mod tests {
             ));
         }
         let s = t.magnetic_status();
-        assert!(!s.locked, "must not anchor to a field with no single direction");
-        assert!(s.failures > 0, "and it should say so rather than stay silent");
+        assert!(
+            !s.locked,
+            "must not anchor to a field with no single direction"
+        );
+        assert!(
+            s.failures > 0,
+            "and it should say so rather than stay silent"
+        );
     }
 }
 
@@ -836,7 +862,11 @@ mod path_equivalence_tests {
             let before = run(HeadTracker::new(map, TrackerConfig::default()), &samples);
             let after = run(HeadTracker::new(back, TrackerConfig::default()), &samples);
             assert_eq!(
-                (before.yaw.round(), before.pitch.round(), before.roll.round()),
+                (
+                    before.yaw.round(),
+                    before.pitch.round(),
+                    before.roll.round()
+                ),
                 (after.yaw.round(), after.pitch.round(), after.roll.round()),
                 "sensor axis {axis} behaves differently after a round trip"
             );

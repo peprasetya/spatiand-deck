@@ -362,10 +362,7 @@ mod tests {
             let layout = Layout::new(&menu(30, cursor), first);
             first = layout.first;
             let _ = first;
-            let (track, thumb) = (
-                layout.scroll_track.unwrap(),
-                layout.scroll_thumb.unwrap(),
-            );
+            let (track, thumb) = (layout.scroll_track.unwrap(), layout.scroll_thumb.unwrap());
             assert!(thumb.y >= track.y - 0.01);
             assert!(thumb.y + thumb.h <= track.y + track.h + 0.01);
         }
@@ -393,8 +390,14 @@ mod tests {
     fn nothing_is_laid_out_past_the_cards_own_edges() {
         let layout = Layout::new(&menu(40, 20), 12);
         let inside = |r: Rect, what: &str| {
-            assert!(r.x >= 0.0 && r.x + r.w <= WIDTH, "{what} is outside the card");
-            assert!(r.y >= 0.0 && r.y + r.h <= layout.height, "{what} is off the card");
+            assert!(
+                r.x >= 0.0 && r.x + r.w <= WIDTH,
+                "{what} is outside the card"
+            );
+            assert!(
+                r.y >= 0.0 && r.y + r.h <= layout.height,
+                "{what} is off the card"
+            );
         };
         inside(layout.title, "title");
         for row in &layout.rows {
@@ -456,9 +459,17 @@ mod field_of_view {
             },
             0,
         );
-        assert_eq!(layout.rows.len(), 6, "card was {:.0} logical px", layout.height);
+        assert_eq!(
+            layout.rows.len(),
+            6,
+            "card was {:.0} logical px",
+            layout.height
+        );
         // And a row is close to a degree tall, which is what makes it readable at all.
         let degrees = ROW_EM / logical_per_degree;
-        assert!((0.8..1.0).contains(&degrees), "row text is {degrees:.2} degrees");
+        assert!(
+            (0.8..1.0).contains(&degrees),
+            "row text is {degrees:.2} degrees"
+        );
     }
 }

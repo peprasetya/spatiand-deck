@@ -217,7 +217,13 @@ mod tests {
         // opens when I press B" and is maddening to trace back to a table.
         for (i, (a, bit_a, _)) in BITS.iter().enumerate() {
             for (b, bit_b, _) in &BITS[i + 1..] {
-                assert_ne!(bit_a, bit_b, "{} and {} share bit {bit_a}", a.name(), b.name());
+                assert_ne!(
+                    bit_a,
+                    bit_b,
+                    "{} and {} share bit {bit_a}",
+                    a.name(),
+                    b.name()
+                );
             }
         }
     }
@@ -225,7 +231,11 @@ mod tests {
     #[test]
     fn bits_fit_the_eight_byte_button_field() {
         for (c, bit, _) in BITS {
-            assert!(*bit < 64, "{} is at bit {bit}, past the button field", c.name());
+            assert!(
+                *bit < 64,
+                "{} is at bit {bit}, past the button field",
+                c.name()
+            );
         }
     }
 

@@ -87,7 +87,11 @@ pub fn model(shell: &Shell) -> Option<MenuModel> {
             let hud = shell.hud();
             Some(MenuModel {
                 title: "Settings".into(),
-                rows: hud.items().iter().map(|i| MenuRow::plain(i.label)).collect(),
+                rows: hud
+                    .items()
+                    .iter()
+                    .map(|i| MenuRow::plain(i.label))
+                    .collect(),
                 cursor: hud.cursor(),
                 detail: hud.focused().detail.into(),
                 footer: FOOTER_SELECT.into(),
@@ -300,13 +304,19 @@ mod tests {
             detail: "d".into(),
             footer: "f".into(),
         };
-        let moved = MenuModel { cursor: 1, ..a.clone() };
+        let moved = MenuModel {
+            cursor: 1,
+            ..a.clone()
+        };
         assert!(!a.differs_from(&moved), "a moved cursor rebuilds nothing");
         let renamed = MenuModel {
             rows: vec![MenuRow::plain("One"), MenuRow::with("Two", "In use")],
             ..a.clone()
         };
-        assert!(a.differs_from(&renamed), "a new trailing label must rebuild");
+        assert!(
+            a.differs_from(&renamed),
+            "a new trailing label must rebuild"
+        );
         let explained = MenuModel {
             detail: "different".into(),
             ..a.clone()

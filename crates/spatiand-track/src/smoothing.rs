@@ -96,7 +96,10 @@ impl PoseSmoother {
 
     /// Highest angular speed across the three axes, degrees/second.
     pub fn speed(&self) -> f64 {
-        self.yaw.speed().max(self.pitch.speed()).max(self.roll.speed())
+        self.yaw
+            .speed()
+            .max(self.pitch.speed())
+            .max(self.roll.speed())
     }
 
     /// Smooth one (yaw, pitch, roll) triple in degrees.
@@ -184,7 +187,10 @@ mod tests {
             (yaw - 181.0).abs() < 2.0,
             "unwrapped yaw should continue past 180, got {yaw}"
         );
-        assert!(s.speed() < 500.0, "seam must not blow up the speed estimate");
+        assert!(
+            s.speed() < 500.0,
+            "seam must not blow up the speed estimate"
+        );
     }
 
     #[test]

@@ -387,7 +387,10 @@ mod tests {
         // A stop with no preceding scroll tells a client a gesture it never saw has finished,
         // and some of them answer that with a kinetic flick.
         let mut s = PadScroll::default();
-        let out = run(&mut s, &[at(0.2, 0.2), at(0.2, 0.2), at(0.2, 0.2), lifted()]);
+        let out = run(
+            &mut s,
+            &[at(0.2, 0.2), at(0.2, 0.2), at(0.2, 0.2), lifted()],
+        );
         assert!(out.iter().all(|e| *e == Scroll::Idle), "got {out:?}");
     }
 
@@ -465,7 +468,13 @@ mod trace {
         let mut scroll = PadScroll::default();
         let mut sent = Vec::new();
         for &(x, y, clicked, pressure) in frames {
-            let pad = Pad { x, y, touched: true, clicked, pressure };
+            let pad = Pad {
+                x,
+                y,
+                touched: true,
+                clicked,
+                pressure,
+            };
             if let Scroll::By { dx, dy } = scroll.update(&pad) {
                 sent.push((dx, dy));
             }
@@ -479,13 +488,22 @@ mod trace {
     fn ending(frames: &[(f32, f32, bool, u16)]) -> Scroll {
         let mut scroll = PadScroll::default();
         for &(x, y, clicked, pressure) in frames {
-            scroll.update(&Pad { x, y, touched: true, clicked, pressure });
+            scroll.update(&Pad {
+                x,
+                y,
+                touched: true,
+                clicked,
+                pressure,
+            });
         }
         scroll.update(&Pad::default())
     }
 
     fn distance(deltas: &[(f32, f32)]) -> f32 {
-        deltas.iter().map(|(dx, dy)| (dx * dx + dy * dy).sqrt()).sum()
+        deltas
+            .iter()
+            .map(|(dx, dy)| (dx * dx + dy * dy).sqrt())
+            .sum()
     }
 
     fn fastest(deltas: &[(f32, f32)]) -> f32 {

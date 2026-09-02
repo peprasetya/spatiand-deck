@@ -22,14 +22,14 @@ pub mod hud;
 pub mod keyboard;
 pub mod launcher;
 
-pub use grid::{Direction as NavDirection, Grid};
-pub use hud::{DesktopPanels, Hud, HudAction, HudItem};
-pub use keyboard::{Key, Keyboard};
 pub use category::{Group, GROUPS};
 pub use environment::{
     EnvironmentAction, EnvironmentChoice, EnvironmentEntry, EnvironmentPicker, EnvironmentRow,
 };
 pub use files::{FileAction, FileBrowser, FileEntry};
+pub use grid::{Direction as NavDirection, Grid};
+pub use hud::{DesktopPanels, Hud, HudAction, HudItem};
+pub use keyboard::{Key, Keyboard};
 pub use launcher::{AppEntry, BubblePlacement, Launcher, Level};
 
 /// What the wearer meant, independent of which button they pressed.
@@ -266,7 +266,10 @@ mod tests {
     }
 
     fn shell() -> Shell {
-        Shell::new(vec![app("alpha"), app("beta"), app("gamma")], DesktopPanels::ALL)
+        Shell::new(
+            vec![app("alpha"), app("beta"), app("gamma")],
+            DesktopPanels::ALL,
+        )
     }
 
     #[test]
@@ -337,7 +340,11 @@ mod tests {
         let mut s = shell();
         s.handle(Intent::ToggleLauncher);
         // The first A opens the group and must NOT launch anything.
-        assert_eq!(s.handle(Intent::Accept), None, "entering a group is not a launch");
+        assert_eq!(
+            s.handle(Intent::Accept),
+            None,
+            "entering a group is not a launch"
+        );
         assert_eq!(s.mode(), Mode::Launcher, "and must leave the launcher open");
 
         s.handle(Intent::Navigate(Direction::Right));
@@ -376,8 +383,15 @@ mod tests {
     fn every_hud_action_but_the_environment_picker_returns_to_the_world() {
         let mut s = shell();
         s.handle(Intent::ToggleHud);
-        assert_eq!(s.handle(Intent::Accept), Some(ShellEvent::Hud(HudAction::Recentre)));
-        assert_eq!(s.mode(), Mode::World, "recentring should show you the result");
+        assert_eq!(
+            s.handle(Intent::Accept),
+            Some(ShellEvent::Hud(HudAction::Recentre))
+        );
+        assert_eq!(
+            s.mode(),
+            Mode::World,
+            "recentring should show you the result"
+        );
 
         // Settings panels included. The window you asked for is the thing you wanted to look
         // at; leaving the menu up puts it between you and that window.
@@ -427,7 +441,12 @@ mod tests {
     fn there_is_always_a_way_back_to_the_world() {
         // Exhaustive: from every mode, both B and the mode's own button must reach World.
         for open in [Intent::ToggleHud, Intent::ToggleLauncher] {
-            for escape in [Intent::Back, open, Intent::ToggleHud, Intent::ToggleLauncher] {
+            for escape in [
+                Intent::Back,
+                open,
+                Intent::ToggleHud,
+                Intent::ToggleLauncher,
+            ] {
                 let mut s = shell();
                 s.handle(open);
                 s.handle(escape);
@@ -438,7 +457,11 @@ mod tests {
                 );
                 // Pressing B always works, whatever state the previous press left.
                 s.handle(Intent::Back);
-                assert_eq!(s.mode(), Mode::World, "stuck after {open:?} then {escape:?}");
+                assert_eq!(
+                    s.mode(),
+                    Mode::World,
+                    "stuck after {open:?} then {escape:?}"
+                );
             }
         }
     }
@@ -521,7 +544,11 @@ mod tests {
             s.handle(Intent::Accept),
             Some(ShellEvent::ChooseEnvironment(EnvironmentChoice::Blank))
         );
-        assert_eq!(s.mode(), Mode::World, "you should be looking at what you picked");
+        assert_eq!(
+            s.mode(),
+            Mode::World,
+            "you should be looking at what you picked"
+        );
     }
 
     #[test]
@@ -529,7 +556,10 @@ mod tests {
         // Dropping to the world would mean re-opening the HUD to make a second attempt at a
         // setting you have just decided against.
         let mut s = at_the_picker();
-        assert_eq!(s.handle(Intent::Back), Some(ShellEvent::ModeChanged(Mode::Hud)));
+        assert_eq!(
+            s.handle(Intent::Back),
+            Some(ShellEvent::ModeChanged(Mode::Hud))
+        );
         assert_eq!(s.mode(), Mode::Hud);
     }
 
@@ -540,7 +570,10 @@ mod tests {
             s.handle(Intent::Navigate(Direction::Down));
         }
         // The last row browses, and asks for a listing rather than guessing a path.
-        assert_eq!(s.handle(Intent::Accept), Some(ShellEvent::ListDirectory(None)));
+        assert_eq!(
+            s.handle(Intent::Accept),
+            Some(ShellEvent::ListDirectory(None))
+        );
         assert_eq!(s.mode(), Mode::Files);
         assert_eq!(
             s.handle(Intent::Back),

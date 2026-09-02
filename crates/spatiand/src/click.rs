@@ -198,7 +198,10 @@ impl Clicks {
             .name("spatiand-click".into())
             .spawn(move || run(rx))
             .ok();
-        Self { tx, wanted: std::cell::Cell::new(false) }
+        Self {
+            tx,
+            wanted: std::cell::Cell::new(false),
+        }
     }
 
     /// Make the sound, if there is room in the queue to ask for it.
@@ -310,7 +313,10 @@ fn run(rx: std::sync::mpsc::Receiver<Msg>) {
         // queued ahead of real time. Behind rather than ahead, the sleep is skipped and the
         // next chunks catch up.
         let due = epoch + Duration::from_secs_f64(written as f64 / RATE as f64);
-        if let Some(wait) = due.checked_sub(LEAD).and_then(|d| d.checked_duration_since(Instant::now())) {
+        if let Some(wait) = due
+            .checked_sub(LEAD)
+            .and_then(|d| d.checked_duration_since(Instant::now()))
+        {
             std::thread::sleep(wait);
         }
     }
@@ -380,7 +386,10 @@ mod tests {
         let samples = waveform().len();
         let seconds = samples as f32 / RATE as f32;
         assert!(seconds < 1.0 / 30.0, "the click is {seconds}s long");
-        assert!(seconds > 0.004, "the click is {seconds}s long — too short to hear as a click");
+        assert!(
+            seconds > 0.004,
+            "the click is {seconds}s long — too short to hear as a click"
+        );
     }
 
     #[test]
@@ -393,7 +402,9 @@ mod tests {
         assert_eq!(w[0], 0, "the click starts on a step");
         // The attack is still abrupt: nothing is allowed to soften it into a fade-in, which is
         // the difference between a key being pressed and a tone being played.
-        let attack = w.iter().position(|s| s.unsigned_abs() as f32 > 0.5 * i16::MAX as f32 * PEAK);
+        let attack = w
+            .iter()
+            .position(|s| s.unsigned_abs() as f32 > 0.5 * i16::MAX as f32 * PEAK);
         assert!(
             attack.is_some_and(|n| n < (0.0005 * RATE as f32) as usize),
             "the click takes too long to get loud: {attack:?}"
@@ -405,7 +416,10 @@ mod tests {
         // This plays on every keystroke, over whatever the wearer is listening to.
         let peak = waveform().iter().map(|s| s.unsigned_abs()).max().unwrap();
         let fraction = peak as f32 / i16::MAX as f32;
-        assert!((PEAK - fraction).abs() < 0.01, "peak is {fraction}, wanted {PEAK}");
+        assert!(
+            (PEAK - fraction).abs() < 0.01,
+            "peak is {fraction}, wanted {PEAK}"
+        );
     }
 
     #[test]
@@ -437,12 +451,18 @@ mod tests {
         // ever wait on a full queue or a stalled pipe, the compositor stutters when the sound
         // server does.
         let (tx, _rx) = sync_channel::<Msg>(QUEUE);
-        let clicks = Clicks { tx, wanted: std::cell::Cell::new(true) };
+        let clicks = Clicks {
+            tx,
+            wanted: std::cell::Cell::new(true),
+        };
         let start = Instant::now();
         for _ in 0..10_000 {
             clicks.play();
         }
-        assert!(start.elapsed() < Duration::from_millis(200), "play() blocked");
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "play() blocked"
+        );
     }
 }
 

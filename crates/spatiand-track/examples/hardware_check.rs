@@ -38,7 +38,11 @@ fn main() {
     println!("  {}", info.name);
     println!(
         "  per eye {}x{}, {} deg horizontal, default IPD {} mm, fused pose: {}",
-        info.per_eye.0, info.per_eye.1, info.h_fov_deg, info.default_ipd_mm, info.provides_fused_pose
+        info.per_eye.0,
+        info.per_eye.1,
+        info.h_fov_deg,
+        info.default_ipd_mm,
+        info.provides_fused_pose
     );
 
     // --- IMU + tracker ---
@@ -90,14 +94,20 @@ fn main() {
     println!("  bias    {:?} deg/s", tracker.gyro_bias());
 
     let e = tracker.euler_degrees();
-    println!("  attitude yaw {:.1} pitch {:.1} roll {:.1}", e.yaw, e.pitch, e.roll);
+    println!(
+        "  attitude yaw {:.1} pitch {:.1} roll {:.1}",
+        e.yaw, e.pitch, e.roll
+    );
     let m = tracker.magnetic_status();
     println!(
         "  magnetic anchor: locked={} accepted={} err={:.2} deg failures={}",
         m.locked, m.accepted, m.error_deg, m.failures
     );
     if let Some(y0) = first_yaw {
-        println!("  yaw moved {:.2} deg since calibration", (e.yaw - y0).abs());
+        println!(
+            "  yaw moved {:.2} deg since calibration",
+            (e.yaw - y0).abs()
+        );
     }
 
     let acc_ok = (0.9..1.1).contains(&acc);
@@ -111,7 +121,10 @@ fn main() {
     // --- display mode ---
     if test_stereo {
         println!("\n== stereo ==");
-        println!("  before: {}", dp_modes().first().cloned().unwrap_or_default());
+        println!(
+            "  before: {}",
+            dp_modes().first().cloned().unwrap_or_default()
+        );
         match hmd.set_display_mode(DisplayMode::Stereo) {
             Ok(m) => println!("  set_display_mode -> {m:?} (acked)"),
             Err(e) => {
@@ -131,7 +144,12 @@ fn main() {
         }
         println!(
             "  DP-1 now: {}",
-            dp_modes().iter().take(3).cloned().collect::<Vec<_>>().join(" ")
+            dp_modes()
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ")
         );
         println!("  STEREO: {}", if appeared { "PASS" } else { "FAIL" });
         std::thread::sleep(Duration::from_secs(3));
@@ -142,7 +160,10 @@ fn main() {
             Err(e) => eprintln!("  restore failed: {e} — Drop will try again"),
         }
         std::thread::sleep(Duration::from_secs(2));
-        println!("  DP-1 now: {}", dp_modes().first().cloned().unwrap_or_default());
+        println!(
+            "  DP-1 now: {}",
+            dp_modes().first().cloned().unwrap_or_default()
+        );
     } else {
         println!("\n(skipping the display switch; pass `stereo` to include it)");
     }

@@ -54,22 +54,18 @@ impl Buttons {
     /// of hundred activations and the launcher would scroll away from you.
     pub fn pressed_since(self, previous: Buttons) -> impl Iterator<Item = Control> {
         let newly = self.0 & !previous.0;
-        Control::ALL
-            .into_iter()
-            .filter(move |c| match c.bit() {
-                Some(bit) => newly & (1u64 << bit) != 0,
-                None => false,
-            })
+        Control::ALL.into_iter().filter(move |c| match c.bit() {
+            Some(bit) => newly & (1u64 << bit) != 0,
+            None => false,
+        })
     }
 
     pub fn released_since(self, previous: Buttons) -> impl Iterator<Item = Control> {
         let gone = previous.0 & !self.0;
-        Control::ALL
-            .into_iter()
-            .filter(move |c| match c.bit() {
-                Some(bit) => gone & (1u64 << bit) != 0,
-                None => false,
-            })
+        Control::ALL.into_iter().filter(move |c| match c.bit() {
+            Some(bit) => gone & (1u64 << bit) != 0,
+            None => false,
+        })
     }
 
     /// Every named control currently down. Used by the probe and by debug overlays.
@@ -254,7 +250,11 @@ mod tests {
         let mut r = blank();
         put_i16(&mut r, 22, i16::MAX); // right pad Y at full deflection, top of the pad
         let s = ControllerState::parse(&r).expect("valid report");
-        assert!(s.right_pad.y > 0.99, "top of the pad should be +y, got {}", s.right_pad.y);
+        assert!(
+            s.right_pad.y > 0.99,
+            "top of the pad should be +y, got {}",
+            s.right_pad.y
+        );
     }
 
     #[test]
@@ -294,7 +294,11 @@ mod tests {
         let none = Buttons::default();
         let a = Buttons::from_raw(1 << Control::A.bit().unwrap());
         assert_eq!(a.pressed_since(none).collect::<Vec<_>>(), vec![Control::A]);
-        assert_eq!(a.pressed_since(a).count(), 0, "a held button is not a press");
+        assert_eq!(
+            a.pressed_since(a).count(),
+            0,
+            "a held button is not a press"
+        );
         assert_eq!(none.released_since(a).collect::<Vec<_>>(), vec![Control::A]);
     }
 

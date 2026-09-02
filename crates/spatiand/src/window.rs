@@ -159,7 +159,10 @@ impl WindowLayout {
 
     pub fn get(&self, window: &Window) -> Option<Placement> {
         let key = Self::key(window)?;
-        self.ids.get(&key).and_then(|id| self.placements.get(id)).copied()
+        self.ids
+            .get(&key)
+            .and_then(|id| self.placements.get(id))
+            .copied()
     }
 
     pub fn set(&mut self, window: &Window, placement: Placement) {
@@ -254,8 +257,14 @@ mod tests {
         // The constraint that was missed: a window wider than the field has no visible edges.
         let p = Placement::default();
         let angular = 2.0 * (p.width / 2.0 / p.radius).atan().to_degrees();
-        assert!(angular < 34.0, "a default window subtends {angular} deg of a 40 deg field");
-        assert!(angular > 20.0, "and should still be big enough to work in: {angular} deg");
+        assert!(
+            angular < 34.0,
+            "a default window subtends {angular} deg of a 40 deg field"
+        );
+        assert!(
+            angular > 20.0,
+            "and should still be big enough to work in: {angular} deg"
+        );
     }
 
     #[test]
@@ -275,7 +284,9 @@ mod tests {
                 Placement::default().radius + rank * 0.06,
             );
             assert!(
-                !seen.iter().any(|s| (s.0 - p.0).abs() < 1e-9 && (s.1 - p.1).abs() < 1e-9),
+                !seen
+                    .iter()
+                    .any(|s| (s.0 - p.0).abs() < 1e-9 && (s.1 - p.1).abs() < 1e-9),
                 "window {i} landed on top of an earlier one"
             );
             seen.push(p);
@@ -299,7 +310,10 @@ mod tests {
             let _ = (&mut l, &mut layout);
         }
         for (view, placed) in placements {
-            assert!((view - placed).abs() < 1e-9, "looking at {view} placed at {placed}");
+            assert!(
+                (view - placed).abs() < 1e-9,
+                "looking at {view} placed at {placed}"
+            );
         }
     }
 

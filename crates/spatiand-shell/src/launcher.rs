@@ -143,7 +143,10 @@ impl Launcher {
                 self.grid = Grid::new(COLUMNS, self.len());
                 None
             }
-            Level::Apps(_) => self.apps_in_level().get(self.grid.cursor()).map(|a| (*a).clone()),
+            Level::Apps(_) => self
+                .apps_in_level()
+                .get(self.grid.cursor())
+                .map(|a| (*a).clone()),
         }
     }
 
@@ -166,7 +169,10 @@ impl Launcher {
     /// Label for whatever is focused, for the caption under the grid.
     pub fn focused_label(&self) -> Option<String> {
         match &self.level {
-            Level::Groups => self.groups.get(self.grid.cursor()).map(|g| g.label.to_string()),
+            Level::Groups => self
+                .groups
+                .get(self.grid.cursor())
+                .map(|g| g.label.to_string()),
             Level::Apps(_) => self
                 .apps_in_level()
                 .get(self.grid.cursor())
@@ -190,7 +196,10 @@ impl Launcher {
     pub fn focused(&self) -> Option<AppEntry> {
         match self.level {
             Level::Groups => None,
-            Level::Apps(_) => self.apps_in_level().get(self.grid.cursor()).map(|a| (*a).clone()),
+            Level::Apps(_) => self
+                .apps_in_level()
+                .get(self.grid.cursor())
+                .map(|a| (*a).clone()),
         }
     }
 
@@ -252,7 +261,11 @@ impl Launcher {
             yaw: -column_offset * COLUMN_SPACING_DEG.to_radians(),
             pitch: -row_offset * ROW_SPACING_DEG.to_radians(),
             radius: ARC_RADIUS_M,
-            scale: if index == self.grid.cursor() { 1.18 } else { 1.0 },
+            scale: if index == self.grid.cursor() {
+                1.18
+            } else {
+                1.0
+            },
         }
     }
 
@@ -352,7 +365,10 @@ mod tests {
     fn a_full_row_is_centred_on_straight_ahead() {
         let l = launcher_of(COLUMNS);
         let total: f32 = (0..COLUMNS).map(|i| l.placement(i).yaw).sum();
-        assert!(total.abs() < 1e-5, "row should balance about zero, got {total}");
+        assert!(
+            total.abs() < 1e-5,
+            "row should balance about zero, got {total}"
+        );
     }
 
     #[test]
@@ -369,7 +385,10 @@ mod tests {
         let top = l.placement(0).pitch;
         let bottom = l.placement(COLUMNS).pitch;
         assert!(top > 0.0, "the first row should be the upper one");
-        assert!((top + bottom).abs() < 1e-6, "rows should straddle the eye line");
+        assert!(
+            (top + bottom).abs() < 1e-6,
+            "rows should straddle the eye line"
+        );
     }
 
     #[test]
@@ -407,8 +426,16 @@ mod tests {
         let l = launcher_of(200);
         for i in l.visible() {
             let p = l.placement(i);
-            assert!(p.yaw.to_degrees().abs() <= 20.0, "bubble {i} at yaw {}", p.yaw.to_degrees());
-            assert!(p.pitch.to_degrees().abs() <= 21.0, "bubble {i} at pitch {}", p.pitch.to_degrees());
+            assert!(
+                p.yaw.to_degrees().abs() <= 20.0,
+                "bubble {i} at yaw {}",
+                p.yaw.to_degrees()
+            );
+            assert!(
+                p.pitch.to_degrees().abs() <= 21.0,
+                "bubble {i} at pitch {}",
+                p.pitch.to_degrees()
+            );
         }
     }
 
@@ -445,7 +472,10 @@ mod tests {
         }
         assert_eq!(cursor.page(), 1);
         let p = cursor.placement(PAGE_SIZE);
-        assert!(p.pitch.abs() < 1e-6, "a one-row page should sit on the eye line");
+        assert!(
+            p.pitch.abs() < 1e-6,
+            "a one-row page should sit on the eye line"
+        );
     }
 
     #[test]
@@ -466,7 +496,10 @@ mod tests {
             .to_degrees();
 
         let widest = (COLUMNS as f32 - 1.0) / 2.0 * COLUMN_SPACING_DEG + bubble_half;
-        assert!(widest <= 20.0, "a row reaches {widest} deg against a 20 deg half-width");
+        assert!(
+            widest <= 20.0,
+            "a row reaches {widest} deg against a 20 deg half-width"
+        );
 
         let tallest =
             (ROWS_PER_PAGE as f32 - 1.0) / 2.0 * ROW_SPACING_DEG + bubble_half.max(label_bottom);

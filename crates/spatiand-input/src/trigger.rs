@@ -64,7 +64,10 @@ mod tests {
             assert!(t.is_down() == t.update(pull, false), "chattered at {pull}");
             assert!(t.is_down(), "released inside the band at {pull}");
         }
-        assert!(!t.update(0.2, false), "past the release threshold it lets go");
+        assert!(
+            !t.update(0.2, false),
+            "past the release threshold it lets go"
+        );
     }
 
     #[test]
