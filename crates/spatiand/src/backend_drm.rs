@@ -367,6 +367,26 @@ pub fn run(
             connector_info.interface(),
             connector::Interface::EmbeddedDisplayPort | connector::Interface::LVDS
         );
+        // The two halves of a pair of glasses fail independently, and when only the USB half
+        // arrives the result is genuinely baffling: the headset answers, so head tracking works
+        // and the world turns when you turn -- but it turns on the Deck's own screen while the
+        // glasses stay black. That reads as Spatiand having put the world in the wrong place,
+        // which is why this says out loud that the picture never had anywhere else to go.
+        //
+        // `pick_output` already prefers any external connector, so reaching here with a headset
+        // open means there was no external connector to prefer.
+        if internal && hmd.is_some() {
+            log::warn!(
+                "the headset is connected over USB, but no external display is: the glasses' \
+                 DisplayPort side has not come up, so the world is on the Deck's own panel"
+            );
+            log::warn!(
+                "  this is a link, not a setting. Check the cable actually carries video -- \
+                 plenty of USB-C cables are data-only -- that it is fully seated, and that the \
+                 glasses are awake rather than asleep"
+            );
+        }
+
         // The Deck's panel is mounted in portrait: 800x1280 with the top of the image along the
         // long edge. Anything drawn for it has to be rolled a quarter turn or it reads sideways.
         let portrait = h > w;
