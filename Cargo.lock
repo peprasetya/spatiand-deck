@@ -2172,6 +2172,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "spatiand-audio"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "log",
+]
+
+[[package]]
 name = "spatiand-hmd"
 version = "0.1.0"
 dependencies = [

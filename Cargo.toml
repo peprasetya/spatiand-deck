@@ -5,6 +5,7 @@ members = [
     "crates/spatiand-track",
     "crates/spatiand-render",
     "crates/spatiand-input",
+    "crates/spatiand-audio",
     "crates/spatiand-shell",
     "crates/spatiand-platform",
     "crates/spatiand",
