@@ -152,6 +152,9 @@ pub fn run(
     let mut had_headset = false;
     // When the button now being held went down, while waiting with windows to lose.
     let mut leave_held_since: Option<std::time::Instant> = None;
+    // Whether every button has been seen released since the session started. Until it has, a
+    // held button is the one that launched Spatiand rather than a request to leave.
+    let mut leave_armed = false;
 
     // Persistent across output changes: these belong to the renderer or the wearer, not
     // to whichever screen is currently being driven.
@@ -709,24 +712,30 @@ pub fn run(
             let mut screenshot = false;
             if let Some(c) = controller.as_mut() {
                 c.poll();
-                if missing.is_some() && !had_headset {
-                    // Nothing has ever been open, so there is nothing to lose and no headset to
-                    // read a more specific instruction from. Any button backs out.
-                    if c.any_pressed() {
-                        log::info!("button pressed while waiting — returning to the desktop");
-                        leaving = true;
-                    }
-                } else if missing.is_some() {
-                    // The glasses were here and have gone, or they are here without a picture.
-                    // Either way this is the dangerous case: every open window is still alive
-                    // and leaving would take the lot.
+                // A button that was already down when this screen appeared does not count.
+                // Spatiand is started *with* a button, and that press is still being held a
+                // moment later when the waiting screen comes up -- so without this the session
+                // can end itself before the wearer has looked up, which is indistinguishable
+                // from never having started. Arming on the first frame with nothing held is
+                // what separates "still holding what launched me" from "reaching for the exit".
+                if !any_button_held(c.state()) {
+                    leave_armed = true;
+                }
+
+                if missing.is_some() {
+                    // Leaving is a hold, never a press, whether or not anything is open.
+                    //
+                    // These used to be two cases: with nothing yet open there was nothing to
+                    // lose, so any button backed out. What that missed is that "nothing to
+                    // lose" is about the *cost* of leaving, while what makes an accidental exit
+                    // read as a crash is that it was not meant -- and that is the same either
+                    // way. It was duly reported as one: Spatiand started, showed the waiting
+                    // screen, and quit a second later when a button was pressed.
                     //
                     // A USB-C link that drops rarely stays dropped -- the observed case came
                     // back nine seconds later on its own -- so the right behaviour while
-                    // waiting is to keep waiting. A single press used to end the session here,
-                    // which turned a blink of the cable into losing everything that was open,
-                    // and read as a crash rather than as a button doing what it said.
-                    if any_button_held(c.state()) {
+                    // waiting is to keep waiting.
+                    if leave_armed && any_button_held(c.state()) {
                         let since = leave_held_since.get_or_insert_with(std::time::Instant::now);
                         if since.elapsed() >= HOLD_TO_LEAVE {
                             log::info!(
@@ -1050,18 +1059,10 @@ pub fn run(
                     // there is rather than presenting a spatial world nobody can see. Creating a
                     // stereo desktop for absent glasses is how you end up with windows scattered
                     // across a display you cannot look at.
-                    let exit_hint = match (controller.is_some(), had_headset) {
-                        // Two different offers, because the stakes are different. With windows
-                        // open, saying "press any button to leave" next to a screen that has
-                        // just gone dark is an invitation to lose them.
-                        (true, true) => "\n\nHold any button for 2s\nto end the session.",
-                        (true, false) => "\n\nPress any button to\nreturn to the desktop.",
-                        (false, _) => "",
-                    };
                     crate::waiting::message(
                         missing.unwrap_or(crate::waiting::Missing::Headset),
                         had_headset,
-                        exit_hint,
+                        crate::waiting::exit_hint(controller.is_some(), had_headset),
                     )
                 }
                 Some(c) => {

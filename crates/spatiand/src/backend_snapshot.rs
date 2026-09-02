@@ -382,11 +382,10 @@ pub fn run(
                 Ok("picture") => crate::waiting::Missing::Picture,
                 _ => crate::waiting::Missing::Headset,
             };
-            crate::waiting::message(
-                missing,
-                true,
-                "\n\nHold any button for 2s\nto end the session.",
-            )
+            // `had_headset` follows the case: the half-connected one has, by definition, just
+            // opened a headset, while "not plugged in" is the first-run screen.
+            let had = missing == crate::waiting::Missing::Picture;
+            crate::waiting::message(missing, had, crate::waiting::exit_hint(true, had))
         }
         // Nothing in the middle of the view: that space belongs to the windows, and the
         // readout that used to live there is in the corner status bar now.

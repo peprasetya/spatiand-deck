@@ -28,6 +28,26 @@ pub enum Missing {
 /// actually read on: the glasses, by definition, are not showing anything when they appear.
 pub const MAX_LINE: usize = 34;
 
+/// The offer of a way out, appended to whatever the screen is already saying.
+///
+/// Always a hold, never a press. Leaving used to be a single button when nothing was open yet,
+/// on the reasoning that there was nothing to lose — but the cost of leaving is not what makes
+/// an accidental exit feel like a fault. Not having meant it is, and that is the same whether
+/// or not any windows were open. Spatiand is also *started* with a button, so a press is the
+/// one input guaranteed to be arriving at the moment this screen appears.
+///
+/// Empty when there is no controller to hold: an instruction naming hardware that is not
+/// attached is worse than saying nothing.
+pub fn exit_hint(has_controller: bool, had_headset: bool) -> &'static str {
+    match (has_controller, had_headset) {
+        // The wording differs because the stakes do. With windows open this ends a session and
+        // takes them with it; with nothing open it is simply a way back out.
+        (true, true) => "\n\nHold any button for 2s\nto end the session.",
+        (true, false) => "\n\nHold any button for 2s\nto return to the desktop.",
+        (false, _) => "",
+    }
+}
+
 /// What to say, given which half is missing and whether there is anything open to lose.
 pub fn message(missing: Missing, had_headset: bool, exit_hint: &str) -> String {
     match missing {
@@ -68,12 +88,19 @@ pub fn message(missing: Missing, had_headset: bool, exit_hint: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Every screen the wearer can actually be shown, hints included. The hints are part of
+    /// this because they are text on the same panel, and a line that overruns is a line that
+    /// overruns whichever function wrote it.
     fn every_message() -> Vec<String> {
         let mut out = Vec::new();
-        for hint in ["", "\n\nHold any button for 2s\nto end the session."] {
-            out.push(message(Missing::Picture, true, hint));
-            out.push(message(Missing::Headset, true, hint));
-            out.push(message(Missing::Headset, false, hint));
+        for controller in [true, false] {
+            for (missing, had) in [
+                (Missing::Picture, true),
+                (Missing::Headset, true),
+                (Missing::Headset, false),
+            ] {
+                out.push(message(missing, had, exit_hint(controller, had)));
+            }
         }
         out
     }
@@ -88,6 +115,25 @@ mod tests {
                     line.chars().count()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn leaving_is_never_offered_as_a_single_press() {
+        // The regression this guards. A press is the one input certain to be arriving as this
+        // screen appears, because a button is what starts Spatiand -- so offering one here is
+        // offering to quit before the wearer has looked up, and it was reported as a crash.
+        for had in [true, false] {
+            let hint = exit_hint(true, had);
+            assert!(hint.contains("Hold"), "{hint:?} offers something other than a hold");
+            assert!(!hint.contains("Press any"), "{hint:?} still offers a press");
+        }
+    }
+
+    #[test]
+    fn nothing_is_offered_when_there_is_no_controller_to_offer_it_on() {
+        for had in [true, false] {
+            assert_eq!(exit_hint(false, had), "");
         }
     }
 
