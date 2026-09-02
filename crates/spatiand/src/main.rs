@@ -33,6 +33,7 @@ mod sidecar;
 mod state;
 mod status;
 mod system;
+mod waiting;
 mod window;
 
 pub use state::Spatiand;

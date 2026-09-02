@@ -27,6 +27,11 @@
 //! `SPATIAND_VIEW_CLICK=off` draws either keyboard with its sound turned off, which is the
 //! only way to look at the muted speaker without a headset and a finger.
 //!
+//! `SPATIAND_VIEW=waiting` draws the screen shown when there is nothing to put the world on,
+//! with `SPATIAND_VIEW_MISSING=picture` for the half-connected case — glasses answering over
+//! USB with no display behind them. Both are states that need broken hardware to reach, which
+//! is exactly why they are worth being able to look at without it.
+//!
 //! `SPATIAND_CLIENT` goes further and launches a real Wayland application into the snapshot:
 //! a full compositor runs, the client connects, commits a buffer, and the frame is rendered
 //! with that window in it. That is the only way to answer "what does an app actually look like
@@ -64,6 +69,9 @@ enum View {
     Hud,
     Launcher,
     Calibrate,
+    /// The screen shown when there is no world to put anywhere. `SPATIAND_VIEW_MISSING=picture`
+    /// picks the half-connected case; the default is glasses that are simply not plugged in.
+    Waiting,
     Keyboard,
     Environment,
     Files,
@@ -80,6 +88,7 @@ impl View {
             Ok("files") => Self::Files,
             Ok("launcher") => Self::Launcher,
             Ok("calibrate") => Self::Calibrate,
+            Ok("waiting") => Self::Waiting,
             Ok("keyboard") => Self::Keyboard,
             Ok("sidecar") => Self::Sidecar,
             _ => Self::World,
@@ -366,6 +375,19 @@ pub fn run(
             let p = c.prompt();
             format!("{}\n\n{}\n\n{}", p.heading, p.body, p.status)
         }
+        View::Waiting => {
+            // The same words the DRM backend shows, from the same place, so that looking at
+            // this is actually looking at what the wearer gets.
+            let missing = match std::env::var("SPATIAND_VIEW_MISSING").as_deref() {
+                Ok("picture") => crate::waiting::Missing::Picture,
+                _ => crate::waiting::Missing::Headset,
+            };
+            crate::waiting::message(
+                missing,
+                true,
+                "\n\nHold any button for 2s\nto end the session.",
+            )
+        }
         // Nothing in the middle of the view: that space belongs to the windows, and the
         // readout that used to live there is in the corner status bar now.
         View::World => String::new(),
@@ -453,10 +475,15 @@ pub fn run(
         // No flip: the readback below does it, so the PNG comes out the right way up while
         // the geometry stays in GL's own convention.
         let eye = spatiand_render::eye_for(EyeSide::Left, orientation, DVec3::ZERO, &stereo);
-        scene_ref.draw_sky(gl, &eye);
-        scene_ref.draw_windows(gl, &eye, &windows);
-        if !shell_ref.menu_is_open() {
-            scene_ref.draw_status(gl, &eye, orientation);
+        // The waiting screen is not a place, so it gets the same bare backdrop the DRM backend
+        // gives it. Drawing a world behind it here would make this view a picture of something
+        // that never ships -- and the whole reason for the view is to see what does.
+        if view != View::Waiting {
+            scene_ref.draw_sky(gl, &eye);
+            scene_ref.draw_windows(gl, &eye, &windows);
+            if !shell_ref.menu_is_open() {
+                scene_ref.draw_status(gl, &eye, orientation);
+            }
         }
         if keyboard_open {
             let focus = windows.iter().find(|w| w.focused);

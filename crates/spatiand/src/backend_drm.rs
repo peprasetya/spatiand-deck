@@ -692,21 +692,34 @@ pub fn run(
             // each would let them disagree about whether a thumb is down.
             let mut shell_events: Vec<ShellEvent> = Vec::new();
             let mut pads: Option<spatiand_input::ControllerState> = None;
+            // Whether there is anywhere the wearer can actually look at the world, and if not,
+            // which half is missing. Everything below reads this rather than asking about the
+            // headset directly: the case that was wrong for months is the one where the headset
+            // is *present* and there is still nothing to show.
+            let missing = if hmd.is_none() {
+                Some(crate::waiting::Missing::Headset)
+            } else if internal {
+                Some(crate::waiting::Missing::Picture)
+            } else {
+                None
+            };
+
             let mut two_handed: Option<spatiand_input::GestureDelta> = None;
             let mut leaving = false;
             let mut screenshot = false;
             if let Some(c) = controller.as_mut() {
                 c.poll();
-                if hmd.is_none() && !had_headset {
+                if missing.is_some() && !had_headset {
                     // Nothing has ever been open, so there is nothing to lose and no headset to
                     // read a more specific instruction from. Any button backs out.
                     if c.any_pressed() {
                         log::info!("button pressed while waiting — returning to the desktop");
                         leaving = true;
                     }
-                } else if hmd.is_none() {
-                    // The glasses were here and have gone. This is the dangerous case: every
-                    // open window is still alive and leaving would take the lot.
+                } else if missing.is_some() {
+                    // The glasses were here and have gone, or they are here without a picture.
+                    // Either way this is the dangerous case: every open window is still alive
+                    // and leaving would take the lot.
                     //
                     // A USB-C link that drops rarely stays dropped -- the observed case came
                     // back nine seconds later on its own -- so the right behaviour while
@@ -954,6 +967,17 @@ pub fn run(
                         break;
                     }
                 }
+
+                // The USB side is not the only thing that can change. When the glasses arrive
+                // without their picture, what the wearer goes and fixes is the cable — and
+                // reseating one usually drops USB too, which the check above would catch. It
+                // does not have to, though: a DisplayPort lane can come up on its own, and then
+                // presence has not changed and nothing here would rebuild. The screen telling
+                // them to check the cable would still be there after they had.
+                if internal && hmd.is_some() && external_connector_present(&drm) {
+                    log::info!("a display arrived for the glasses — moving the world onto it");
+                    break;
+                }
             }
 
             if let Some(x) = hmd.as_mut() {
@@ -1021,7 +1045,7 @@ pub fn run(
                 spatiand_track::DEFAULT_PREDICTION_MAX_DEGREES,
             );
             let prompt_text = match calibration.as_ref() {
-                _ if hmd.is_none() => {
+                _ if missing.is_some() => {
                     // Follow HoloFrame here: with no glasses, say so plainly on whatever screen
                     // there is rather than presenting a spatial world nobody can see. Creating a
                     // stereo desktop for absent glasses is how you end up with windows scattered
@@ -1034,15 +1058,11 @@ pub fn run(
                         (true, false) => "\n\nPress any button to\nreturn to the desktop.",
                         (false, _) => "",
                     };
-                    if had_headset {
-                        format!(
-                            "Glasses disconnected\n\nYour windows are still open.\n\nSpatiand is waiting for the\nglasses to come back — plug\nthem in again and this screen\nwill hand over to them.{exit_hint}"
-                        )
-                    } else {
-                        format!(
-                            "Plug in your XR glasses\n\nSpatiand is waiting.\n\nConnect XREAL Air glasses\nover USB-C and this screen\nwill hand over to them.{exit_hint}"
-                        )
-                    }
+                    crate::waiting::message(
+                        missing.unwrap_or(crate::waiting::Missing::Headset),
+                        had_headset,
+                        exit_hint,
+                    )
                 }
                 Some(c) => {
                     let p = c.prompt();
@@ -1052,7 +1072,10 @@ pub fn run(
                 // the windows; the readout that used to live there is in the corner bar now.
                 None => String::new(),
             };
-            let waiting = hmd.is_none();
+            // No sky, no windows: the waiting screen is not a place. This is what stops the
+            // half-connected case rendering a head-tracked world onto the Deck's own panel,
+            // which looked like the compositor having lost track of where the wearer was.
+            let waiting = missing.is_some();
 
             let ppd = TextRenderer::px_per_degree(stereo.per_eye.0, stereo.h_fov_deg);
             if prompt_text.is_empty() {
@@ -2076,6 +2099,29 @@ pub fn run(
 ///
 /// Prefers the glasses and falls back to whatever is connected, so running with no glasses
 /// still puts something on a screen rather than failing.
+/// Whether any connector that is not the machine's own built-in panel is live.
+///
+/// Asked once a second while the picture is missing, because the thing the wearer goes off to
+/// fix is the cable, and a DisplayPort lane can come up without the USB side ever dropping.
+/// Watching only USB would leave "check your cable" on screen after they had.
+fn external_connector_present(drm: &DrmDevice) -> bool {
+    let Ok(resources) = drm.resource_handles() else {
+        return false;
+    };
+    resources
+        .connectors()
+        .iter()
+        .filter_map(|c| drm.get_connector(*c, false).ok())
+        .any(|c| {
+            c.state() == connector::State::Connected
+                && !c.modes().is_empty()
+                && !matches!(
+                    c.interface(),
+                    connector::Interface::EmbeddedDisplayPort | connector::Interface::LVDS
+                )
+        })
+}
+
 fn pick_output(
     drm: &DrmDevice,
 ) -> Option<(connector::Info, crtc::Handle, smithay::reexports::drm::control::Mode)> {
