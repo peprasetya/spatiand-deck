@@ -695,6 +695,18 @@ pub fn run(
             // each would let them disagree about whether a thumb is down.
             let mut shell_events: Vec<ShellEvent> = Vec::new();
             let mut pads: Option<spatiand_input::ControllerState> = None;
+            // Hold the sound device open exactly while a keyboard is up and clicking is on.
+            // The stream has to be fed without gaps to be reliable -- see `click` -- and that
+            // is a wakeup every few milliseconds, which is not a thing to leave running through
+            // a session nobody types in.
+            clicks.wanted(
+                keyboard.click
+                    && (keyboard.open
+                        || sidecar_ui.as_ref().is_some_and(|ui| {
+                            ui.page() == crate::sidecar::Page::Keyboard
+                        })),
+            );
+
             // Whether there is anywhere the wearer can actually look at the world, and if not,
             // which half is missing. Everything below reads this rather than asking about the
             // headset directly: the case that was wrong for months is the one where the headset
@@ -2523,9 +2535,10 @@ fn toggle_click(
         // The control's own confirmation. Turning the sound on and hearing nothing until the
         // next letter leaves you unsure the button did anything.
         clicks.play();
-    } else {
-        clicks.release();
     }
+    // Nothing to do when it goes off: the stream is held open by `Clicks::wanted`, which the
+    // frame below sets from this same flag, so switching the sound off gives the device back
+    // on the next pass. A second way to say it here is a second thing to keep in step.
 }
 
 fn send_stroke(state: &mut Spatiand, stroke: spatiand_shell::keyboard::Stroke, time_ms: u32) {

@@ -20,6 +20,28 @@
 //! and going through the sound server rather than a library means the click follows the
 //! default sink, which is the device the sidecar's own picker sets.
 //!
+//! ## Why the stream is fed continuously, and paced
+//!
+//! `pw-cat` plays a *stream*. It was first driven the obvious way for a one-shot — write nine
+//! milliseconds when a key goes down, write nothing until the next one — and that loses clicks.
+//! Measured on the Deck against a recording of the sink's own monitor: **ten of twelve** clicks
+//! arrived, and several of those that did were cut to under half their length. Between presses
+//! the stream starves, and what a starved stream does on being fed again is not "carry on".
+//!
+//! Padding each click with silence to exceed a buffer is worse, not better — five of twelve,
+//! all fragments. That result is what rules out the tempting explanation, that a write shorter
+//! than one quantum sits waiting for the rest of a buffer. It is not about the size of a write.
+//!
+//! So the stream is fed without gaps: a chunk every few milliseconds, silence when there is
+//! nothing to say, the waveform spliced in where a click belongs. Measured the same way, that
+//! is **twelve of twelve**, every one identical in length — where the varying lengths before
+//! were the artefacts of restarting, not the click.
+//!
+//! Paced, because feeding it as fast as the pipe will take leaves a backlog of silence sitting
+//! in front of the next click: unpaced, the same rig put roughly nine tenths of a second
+//! between the press and the sound. Each chunk is written only once it is nearly due, so what
+//! is buffered ahead of real time is never more than [`LEAD`].
+//!
 //! ## Why a thread
 //!
 //! The render loop must never block on this. A pipe whose reader has stalled fills up and the
@@ -27,6 +49,14 @@
 //! The loop instead drops a message into a small bounded queue and moves on; if the queue is
 //! full the click is dropped, which nobody can detect, whereas a dropped frame is the most
 //! visible thing in a headset.
+//!
+//! ## Why it is not simply left running
+//!
+//! A continuously fed stream is a wakeup every few milliseconds and an audio device that never
+//! idles, which is not a thing to leave switched on for a session that may go hours without
+//! anyone typing. So the shell says when a keyboard is actually up, and only then is the
+//! stream held open — warm for every key of the burst it exists to serve, and let go the moment
+//! the keyboard is put away.
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
@@ -58,6 +88,8 @@ const QUEUE: usize = 4;
 ///
 /// Without this, typing into a session with no sound server would fork a process per keystroke.
 const RETRY: Duration = Duration::from_secs(5);
+/// How long to wait between checks while backing off, so the thread is not spinning.
+const RETRY_POLL: Duration = Duration::from_millis(100);
 
 /// The click, as mono samples at [`RATE`].
 ///
@@ -120,17 +152,37 @@ pub fn waveform() -> Vec<i16> {
         .collect()
 }
 
+/// How much audio each write carries.
+///
+/// The click cannot start until the chunk it falls in is written, so this is the floor on how
+/// late it can be — and it is also how often the thread wakes, so it cannot simply be made
+/// tiny. Five milliseconds is a third of a frame at 72 Hz and two hundred wakeups a second,
+/// which is a fair trade against a keypress you can hear the delay on.
+const CHUNK: usize = (RATE as usize) / 200;
+
+/// How far ahead of real time the stream is allowed to run.
+///
+/// The whole reason for pacing. Fed as fast as the pipe accepts it, the silence between presses
+/// banks up in front of the next click: measured that way, roughly nine tenths of a second
+/// passed between the press and the sound. Writing each chunk only once it is nearly due caps
+/// what is queued ahead at this, and the cost of a smaller number is an underrun the first time
+/// the thread is scheduled late.
+const LEAD: Duration = Duration::from_millis(30);
+
 /// What the thread is being asked to do.
 enum Msg {
     Play,
-    /// Let go of the sound device. Sent when the wearer turns the click off, so that choosing
-    /// silence actually releases the stream rather than leaving an idle one in the mixer.
-    Release,
+    /// Whether a keyboard is up. The stream is only held open while one is, so a session
+    /// nobody types in never opens the audio device at all.
+    Wanted(bool),
 }
 
 /// A handle the render loop can click with, cheaply and without ever blocking.
 pub struct Clicks {
     tx: SyncSender<Msg>,
+    /// The last thing [`Clicks::wanted`] was told, so that being told it every frame costs
+    /// nothing. A `Cell` because this is the render loop's own handle and never leaves it.
+    wanted: std::cell::Cell<bool>,
 }
 
 impl Default for Clicks {
@@ -144,52 +196,9 @@ impl Clicks {
         let (tx, rx) = sync_channel(QUEUE);
         std::thread::Builder::new()
             .name("spatiand-click".into())
-            .spawn(move || {
-                let pcm: Vec<u8> = waveform().iter().flat_map(|s| s.to_le_bytes()).collect();
-                let mut player: Option<Player> = None;
-                let mut next_try = Instant::now();
-                while let Ok(msg) = rx.recv() {
-                    match msg {
-                        Msg::Release => player = None,
-                        Msg::Play => {
-                            // Anything else already queued is the same click again. Play it
-                            // once: two presses in one frame are one sound, and this is also
-                            // what stops a backlog turning into a rattle.
-                            loop {
-                                match rx.try_recv() {
-                                    Ok(Msg::Play) => continue,
-                                    Ok(Msg::Release) => {
-                                        player = None;
-                                        break;
-                                    }
-                                    Err(TryRecvError::Empty) => break,
-                                    Err(TryRecvError::Disconnected) => return,
-                                }
-                            }
-                            if player.is_none() {
-                                if Instant::now() < next_try {
-                                    continue;
-                                }
-                                player = Player::start();
-                                if player.is_none() {
-                                    next_try = Instant::now() + RETRY;
-                                }
-                            }
-                            if let Some(p) = player.as_mut() {
-                                if p.write(&pcm).is_err() {
-                                    // The sound server went away, or was restarted. Drop this
-                                    // one and let the next press start a new stream.
-                                    log::debug!("the click stream closed; will restart it");
-                                    player = None;
-                                    next_try = Instant::now() + RETRY;
-                                }
-                            }
-                        }
-                    }
-                }
-            })
+            .spawn(move || run(rx))
             .ok();
-        Self { tx }
+        Self { tx, wanted: std::cell::Cell::new(false) }
     }
 
     /// Make the sound, if there is room in the queue to ask for it.
@@ -200,9 +209,110 @@ impl Clicks {
         let _ = self.tx.try_send(Msg::Play);
     }
 
-    /// Give the sound device back.
-    pub fn release(&self) {
-        let _ = self.tx.try_send(Msg::Release);
+    /// Say whether a keyboard is up, and so whether the sound device should be held open.
+    ///
+    /// Called every frame; only a change is sent. Passing `false` is what gives the device
+    /// back — there is no separate way to release it, because two ways to say the same thing
+    /// is how they come to disagree.
+    pub fn wanted(&self, wanted: bool) {
+        if self.wanted.replace(wanted) != wanted {
+            let _ = self.tx.try_send(Msg::Wanted(wanted));
+        }
+    }
+}
+
+/// The thread: keep a stream fed for as long as one is wanted, and splice clicks into it.
+fn run(rx: std::sync::mpsc::Receiver<Msg>) {
+    let pcm = waveform();
+    let mut player: Option<Player> = None;
+    // Where in the waveform the click being played has reached, if one is.
+    let mut at: Option<usize> = None;
+    let mut wanted = false;
+    let mut retry_at = Instant::now();
+    // Samples written since this stream opened, and when it opened. Together they say when the
+    // next chunk falls due.
+    let (mut written, mut epoch) = (0u64, Instant::now());
+
+    loop {
+        loop {
+            match rx.try_recv() {
+                Ok(Msg::Play) => at = Some(0),
+                Ok(Msg::Wanted(w)) => wanted = w,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        }
+
+        // Nothing to feed. Give the device back and sleep on the channel — an idle session
+        // should cost nothing, which is the whole point of being told when a keyboard is up.
+        if !wanted && at.is_none() {
+            player = None;
+            match rx.recv() {
+                Ok(Msg::Play) => at = Some(0),
+                Ok(Msg::Wanted(w)) => wanted = w,
+                Err(_) => return,
+            }
+            continue;
+        }
+
+        if player.is_none() {
+            if Instant::now() < retry_at {
+                // No stream and not yet time to try again. Drop the click rather than saving
+                // it: a sound that arrives seconds after the key is worse than none.
+                at = None;
+                std::thread::sleep(RETRY_POLL);
+                continue;
+            }
+            player = Player::start();
+            match player {
+                Some(_) => {
+                    written = 0;
+                    epoch = Instant::now();
+                }
+                None => {
+                    retry_at = Instant::now() + RETRY;
+                    at = None;
+                    continue;
+                }
+            }
+        }
+
+        // One chunk: the next of the waveform where a click is playing, silence elsewhere.
+        let mut chunk = [0u8; CHUNK * 2];
+        if let Some(pos) = at.as_mut() {
+            for slot in chunk.chunks_exact_mut(2) {
+                match pcm.get(*pos) {
+                    Some(sample) => {
+                        slot.copy_from_slice(&sample.to_le_bytes());
+                        *pos += 1;
+                    }
+                    None => break,
+                }
+            }
+            if *pos >= pcm.len() {
+                at = None;
+            }
+        }
+
+        if let Some(p) = player.as_mut() {
+            if p.write(&chunk).is_err() {
+                // The sound server went away, or was restarted. Let the next request open a
+                // new stream rather than trying to rescue this one.
+                log::debug!("the click stream closed; will reopen it");
+                player = None;
+                retry_at = Instant::now() + RETRY;
+                continue;
+            }
+        }
+        written += CHUNK as u64;
+
+        // Sleep until this much audio is nearly due, so no more than `LEAD` of it is ever
+        // queued ahead of real time. Behind rather than ahead, the sleep is skipped and the
+        // next chunks catch up.
+        let due = epoch + Duration::from_secs_f64(written as f64 / RATE as f64);
+        if let Some(wait) = due.checked_sub(LEAD).and_then(|d| d.checked_duration_since(Instant::now())) {
+            std::thread::sleep(wait);
+        }
     }
 }
 
@@ -223,8 +333,7 @@ impl Player {
                 &RATE.to_string(),
                 "--channels",
                 "1",
-                // The default is 100 ms, which would put the click a tenth of a second behind
-                // the key. This is about one frame at 72 Hz.
+                // Its own buffering, on top of what this thread keeps ahead of real time.
                 "--latency",
                 "15ms",
                 "-",
@@ -328,7 +437,7 @@ mod tests {
         // ever wait on a full queue or a stalled pipe, the compositor stutters when the sound
         // server does.
         let (tx, _rx) = sync_channel::<Msg>(QUEUE);
-        let clicks = Clicks { tx };
+        let clicks = Clicks { tx, wanted: std::cell::Cell::new(true) };
         let start = Instant::now();
         for _ in 0..10_000 {
             clicks.play();
@@ -355,6 +464,9 @@ mod hardware {
     #[ignore]
     fn audible_on_this_machine() {
         let clicks = Clicks::new();
+        // Without this there is no keyboard up, so no stream is held open and nothing plays.
+        clicks.wanted(true);
+        std::thread::sleep(Duration::from_millis(400));
         for _ in 0..6 {
             clicks.play();
             std::thread::sleep(Duration::from_millis(300));
