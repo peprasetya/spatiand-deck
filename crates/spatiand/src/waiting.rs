@@ -60,11 +60,13 @@ pub fn message(missing: Missing, had_headset: bool, exit_hint: &str) -> String {
              side is fine — but no display\n\
              came with it, and there is\n\
              nowhere to put the world.\n\n\
-             This is the cable, not a setting.\n\
-             Reseat it, turn the plug over, or\n\
-             use the cable the glasses came\n\
-             with — many USB-C cables carry\n\
-             data but no video.{exit_hint}"
+             Reseat the cable, or turn the\n\
+             plug over. A cable that carries\n\
+             only data will do this too.\n\n\
+             Still dark? Shut the Deck fully\n\
+             down — not restart. The USB-C\n\
+             port can stop offering video\n\
+             until it has been powered off.{exit_hint}"
         ),
         Missing::Headset if had_headset => format!(
             "Glasses disconnected\n\n\
@@ -146,8 +148,19 @@ mod tests {
             !text.contains("Plug in") && !text.contains("Connect XREAL"),
             "the half-connected message tells the wearer to connect glasses that are connected"
         );
-        // And it has to name the thing that actually needs changing.
-        assert!(text.contains("cable"), "no mention of the cable: {text}");
+        // And it has to name both things that actually fix it. The second one is here
+        // because it was *observed*, not guessed: a session with the glasses answering over
+        // USB and `card0-DP-1` reading disconnected, unchanged by reseating, by turning the
+        // plug over, or by walking the glasses through every display mode they have — and
+        // then cured by a full power-off. The port had stopped offering video and stayed that
+        // way across five days of uptime. Nobody reaches for "shut it all the way down" on
+        // their own, and a screen that only mentions the cable sends them hunting for a
+        // second cable they do not need.
+        for expected in ["cable", "powered off"] {
+            assert!(text.contains(expected), "no mention of {expected:?}: {text}");
+        }
+        // Specifically not a restart, which leaves the port controller powered and wedged.
+        assert!(text.contains("not restart"), "does not rule out a plain restart: {text}");
     }
 
     #[test]
