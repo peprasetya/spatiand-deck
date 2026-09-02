@@ -242,6 +242,12 @@ pub struct Binaural {
     level_target: f32,
     settle: f32,
     peak: f32,
+    /// Loudest sample in the last block, per channel. What the shell shows as "this window is
+    /// sending 5.1", and what decides which voices are worth convolving.
+    channel_peak: Vec<f32>,
+    /// How many samples each channel has been silent for. A voice whose delay line has had
+    /// time to empty contributes nothing, and convolving it is arithmetic spent on zero.
+    quiet_for: Vec<usize>,
 }
 
 impl Binaural {
@@ -274,6 +280,9 @@ impl Binaural {
             level_target: 1.0,
             settle: 1.0 - (-1.0 / (LEVEL_SETTLE * rate as f32)).exp(),
             peak: 0.0,
+            channel_peak: vec![0.0; layout.count()],
+            // Start silent, so a stream that never uses its surrounds never pays for them.
+            quiet_for: vec![usize::MAX / 2; layout.count()],
         }
     }
 
@@ -288,6 +297,56 @@ impl Binaural {
     /// what muting it has done.
     pub fn peak(&self) -> f32 {
         self.peak
+    }
+
+    /// The loudest sample in the last block for each channel, in the layout's own order.
+    ///
+    /// This is how a window can say *which* channels an app is actually using, rather than
+    /// which it has room for -- the difference between "7.1.4" and "a stereo mix through a
+    /// 7.1.4 connection", which is the thing worth showing on the window.
+    pub fn channel_peaks(&self) -> &[f32] {
+        &self.channel_peak
+    }
+
+    /// Which channels have carried sound recently enough to still matter.
+    pub fn live_channels(&self) -> usize {
+        self.quiet_for.iter().filter(|q| **q < self.taps()).count()
+    }
+
+    /// The smallest standard layout that covers what the app is *actually* sending.
+    ///
+    /// Not the same as [`Binaural::layout`], and the difference is the thing worth putting on
+    /// a window. The connection is as wide as the widest thing we can carry, so a music player
+    /// and a film both arrive through the same twelve channels; what tells them apart is how
+    /// many of those channels have anything in them. `None` means silence.
+    pub fn sounding_layout(&self) -> Option<Layout> {
+        let taps = self.taps();
+        let live: Vec<Channel> = self
+            .layout
+            .channels()
+            .iter()
+            .zip(self.quiet_for.iter())
+            .filter(|(_, quiet)| **quiet < taps)
+            .map(|(c, _)| *c)
+            .collect();
+        if live.is_empty() {
+            return None;
+        }
+        // Smallest first, so a stereo mix down a twelve-channel pipe reads as stereo.
+        [
+            Layout::Mono,
+            Layout::Stereo,
+            Layout::Surround51,
+            Layout::Surround71,
+            Layout::Surround714,
+        ]
+        .into_iter()
+        .find(|candidate| live.iter().all(|c| candidate.channels().contains(c)))
+        .or(Some(Layout::Surround714))
+    }
+
+    fn taps(&self) -> usize {
+        self.voices.first().map(|v| v.taps()).unwrap_or(0)
     }
 
     /// Silence this stream, or bring it back. Faded, not switched.
@@ -344,9 +403,34 @@ impl Binaural {
         let frames = (input.len() / channels).min(out.len() / 2);
         self.peak = 0.0;
         if frames == 0 {
+            self.channel_peak.iter_mut().for_each(|p| *p = 0.0);
             return;
         }
         let step = (frames as f32).recip();
+
+        // Which channels are carrying anything. A stereo app connected to a twelve-channel
+        // sink leaves ten of them at exactly zero, and convolving those is most of the work
+        // for none of the sound -- so this is what makes one sink layout serve every app
+        // without charging a song the price of a film.
+        let taps = self.taps();
+        for (c, peak) in self.channel_peak.iter_mut().enumerate() {
+            let mut loudest = 0.0f32;
+            for f in 0..frames {
+                let x = input[f * channels + c];
+                if x.is_finite() && x.abs() > loudest {
+                    loudest = x.abs();
+                }
+            }
+            *peak = loudest;
+            if loudest > 0.0 {
+                self.quiet_for[c] = 0;
+            } else {
+                self.quiet_for[c] = self.quiet_for[c].saturating_add(frames);
+            }
+            if loudest > self.peak {
+                self.peak = loudest;
+            }
+        }
 
         for f in 0..frames {
             // How far through the crossfade this sample is. Reaching exactly 1 on the last
@@ -356,11 +440,13 @@ impl Binaural {
 
             let (mut wet_l, mut wet_r) = (0.0f32, 0.0f32);
             let (mut dry_l, mut dry_r) = (0.0f32, 0.0f32);
-            for (voice, &x) in self.voices.iter_mut().zip(frame.iter()) {
-                let x = if x.is_finite() { x } else { 0.0 };
-                if x.abs() > self.peak {
-                    self.peak = x.abs();
+            for ((c, voice), &x) in self.voices.iter_mut().enumerate().zip(frame.iter()) {
+                // A channel silent for longer than its own filter has nothing left in the
+                // delay line to come out, so there is nothing to compute.
+                if self.quiet_for[c] >= taps {
+                    continue;
                 }
+                let x = if x.is_finite() { x } else { 0.0 };
                 dry_l += x * voice.fold.0;
                 dry_r += x * voice.fold.1;
                 if voice.aimed.is_some() {
@@ -673,6 +759,105 @@ mod tests {
                 "the blend went back on itself at step {step}"
             );
             last = now;
+        }
+    }
+
+    #[test]
+    fn a_stereo_mix_down_a_wide_pipe_still_reads_as_stereo() {
+        // Every window's sink is as wide as the widest thing that can be carried, so a music
+        // player and a film arrive through the same twelve channels. What tells them apart --
+        // and what a window should say about itself -- is how many of those channels have
+        // anything in them.
+        let mut b = Binaural::new(
+            Layout::Surround714,
+            Box::new(Panned),
+            Directness::PLAIN,
+            RATE,
+        );
+        let speakers = place(
+            Layout::Surround714,
+            &Stage {
+                yaw: 0.0,
+                pitch: 0.0,
+                half_width: 0.25,
+            },
+            glam::DQuat::IDENTITY,
+        );
+        b.aim(&speakers, 0.0);
+        assert_eq!(b.sounding_layout(), None, "silence is not a layout");
+
+        // Only the front pair carries anything, as an ordinary stereo app would leave it.
+        let channels = Layout::Surround714.count();
+        let mut input = vec![0.0; channels * 128];
+        for f in 0..128 {
+            input[f * channels] = 0.5;
+            input[f * channels + 1] = -0.5;
+        }
+        run(&mut b, &input);
+        assert_eq!(b.sounding_layout(), Some(Layout::Stereo));
+        assert_eq!(b.live_channels(), 2);
+
+        // Now the centre and the surrounds join in, and it is a film.
+        for f in 0..128 {
+            for c in 0..6 {
+                input[f * channels + c] = 0.25;
+            }
+        }
+        run(&mut b, &input);
+        assert_eq!(b.sounding_layout(), Some(Layout::Surround51));
+    }
+
+    #[test]
+    fn a_silent_channel_costs_nothing_and_changes_nothing() {
+        // The optimisation that lets one sink layout serve every app: ten silent channels of
+        // a twelve-channel connection are skipped entirely. What must not change is the
+        // sound, so the same content through a wide pipe and a narrow one has to match.
+        let stage = Stage {
+            yaw: 0.4,
+            pitch: 0.0,
+            half_width: 0.25,
+        };
+        let narrow = {
+            let mut b = Binaural::new(Layout::Stereo, Box::new(Panned), Directness::SPATIAL, RATE);
+            b.aim(&place(Layout::Stereo, &stage, glam::DQuat::IDENTITY), 0.4);
+            let input: Vec<f32> = (0..256)
+                .flat_map(|i| {
+                    let v = (i as f32 * 0.07).sin();
+                    [v, -v]
+                })
+                .collect();
+            run(&mut b, &input)
+        };
+        let wide = {
+            let mut b = Binaural::new(
+                Layout::Surround714,
+                Box::new(Panned),
+                Directness::SPATIAL,
+                RATE,
+            );
+            b.aim(
+                &place(Layout::Surround714, &stage, glam::DQuat::IDENTITY),
+                0.4,
+            );
+            let channels = Layout::Surround714.count();
+            let mut input = vec![0.0; channels * 256];
+            for i in 0..256 {
+                let v = (i as f32 * 0.07).sin();
+                input[i * channels] = v;
+                input[i * channels + 1] = -v;
+            }
+            run(&mut b, &input)
+        };
+        // The wide one is scaled down by its layout's normalisation, which is the honest
+        // difference between the two; the shape has to be identical.
+        let scale = wide[200].0 / narrow[200].0;
+        for (n, w) in narrow.iter().zip(wide.iter()).skip(64) {
+            assert!(
+                (n.0 * scale - w.0).abs() < 1e-4,
+                "the silent channels changed the sound: {} vs {}",
+                n.0 * scale,
+                w.0
+            );
         }
     }
 

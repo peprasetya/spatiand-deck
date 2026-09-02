@@ -22,6 +22,9 @@ pub mod ears;
 pub mod hrtf;
 pub mod panner;
 pub mod render;
+pub mod ring;
+#[cfg(feature = "server")]
+pub mod server;
 pub mod stage;
 
 pub use ears::Ears;

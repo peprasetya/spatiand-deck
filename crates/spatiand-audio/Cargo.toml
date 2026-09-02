@@ -11,3 +11,21 @@ log.workspace = true
 thiserror.workspace = true
 # dlopen for libmysofa, so a machine without it still runs -- see `hrtf`.
 libloading = "0.8"
+
+# The audio server, and the only part of this crate that is not portable arithmetic. Optional
+# so that the geometry and the rendering can be built and tested on any machine -- including a
+# development one with no PipeWire at all -- and so that a platform with a different audio
+# server is a new module here rather than a fork of the crate.
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = { version = "0.8", optional = true }
+
+[dev-dependencies]
+env_logger.workspace = true
+
+[[example]]
+name = "spatial-check"
+required-features = ["server"]
+
+[features]
+default = []
+server = ["dep:pipewire"]
