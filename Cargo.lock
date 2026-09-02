@@ -2176,7 +2176,9 @@ name = "spatiand-audio"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "libloading",
  "log",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
