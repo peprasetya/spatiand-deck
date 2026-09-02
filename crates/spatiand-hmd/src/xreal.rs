@@ -41,6 +41,19 @@ const MSG_W_BRIGHTNESS: u16 = 0x0004;
 /// glasses step through it; putting an unmeasured number in the table would give four rows the
 /// same authority as the one fact in there that was measured.
 const BRIGHTNESS_LEVELS: u8 = 8;
+/// The dimmest step [`XrealAir::set_brightness`] will select.
+///
+/// Not zero, and that is the entire reason this exists. Step 0 turns the panel off, and the
+/// control you would reach for to turn it back on is drawn *inside the glasses* — so the one
+/// setting there is no way back from is the one at the bottom of the slider.
+///
+/// The shell has its own floor and it does not protect this. That one is a fraction —
+/// `MINIMUM_BRIGHTNESS`, five percent — chosen for the Deck's own backlight, which is a
+/// continuous sysfs value where five percent is genuinely five percent. Here there are eight
+/// steps, so `round(0.05 * 7)` is 0 and the floor lands precisely on the thing it was written
+/// to prevent. A floor expressed in fractions cannot know how coarse the device beneath it is,
+/// which is why this one lives next to the number that makes it coarse.
+const DIMMEST_STEP: u8 = 1;
 /// Bytes the MCU length field counts before the payload: itself (2) + timestamp (8)
 /// + msgid (2) + reserved (5).
 const MCU_LEN_OVERHEAD: u16 = 17;
@@ -172,7 +185,8 @@ impl XrealGlasses {
         (step.min(BRIGHTNESS_LEVELS - 1) as f32 / top).clamp(0.0, 1.0)
     }
 
-    /// The nearest raw step to a 0..1 request.
+    /// The nearest raw step to a 0..1 request. May be 0; see [`DIMMEST_STEP`] for why
+    /// [`XrealAir::set_brightness`] will not send that.
     fn unit_to_brightness(level: f32) -> u8 {
         let top = (BRIGHTNESS_LEVELS - 1).max(1) as f32;
         (level.clamp(0.0, 1.0) * top).round() as u8
@@ -366,7 +380,11 @@ impl Hmd for XrealGlasses {
     }
 
     fn set_brightness(&mut self, level: f32) -> Result<f32> {
-        let step = Self::unit_to_brightness(level);
+        // Clamped here rather than in `unit_to_brightness`, which is the honest inverse of
+        // `brightness_to_unit` and has to stay able to express step 0 — the glasses report it,
+        // and reading it back as something else would be a lie about the hardware's state.
+        // Refusing to *select* it is a different thing from pretending it cannot happen.
+        let step = Self::unit_to_brightness(level).max(DIMMEST_STEP);
         let mut pending = Vec::new();
         self.mcu_command(MSG_W_BRIGHTNESS, &[step], "set brightness", &mut pending)?;
         // Report the step actually asked for rather than reading it back. A second round trip
@@ -480,6 +498,32 @@ mod tests {
         assert_eq!(XrealGlasses::brightness_to_unit(BRIGHTNESS_LEVELS - 1), 1.0);
         assert_eq!(XrealGlasses::unit_to_brightness(0.0), 0);
         assert_eq!(XrealGlasses::unit_to_brightness(1.0), BRIGHTNESS_LEVELS - 1);
+    }
+
+    #[test]
+    fn the_bottom_of_the_slider_is_dim_rather_than_off() {
+        // The failure this prevents, in full: the wearer drags the glasses' brightness to the
+        // bottom, the panel goes off, and the slider that would bring it back is drawn inside
+        // the glasses. Nothing on the Deck says what happened -- Spatiand reads the brightness
+        // back as 0% and carries on -- so it presents as the glasses having died.
+        //
+        // The shell's own floor does not catch it. That one is five percent, and five percent
+        // of seven steps rounds to zero, so the floor selects exactly the step it exists to
+        // avoid. Every way the wearer can reach the bottom is checked here, because the number
+        // that broke it looked like a floor and was one, for a different device.
+        for level in [0.0, 0.01, 0.05, 0.07, -1.0, f32::MIN] {
+            let step = XrealGlasses::unit_to_brightness(level).max(DIMMEST_STEP);
+            assert!(step >= 1, "{level} selects step {step}, which is the panel off");
+        }
+        // And it is a floor, not a rescaling: everything above it is untouched.
+        for step in 1..BRIGHTNESS_LEVELS {
+            let level = XrealGlasses::brightness_to_unit(step);
+            assert_eq!(
+                XrealGlasses::unit_to_brightness(level).max(DIMMEST_STEP),
+                step,
+                "the floor moved step {step}"
+            );
+        }
     }
 
     #[test]

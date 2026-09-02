@@ -832,9 +832,15 @@ impl Sidecar {
             // there is then nothing to see in order to drag it back. The floor is what makes
             // the control safe to explore.
             //
-            // The glasses get the same floor for the same reason turned around: the panel the
-            // wearer is actually looking through is the one that goes dark, and the control to
-            // undo it is on a screen behind their eyes.
+            // The glasses need the same protection for the same reason turned around -- the
+            // panel the wearer is actually looking through is the one that goes dark, and the
+            // control to undo it is on a screen behind their eyes -- but they do not get it
+            // from here, and for a while they appeared to. This floor is a *fraction*, and the
+            // glasses have eight steps, so five percent rounds to step zero: the floor picked
+            // out precisely the setting it was written to prevent. A fraction cannot know how
+            // coarse the device beneath it is, so the real floor lives in `spatiand-hmd` next
+            // to the step count. This one stays for the Deck's own backlight, which is the
+            // continuous control it was measured for.
             Knob::Screen | Knob::Glasses => fraction.max(MINIMUM_BRIGHTNESS),
             Knob::Volume => fraction,
         })
