@@ -691,10 +691,18 @@ impl PointerState {
                     .map(|(popup, _)| popup)
             })
             .collect();
+        let mut dismissed = 0;
         for popup in open.into_iter().rev() {
             if let smithay::desktop::PopupKind::Xdg(popup) = popup {
                 popup.send_popup_done();
+                dismissed += 1;
             }
+        }
+        // Said out loud because this is the one thing in the session that can close a menu the
+        // wearer has just opened, and "the menu never appeared" and "the menu appeared and was
+        // shut in the same frame" look identical from outside.
+        if dismissed > 0 {
+            log::info!("dismissed {dismissed} menu(s)");
         }
     }
 

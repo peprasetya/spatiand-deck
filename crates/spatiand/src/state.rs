@@ -670,7 +670,11 @@ impl XdgShellHandler for Spatiand {
     ///
     /// Instead a click that lands outside the popup dismisses it, which is what a grab is for
     /// from the wearer's side. See the pointer's `dismiss_popups`.
-    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {}
+    fn grab(&mut self, _surface: PopupSurface, _seat: WlSeat, _serial: Serial) {
+        // Not taken, but worth saying: a toolkit that asks for one is a toolkit that believes
+        // it has a valid input serial, which is half of what makes a menu open at all.
+        log::info!("a client asked to grab the input for its menu; not granted");
+    }
 
     fn reposition_request(
         &mut self,
