@@ -256,8 +256,32 @@ impl CompositorHandler for Spatiand {
         &mut self.compositor_state
     }
 
+    /// Per-client compositor state, for whichever kind of client this is.
+    ///
+    /// **Nothing here may panic**, and that is not a style preference. This runs inside a
+    /// callback the Wayland C library invokes through libffi, and a panic cannot unwind across
+    /// that boundary — Rust aborts the process instead. The result is a session that dies with
+    /// no message at all and is restarted by the session manager, which restarts it into the
+    /// same abort: a flickering screen and no way to stop it. That is exactly what an
+    /// `unwrap()` here did.
+    ///
+    /// It was reached the moment XWayland connected, because XWayland is a client we did not
+    /// create and its data is smithay's own [`XWaylandClientData`] rather than our
+    /// [`ClientState`] — so asking for ours found nothing.
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        if let Some(ours) = client.get_data::<ClientState>() {
+            return &ours.compositor_state;
+        }
+        // XWayland's client is made by smithay, not by us, and carries its own.
+        if let Some(theirs) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &theirs.compositor_state;
+        }
+        // Any other client is one nobody has accounted for. A shared, empty state is wrong in
+        // that two such clients would share buffer bookkeeping; it is right in that the
+        // session survives to say so, which the alternative does not.
+        static UNACCOUNTED: std::sync::OnceLock<CompositorClientState> = std::sync::OnceLock::new();
+        log::warn!("a client arrived with no compositor state of its own");
+        UNACCOUNTED.get_or_init(CompositorClientState::default)
     }
 
     fn commit(&mut self, surface: &WlSurface) {

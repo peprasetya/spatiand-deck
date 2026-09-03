@@ -55,6 +55,22 @@ fn main() {
     // it belongs at the top of `main` rather than inside whichever backend happens to run.
     shutdown::install();
 
+    // Say what went wrong before dying, whatever the reason.
+    //
+    // A panic inside a Wayland callback cannot unwind across the C boundary, so Rust aborts
+    // the process -- and the session manager restarts it, into the same abort. What that looks
+    // like from outside is a screen flickering with no way in and nothing in the log, because
+    // the default handler's message goes to a stderr that is never flushed. This writes it
+    // through the logger and flushes, which is the difference between a mystery and a line
+    // naming the file.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("spatiand is about to die: {info}");
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+        previous(info);
+    }));
+
     let backend = std::env::var("SPATIAND_BACKEND").unwrap_or_else(|_| "winit".into());
     log::info!("starting spatiand ({backend} backend)");
 

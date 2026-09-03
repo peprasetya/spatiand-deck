@@ -54,10 +54,22 @@ const DEFAULT_SIZE: (i32, i32) = (1280, 800);
 /// it. Failure is reported and swallowed: a session with no X server is a session where X11
 /// applications do not start, which is exactly where we were before, and is much better than
 /// no session at all.
+/// Set to `off` to run the session without an X server.
+///
+/// An escape hatch, and it exists because of how this fails when it fails. A compositor that
+/// dies during startup is restarted by the session manager, into the same death: a flickering
+/// screen, no way in, and nothing to read. Being able to turn off the newest moving part
+/// without a rebuild is what turns that into a diagnosis.
+pub const DISABLE_ENV: &str = "SPATIAND_XWAYLAND";
+
 pub fn start(
     display_handle: &smithay::reexports::wayland_server::DisplayHandle,
     loop_handle: &smithay::reexports::calloop::LoopHandle<'static, Runtime>,
 ) -> Option<u32> {
+    if std::env::var(DISABLE_ENV).as_deref() == Ok("off") {
+        log::info!("{DISABLE_ENV}=off: no X server, so X11-only applications will not start");
+        return None;
+    }
     let (xwayland, client) = match XWayland::spawn(
         display_handle,
         None,
@@ -307,6 +319,13 @@ pub fn client_environment(display_number: Option<u32>) -> Vec<(String, String)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_escape_hatch_is_spelled_the_way_it_is_documented() {
+        // Written down in one place, because the situation it is for is one where nothing can
+        // be read off the screen and the name has to be right first time.
+        assert_eq!(DISABLE_ENV, "SPATIAND_XWAYLAND");
+    }
 
     #[test]
     fn without_an_x_server_nothing_is_promised() {
