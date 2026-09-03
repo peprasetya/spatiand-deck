@@ -244,8 +244,14 @@ pub fn run(
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8.0);
+        // An X server, so an X11 application can be photographed too. Without one the harness
+        // could only ever test half the applications on the machine -- and the half it could
+        // not test is the half whose bugs were being fixed by reasoning. `SPATIAND_XWAYLAND=off`
+        // still turns it off, which is how a Wayland-only run is asked for.
+        let x_display = crate::xwayland::start(&runtime.display_handle, &event_loop.handle());
+        let environment = crate::xwayland::client_environment(x_display);
         log::info!("launching {command:?} into the snapshot, waiting up to {seconds}s");
-        match spatiand_platform::launch(&command, &runtime.state.socket_name, &[]) {
+        match spatiand_platform::launch(&command, &runtime.state.socket_name, &environment) {
             Ok(pid) => {
                 let deadline =
                     std::time::Instant::now() + std::time::Duration::from_secs_f32(seconds);
@@ -280,7 +286,7 @@ pub fn run(
                         // A click, if one was asked for, and then time to answer it. A menu
                         // is two round trips away: the client has to be told, create the
                         // popup, hear its configure, and commit a buffer.
-                        if let Some(at) = requested_click() {
+                        for at in requested_clicks() {
                             click_on_the_window(&mut runtime.state, &windows, at);
                             let answered =
                                 std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -663,7 +669,8 @@ fn draw_sidecar(
 ///
 /// `SPATIAND_CLICK=u,v`, both 0..1 -- so `0.5,0.5` is the middle of the client's surface and
 /// `0.06,0.09` is a toolbar button near the top left. `SPATIAND_CLICK_BUTTON=right` sends the
-/// other one.
+/// other one. Several may be given, separated by `;`, with time to answer between each: a
+/// menu item is two clicks away, and a dialog behind it is three.
 ///
 /// This exists because of one bug, and it is worth saying which: menus in real applications
 /// did not appear, and the only way to reproduce it was to put the glasses on and click
@@ -671,15 +678,24 @@ fn draw_sidecar(
 /// thing at all -- it can launch an application and photograph it sitting there with no menu
 /// open, which proves nothing. Pressing a real toolbar button and photographing what happens
 /// next is the difference between reading the code again and knowing.
-fn requested_click() -> Option<(f64, f64)> {
-    let raw = std::env::var("SPATIAND_CLICK").ok()?;
-    let (u, v) = raw.split_once(',')?;
-    let u: f64 = u.trim().parse().ok()?;
-    let v: f64 = v.trim().parse().ok()?;
-    Some((u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)))
+fn requested_clicks() -> Vec<(f64, f64)> {
+    let Ok(raw) = std::env::var("SPATIAND_CLICK") else {
+        return Vec::new();
+    };
+    raw.split(';')
+        .filter_map(|step| {
+            let (u, v) = step.split_once(',')?;
+            let u: f64 = u.trim().parse().ok()?;
+            let v: f64 = v.trim().parse().ok()?;
+            Some((u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)))
+        })
+        .collect()
 }
 
 /// Press and release a mouse button on the first window.
+///
+/// Coordinates stay the window's own even when a menu is open, because a menu here *is* drawn
+/// on the window's surface -- so a menu item is addressed the same way a toolbar button is.
 ///
 /// Deliberately *not* routed through the ray caster. There is no head, no pad and no aim here;
 /// what is being tested is what a client does when the pointer arrives, and going through the

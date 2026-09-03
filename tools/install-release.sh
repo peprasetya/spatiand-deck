@@ -52,9 +52,9 @@ exec $BIN >"\\\$LOG" 2>&1
 LAUNCH
 chmod +x $LAUNCHER
 mkdir -p /usr/share/wayland-sessions
-# KDE is named alongside Spatiand on purpose: XDG_CURRENT_DESKTOP is what xdg-desktop-portal
-# matches a backend against, and a name nothing recognises leaves Flatpak file choosers with
-# no implementation to open. See tools/install-session.sh for the long version.
+# KDE is named alongside Spatiand so xdg-desktop-portal has a backend name it recognises.
+# Insurance rather than the whole fix -- see tools/install-session.sh for what was actually
+# broken.
 cat > $SESSION <<'ENTRY'
 [Desktop Entry]
 Name=Spatial Mode

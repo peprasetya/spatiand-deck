@@ -109,13 +109,20 @@ chmod +x "$LAUNCHER"
 
 echo "== installing session entry: $DESKTOP =="
 install -d /usr/share/wayland-sessions
-# Two names in DesktopNames, and the second one is load-bearing.
+# Two names in DesktopNames, and the second one is insurance.
 #
-# XDG_CURRENT_DESKTOP is what xdg-desktop-portal matches a backend against, and a name nothing
-# has ever heard of matches nothing: the portal has no implementation to offer, and every
-# Flatpak application's file chooser -- which is a portal call, not a window the application
-# opens for itself -- silently never appears. That is what "click Add file and nothing happens"
-# is. Naming KDE as well picks the backend this machine already has installed.
+# XDG_CURRENT_DESKTOP is one of the things xdg-desktop-portal matches a backend against, and a
+# name nothing has ever heard of matches nothing. That matters because a Flatpak application's
+# file chooser is a portal call rather than a window the application opens for itself, so no
+# backend means no dialog and no error either.
+#
+# Stated carefully, because it was first written as the whole explanation and is not: this
+# machine's /usr/share/xdg-desktop-portal/portals.conf also says `default=kde`, and portal
+# 1.20 honours that when UseIn does not match -- so the backend would have been found anyway.
+# The name is worth setting because it is what the specification asks for and because not
+# every machine has that default; the thing that was actually broken is next door, in the
+# compositor: a portal service starting on demand had no WAYLAND_DISPLAY of ours to draw on.
+# See `publish_session_environment`.
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Name=Spatial Mode
