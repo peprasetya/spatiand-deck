@@ -21,6 +21,8 @@
 //! everything behind it, and a mouse that has not been touched for a while is one nobody is
 //! using.
 
+use std::os::unix::io::OwnedFd;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use libinput::Device as LibinputDevice;
@@ -101,9 +103,8 @@ impl Desk {
 
     /// Read everything that has happened since the last frame.
     pub fn poll(&mut self) -> Vec<DeskEvent> {
-        use libinput::event::device::DeviceEvent as _;
         use libinput::event::keyboard::KeyboardEventTrait;
-        use libinput::event::pointer::{ButtonState, PointerScrollEvent};
+        use libinput::event::pointer::ButtonState;
         use libinput::event::{Event, EventTrait, PointerEvent};
 
         let mut out = Vec::new();
@@ -111,24 +112,11 @@ impl Desk {
             return out;
         }
         while let Some(event) = self.context.next() {
-            // Anything Spatiand reads for itself is switched off the moment libinput offers
-            // it, rather than merely ignored. Ignoring the events is not enough: libinput
-            // still opens the device, still applies its own state machine to it, and on a
-            // touchscreen that is a second reader of the same contacts. Turning it off here is
-            // the difference between "we do not listen" and "it is not speaking".
-            //
-            // The Deck's controller is the reason this matters most: it presents itself as an
-            // ordinary mouse, so a thumb on the right pad arrived a second time as pointer
-            // motion and moved a cursor nobody had touched.
+            // Devices we read ourselves were never opened -- see `OnlyWhatWeDoNotRead` -- so
+            // anything arriving here is something nobody else is listening to. The check stays
+            // as a belt to that brace, since the cost is one comparison.
             if let Event::Device(libinput::event::DeviceEvent::Added(added)) = &event {
-                let mut device = added.device();
-                if ours(&device) {
-                    let name = device.name().to_string();
-                    let _ = device.config_send_events_set_mode(libinput::SendEventsMode::DISABLED);
-                    log::info!("libinput: leaving {name} alone; spatiand reads it directly");
-                    continue;
-                }
-                log::info!("libinput: {} ({:?})", device.name(), device.id_product());
+                log::info!("libinput: {}", added.device().name());
             }
             if ours(&event.device()) {
                 continue;
@@ -184,6 +172,57 @@ impl Desk {
 /// Is this a device another part of Spatiand already reads?
 fn ours(device: &LibinputDevice) -> bool {
     spatiand_input::already_read_here(device.id_vendor() as u16, device.id_product() as u16)
+}
+
+/// Hands libinput every device except the ones Spatiand reads for itself.
+///
+/// Refusing to *open* them is the only thing that works, and it took two attempts to get here.
+/// Dropping their events still left libinput holding the device open. Switching them off with
+/// `send_events` was worse: libinput closes a disabled device, and a close goes back through
+/// the session, which revokes the file descriptor for that device — the one our own reader was
+/// still using. The touchscreen went dead the moment libinput noticed it.
+///
+/// So the refusal happens at the door. libinput asks the session to open a path, this says no,
+/// and libinput never adds the device at all.
+struct OnlyWhatWeDoNotRead {
+    session: LibinputSessionInterface<LibSeatSession>,
+}
+
+impl libinput::LibinputInterface for OnlyWhatWeDoNotRead {
+    fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<OwnedFd, i32> {
+        if let Some((vendor, product)) = identity_of(path) {
+            if spatiand_input::already_read_here(vendor, product) {
+                log::info!(
+                    "libinput: not opening {}; spatiand reads it directly",
+                    path.display()
+                );
+                // Not an error anyone should act on -- it is a decision. libinput treats it as
+                // a device it cannot have and moves on.
+                return Err(libc::ENODEV);
+            }
+        }
+        self.session.open_restricted(path, flags)
+    }
+
+    fn close_restricted(&mut self, fd: OwnedFd) {
+        self.session.close_restricted(fd)
+    }
+}
+
+/// The vendor and product of the device behind an input node.
+///
+/// Read from sysfs, because the path is all libinput gives us and the decision has to be made
+/// before the device is open. `/dev/input/event8` becomes
+/// `/sys/class/input/event8/device/id/{vendor,product}`, which are four hex digits each.
+fn identity_of(path: &Path) -> Option<(u16, u16)> {
+    let node = path.file_name()?.to_str()?;
+    let base = format!("/sys/class/input/{node}/device/id");
+    let read = |what: &str| {
+        std::fs::read_to_string(format!("{base}/{what}"))
+            .ok()
+            .and_then(|s| u16::from_str_radix(s.trim(), 16).ok())
+    };
+    Some((read("vendor")?, read("product")?))
 }
 
 fn scroll_of<E: libinput::event::pointer::PointerScrollEvent>(event: &E) -> DeskEvent {

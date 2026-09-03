@@ -73,6 +73,17 @@ cat > "$LAUNCHER" <<EOF
 # than a wrong-backend one.
 export SPATIAND_BACKEND=drm
 export RUST_BACKTRACE=1
+# Anything set in ~/.config/spatiand/session.env is exported into the session.
+#
+# There is no terminal to set a variable in front of, and reinstalling the session entry to
+# turn on one log line is absurd. This is how a diagnosis gets made on a machine whose only
+# screen is the thing being diagnosed -- write RUST_LOG in a file, restart, read the log.
+ENVFILE="\$HOME/.config/spatiand/session.env"
+if [ -f "\$ENVFILE" ]; then
+    set -a
+    . "\$ENVFILE"
+    set +a
+fi
 # Log where it can be read after the fact: a session that fails at startup leaves no terminal
 # to have shown the error in.
 #
