@@ -146,6 +146,73 @@ pub fn wayland_arguments(program: &str, existing: &[String]) -> Vec<String> {
     ]
 }
 
+/// Tell the session's own services where this compositor is.
+///
+/// A portal is not a window an application opens for itself: the application asks a service
+/// over D-Bus, and that service opens the window. The service is started on demand by
+/// systemd, with the *session's* environment -- which, unless someone says otherwise, is the
+/// environment of whatever ran before us. It then has no `WAYLAND_DISPLAY`, or one naming a
+/// compositor that is no longer running, and cannot put a window anywhere. What that looks
+/// like from the wearer's side is a file chooser that never appears: no error, no window, and
+/// an application that seems to have ignored the button.
+///
+/// Every compositor does this at startup; it is not a Spatiand quirk. Failing is not fatal --
+/// a machine with no session bus has no portals to tell, and everything else still works.
+pub fn publish_session_environment(vars: &[(&str, &str)]) {
+    let mut command = Command::new("dbus-update-activation-environment");
+    // --systemd as well as the bus: the portal ships a systemd user unit, and the unit's
+    // environment is the one that decides where its windows go.
+    command.arg("--systemd");
+    for (key, value) in vars {
+        command.arg(format!("{key}={value}"));
+    }
+    match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => {
+            let names: Vec<&str> = vars.iter().map(|(k, _)| *k).collect();
+            log::info!("told the session bus about {}", names.join(", "));
+        }
+        Ok(status) => log::warn!("could not publish the session environment ({status})"),
+        Err(e) => log::info!("no dbus-update-activation-environment ({e}); portals may not find us"),
+    }
+}
+
+/// Where an option has to be inserted on a `flatpak run` command line, if this is one.
+///
+/// A sandbox does not inherit our environment. Everything `extra` carries -- which is how a
+/// window's sound is told which window it belongs to -- is simply dropped on the way in, so a
+/// Flatpak application plays to the machine's default output while the sink made for its
+/// window sits silent beside it. On this machine VLC and Kodi are both Flatpaks, which is to
+/// say the two applications the spatial audio was built for were the two it could not reach.
+///
+/// The position matters: `flatpak run [OPTIONS] APP [ARGS]`, so an option after the
+/// application id is an argument to the application instead, which flatpak accepts and the
+/// application ignores.
+fn flatpak_option_slot(program: &str, args: &[String]) -> Option<usize> {
+    if !program.rsplit('/').next().is_some_and(|p| p == "flatpak") {
+        return None;
+    }
+    let run = args.iter().position(|a| a == "run")?;
+    Some(run + 1)
+}
+
+/// The `--env=` options that carry `extra` across the sandbox boundary.
+///
+/// Deliberately **not** `WAYLAND_DISPLAY`: flatpak binds our socket into the sandbox under
+/// whatever name it likes and sets the variable itself, so forcing ours would name a socket
+/// that does not exist in there -- an application that launches and connects to nothing.
+fn flatpak_environment(extra: &[(String, String)]) -> Vec<String> {
+    extra
+        .iter()
+        .filter(|(key, _)| key != "WAYLAND_DISPLAY")
+        .map(|(key, value)| format!("--env={key}={value}"))
+        .collect()
+}
+
 /// Launch an application into the spatial session.
 ///
 /// `wayland_display` is the socket name Spatiand is listening on; it is set in the child's
@@ -167,6 +234,15 @@ pub fn launch(
         .ok_or_else(|| format!("empty command: {exec:?}"))?;
     let mut args = args.to_vec();
     args.extend(wayland_arguments(program, &args));
+    // Before anything else is decided about the command line, because this inserts rather than
+    // appends and every position after it would shift.
+    if let Some(at) = flatpak_option_slot(program, &args) {
+        let options = flatpak_environment(extra);
+        if !options.is_empty() {
+            log::info!("passing {} variable(s) into the flatpak sandbox", options.len());
+            args.splice(at..at, options);
+        }
+    }
 
     let log = open_app_log(program);
     let (out, err) = match log
@@ -243,6 +319,78 @@ fn prefer_as_oom_victim(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn flatpak_line(exec: &str, extra: &[(&str, &str)]) -> Vec<String> {
+        let parts = split_command(exec);
+        let (program, args) = parts.split_first().unwrap();
+        let mut args = args.to_vec();
+        let extra: Vec<(String, String)> = extra
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        if let Some(at) = flatpak_option_slot(program, &args) {
+            args.splice(at..at, flatpak_environment(&extra));
+        }
+        args
+    }
+
+    #[test]
+    fn a_flatpak_is_told_where_to_send_its_sound() {
+        // The variable is the whole spatial-audio mechanism, and a sandbox drops it. VLC and
+        // Kodi are both Flatpaks here, so without this the two applications the feature exists
+        // for are the two that cannot use it.
+        let args = flatpak_line(
+            "/usr/bin/flatpak run --branch=stable org.videolan.VLC",
+            &[("PULSE_SINK", "spatiand.window.3")],
+        );
+        assert!(args.contains(&"--env=PULSE_SINK=spatiand.window.3".to_string()));
+    }
+
+    #[test]
+    fn the_option_lands_before_the_application_id() {
+        // `flatpak run [OPTIONS] APP [ARGS]`. After the id it is an argument to the
+        // application, which flatpak accepts and the application ignores -- a fix that looks
+        // applied and does nothing.
+        let args = flatpak_line(
+            "/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=kodi tv.kodi.Kodi",
+            &[("PULSE_SINK", "spatiand.window.1")],
+        );
+        let env = args
+            .iter()
+            .position(|a| a.starts_with("--env="))
+            .expect("no --env option");
+        let app = args
+            .iter()
+            .position(|a| a == "tv.kodi.Kodi")
+            .expect("no application id");
+        assert!(env < app, "{args:?}");
+    }
+
+    #[test]
+    fn the_sandbox_keeps_its_own_wayland_socket() {
+        // Flatpak binds our socket in under a name of its choosing and sets the variable
+        // itself. Forcing ours names a socket that does not exist inside the sandbox, and the
+        // application launches and connects to nothing.
+        let args = flatpak_line(
+            "/usr/bin/flatpak run org.videolan.VLC",
+            &[("WAYLAND_DISPLAY", "wayland-1"), ("DISPLAY", ":1")],
+        );
+        assert!(!args.iter().any(|a| a.contains("WAYLAND_DISPLAY")), "{args:?}");
+        assert!(args.contains(&"--env=DISPLAY=:1".to_string()));
+    }
+
+    #[test]
+    fn an_ordinary_command_is_left_alone() {
+        assert_eq!(
+            flatpak_option_slot("/usr/bin/dolphin", &["--new-window".to_string()]),
+            None
+        );
+        // And something that merely mentions flatpak is not one.
+        assert_eq!(
+            flatpak_option_slot("/usr/bin/flatpak-spawn", &["run".to_string()]),
+            None
+        );
+    }
 
     #[test]
     fn splits_a_plain_command() {

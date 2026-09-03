@@ -52,13 +52,16 @@ exec $BIN >"\\\$LOG" 2>&1
 LAUNCH
 chmod +x $LAUNCHER
 mkdir -p /usr/share/wayland-sessions
+# KDE is named alongside Spatiand on purpose: XDG_CURRENT_DESKTOP is what xdg-desktop-portal
+# matches a backend against, and a name nothing recognises leaves Flatpak file choosers with
+# no implementation to open. See tools/install-session.sh for the long version.
 cat > $SESSION <<'ENTRY'
 [Desktop Entry]
 Name=Spatial Mode
 Comment=Spatiand - 3D spatial desktop for XR glasses
 Exec=$LAUNCHER
 Type=Application
-DesktopNames=Spatiand
+DesktopNames=Spatiand;KDE
 ENTRY
 if command -v steamos-readonly >/dev/null; then steamos-readonly enable || true; fi
 EOF

@@ -220,6 +220,23 @@ pub fn run(
     // no X server, which is a session where such applications do not start -- and everything
     // else is untouched.
     let x_display = crate::xwayland::start(&runtime.display_handle, &event_loop.handle());
+    // Now that both displays exist, tell the session's own services about them.
+    //
+    // Only the DRM backend does this, and the distinction matters: this is the session, so
+    // saying "the compositor is here" is true. The nested backend is a window inside somebody
+    // else's session, and it would be pointing that session's portals at a compositor that
+    // closes when the window does.
+    {
+        let mut published: Vec<(&str, &str)> = vec![
+            ("WAYLAND_DISPLAY", runtime.state.socket_name.as_str()),
+            ("XDG_SESSION_TYPE", "wayland"),
+        ];
+        let display = x_display.map(|n| format!(":{n}"));
+        if let Some(display) = display.as_deref() {
+            published.push(("DISPLAY", display));
+        }
+        spatiand_platform::publish_session_environment(&published);
+    }
     // Every window's sound, placed where the window is. Started here rather than lazily
     // because the connection to the audio server is what takes the time, and doing it on the
     // first launch would stall the launcher rather than the startup.

@@ -100,13 +100,20 @@ chmod +x "$LAUNCHER"
 
 echo "== installing session entry: $DESKTOP =="
 install -d /usr/share/wayland-sessions
+# Two names in DesktopNames, and the second one is load-bearing.
+#
+# XDG_CURRENT_DESKTOP is what xdg-desktop-portal matches a backend against, and a name nothing
+# has ever heard of matches nothing: the portal has no implementation to offer, and every
+# Flatpak application's file chooser -- which is a portal call, not a window the application
+# opens for itself -- silently never appears. That is what "click Add file and nothing happens"
+# is. Naming KDE as well picks the backend this machine already has installed.
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Name=Spatial Mode
 Comment=Spatiand — 3D spatial desktop for XR glasses
 Exec=$LAUNCHER
 Type=Application
-DesktopNames=Spatiand
+DesktopNames=Spatiand;KDE
 EOF
 
 echo
