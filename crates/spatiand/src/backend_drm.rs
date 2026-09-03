@@ -666,6 +666,30 @@ pub fn run(
             }
         }
         log::info!("presenting at {w}x{h}, stereo: {on_glasses}");
+        // Read the panel's brightness *after* the mode switch, not before it.
+        //
+        // It is read once when the headset opens, which is early enough to have something to
+        // draw and too early to be right: going mono and back to stereo makes the glasses
+        // re-light their panel, and what they come back at is not what they were at. The
+        // slider then said "dim" while the glasses were plainly bright, and the first thing a
+        // drag did was dim them to match the handle. This is the reading that agrees with what
+        // is in front of the wearer's eyes.
+        if let Some(x) = hmd.as_mut() {
+            match x.brightness() {
+                Ok(level) => {
+                    if levels.glasses != Some(level) {
+                        log::info!(
+                            "glasses brightness settled at {:.0}% after the mode switch",
+                            level * 100.0
+                        );
+                    }
+                    levels.glasses = Some(level);
+                }
+                // Not cleared: a read that fails here after one that worked at open is a busy
+                // MCU, not a headset without the control.
+                Err(e) => log::info!("could not re-read the glasses brightness ({e})"),
+            }
+        }
         // Clients are told how often the world is redrawn, but never how large it is: their
         // screen is a window. Getting the rate right matters to anything that picks a frame
         // cadence -- a player told 60 while the glasses run at 72 judders.

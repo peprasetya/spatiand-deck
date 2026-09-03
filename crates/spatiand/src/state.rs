@@ -641,9 +641,19 @@ impl XdgShellHandler for Spatiand {
     /// configured may not attach a buffer. That is why menus were not merely invisible — they
     /// were never mapped at all.
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        let geometry = positioner.get_geometry();
         surface.with_pending_state(|state| {
-            state.geometry = positioner.get_geometry();
+            state.geometry = geometry;
         });
+        // Menus are rare enough to log every one, and a menu that does not appear is the sort
+        // of thing where knowing whether the client even asked for it is half the answer.
+        log::info!(
+            "a client asked for a menu, {}x{} at ({}, {})",
+            geometry.size.w,
+            geometry.size.h,
+            geometry.loc.x,
+            geometry.loc.y
+        );
         if let Err(e) = self.popups.track_popup(PopupKind::Xdg(surface)) {
             log::warn!("could not track a popup: {e}");
         }
@@ -762,6 +772,14 @@ impl Spatiand {
         if self.x11_popups.iter().any(|s| *s == surface) {
             return;
         }
+        let geometry = surface.geometry();
+        log::info!(
+            "an X11 application opened a menu, {}x{} at ({}, {})",
+            geometry.size.w,
+            geometry.size.h,
+            geometry.loc.x,
+            geometry.loc.y
+        );
         self.x11_popups.push(surface);
     }
 

@@ -2562,7 +2562,13 @@ pub fn collect_windows(
         let mut popups = Vec::new();
         for (popup, offset) in smithay::desktop::PopupManager::popups_for_surface(&surface) {
             let popup_surface = popup.wl_surface().clone();
-            if import_surface_tree(renderer, &popup_surface).is_err() {
+            // Said out loud, once per menu, for the same reason the window's three failures
+            // are: a menu that does not appear is indistinguishable from a menu the
+            // application never opened, and the difference is the whole diagnosis.
+            if let Err(e) = import_surface_tree(renderer, &popup_surface) {
+                if note_once(3, &popup_surface) {
+                    log::warn!("a menu has a surface but nothing to draw from it: {e}");
+                }
                 continue;
             }
             let imported = with_renderer_surface_state(&popup_surface, |st| {
@@ -2571,8 +2577,14 @@ pub fn collect_windows(
             })
             .flatten();
             let Some((texture, pw, ph, opaque)) = imported else {
+                if note_once(4, &popup_surface) {
+                    log::info!("a menu is open but has committed nothing to draw yet");
+                }
                 continue;
             };
+            if note_once(5, &popup_surface) {
+                log::info!("menu {pw}x{ph} at ({}, {})", offset.x, offset.y);
+            }
             popups.push(PopupQuad {
                 surface: popup_surface,
                 texture,
@@ -2595,7 +2607,10 @@ pub fn collect_windows(
                 let Some(popup_surface) = x11.wl_surface() else {
                     continue;
                 };
-                if import_surface_tree(renderer, &popup_surface).is_err() {
+                if let Err(e) = import_surface_tree(renderer, &popup_surface) {
+                    if note_once(3, &popup_surface) {
+                        log::warn!("an X11 menu has a surface but nothing to draw from it: {e}");
+                    }
                     continue;
                 }
                 let imported = with_renderer_surface_state(&popup_surface, |st| {
@@ -2606,9 +2621,21 @@ pub fn collect_windows(
                 })
                 .flatten();
                 let Some((texture, pw, ph, opaque)) = imported else {
+                    if note_once(4, &popup_surface) {
+                        log::info!("an X11 menu is open but has committed nothing to draw yet");
+                    }
                     continue;
                 };
                 let loc = x11.geometry().loc;
+                if note_once(5, &popup_surface) {
+                    log::info!(
+                        "X11 menu {pw}x{ph} at ({}, {}), host origin ({}, {})",
+                        loc.x,
+                        loc.y,
+                        origin.x,
+                        origin.y
+                    );
+                }
                 popups.push(PopupQuad {
                     surface: popup_surface,
                     texture,
