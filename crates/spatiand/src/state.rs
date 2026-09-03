@@ -294,14 +294,16 @@ impl CompositorHandler for Spatiand {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
+            // Matched on the surface itself rather than on an xdg toplevel, because an X11
+            // window does not have one. Asking for a toplevel here meant an X11 window never
+            // had `on_commit` called, so its buffer state never advanced -- and a window whose
+            // buffer never advances has nothing to draw, however correctly everything else
+            // about it worked. VLC reached the room, negotiated a surface, and stayed blank.
+            use smithay::wayland::seat::WaylandFocus;
             if let Some(window) = self
                 .space
                 .elements()
-                .find(|w| {
-                    w.toplevel()
-                        .map(|t| t.wl_surface() == &root)
-                        .unwrap_or(false)
-                })
+                .find(|w| w.wl_surface().is_some_and(|s| *s == root))
                 .cloned()
             {
                 window.on_commit();

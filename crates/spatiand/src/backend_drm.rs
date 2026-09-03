@@ -241,6 +241,8 @@ pub fn run(
     // `root:input` with no ACL for the logged-in user, so only logind can hand it over. It is
     // attached to seat0, which is what makes that possible — a device on no seat cannot be
     // taken this way, however permissive its mode bits.
+    // Whether a finger has ever been seen. Only for the log line below.
+    let mut touched_once = false;
     let (mut touchscreen, touchscreen_node) = match open_touchscreen(&mut session.clone()) {
         Some((t, path)) => (Some(t), Some(path)),
         None => (None, None),
@@ -2122,6 +2124,13 @@ pub fn run(
                 // which feels like the control has stuck.
                 if let Some(touch) = touchscreen.as_mut() {
                     let events = touch.poll();
+                    // Said once, when the first finger of the session lands. The panel not
+                    // responding could be the device, the reader, the mapping or the hit test,
+                    // and this separates the first two from the last two in one line.
+                    if !events.is_empty() && !touched_once {
+                        touched_once = true;
+                        log::info!("first touch on the panel: {:?}", events.first());
+                    }
                     if !events.is_empty() {
                         for action in ui.touch(&events, levels, &audio) {
                             let knob = match action {
