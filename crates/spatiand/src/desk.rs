@@ -202,16 +202,20 @@ struct OnlyWhatWeDoNotRead {
 
 impl libinput::LibinputInterface for OnlyWhatWeDoNotRead {
     fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<OwnedFd, i32> {
-        if let Some((vendor, product)) = identity_of(path) {
-            if spatiand_input::already_read_here(vendor, product) {
-                log::info!(
-                    "libinput: not opening {}; spatiand reads it directly",
-                    path.display()
-                );
-                // Not an error anyone should act on -- it is a decision. libinput treats it as
-                // a device it cannot have and moves on.
-                return Err(libc::ENODEV);
-            }
+        // Two ways of knowing, because they cover different devices. A node this session has
+        // already opened is known by its path, which is a fact rather than an inference; the
+        // controller is opened through hidraw and has no evdev path to compare, so it is known
+        // by what it is.
+        let ours = self.reserved.iter().any(|held| held == path)
+            || identity_of(path).is_some_and(|(v, p)| spatiand_input::already_read_here(v, p));
+        if ours {
+            log::info!(
+                "libinput: not opening {}; spatiand reads it directly",
+                path.display()
+            );
+            // Not an error anyone should act on -- it is a decision. libinput treats it as a
+            // device it cannot have and moves on.
+            return Err(libc::ENODEV);
         }
         self.session.open_restricted(path, flags)
     }

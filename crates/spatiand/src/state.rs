@@ -292,7 +292,6 @@ impl CompositorHandler for Spatiand {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
-        note_xwayland_commit(surface);
 
         // A sync subsurface's commit is not applied until its parent commits, so there is
         // nothing to do for it yet.
@@ -496,62 +495,6 @@ impl XdgShellHandler for Spatiand {
             self.space.unmap_elem(&window);
         }
     }
-}
-
-/// Say, once per surface, when XWayland commits something.
-///
-/// An X11 window that runs, maps, associates a surface and still shows nothing leaves no trace
-/// anywhere in between. This is the missing half: whether the buffer ever arrives at all, and
-/// whether the compositor sees it when it does. Everything else about the path has been
-/// observed; this has not.
-fn note_xwayland_commit(surface: &WlSurface) {
-    use smithay::reexports::wayland_server::Resource;
-    /// How many of a surface's commits are worth reporting.
-    ///
-    /// Not one. The first commit of an XWayland surface carries no buffer by design — it is
-    /// the one that establishes the association — so seeing only that says nothing about
-    /// whether a buffer ever follows, which is the entire question.
-    const REPORT: usize = 8;
-
-    let Some(client) = surface.client() else {
-        return;
-    };
-    if client
-        .get_data::<smithay::xwayland::XWaylandClientData>()
-        .is_none()
-    {
-        return;
-    }
-    thread_local! {
-        static SEEN: std::cell::RefCell<std::collections::HashMap<
-            smithay::reexports::wayland_server::backend::ObjectId,
-            usize,
-        >> = std::cell::RefCell::new(std::collections::HashMap::new());
-    }
-    let nth = SEEN.with(|seen| {
-        let mut seen = seen.borrow_mut();
-        let count = seen.entry(surface.id()).or_insert(0);
-        *count += 1;
-        *count
-    });
-    if nth > REPORT {
-        return;
-    }
-    let has_buffer = smithay::wayland::compositor::with_states(surface, |states| {
-        states
-            .data_map
-            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>()
-            .map(|d| d.lock().unwrap().buffer().is_some())
-    });
-    log::info!(
-        "xwayland commit {nth} on surface {} (buffer: {})",
-        surface.id().protocol_id(),
-        match has_buffer {
-            Some(true) => "yes",
-            Some(false) => "none attached",
-            None => "no renderer state",
-        }
-    );
 }
 
 impl Spatiand {

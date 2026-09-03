@@ -50,6 +50,9 @@ impl Series {
         self.samples.len()
     }
 
+    /// Kept beside `len` because clippy asks for the pair and a reader expects it, even
+    /// though only `len` is called today.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
     }

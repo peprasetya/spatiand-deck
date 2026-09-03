@@ -1,4 +1,7 @@
 /target
+# Release folders and tarballs: build output, and the tarball belongs on a release page
+# rather than in the history.
+/dist
 /assets/backgrounds/
 *.log
 .DS_Store

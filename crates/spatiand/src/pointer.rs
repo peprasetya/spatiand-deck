@@ -405,13 +405,6 @@ pub enum Drag {
 }
 
 impl Drag {
-    /// The window this drag is about, whichever kind it is.
-    pub fn window(&self) -> &smithay::desktop::Window {
-        match self {
-            Drag::Move { window, .. } | Drag::Resize { window, .. } => window,
-        }
-    }
-
     /// Where a resize drag has got to, given where the pointer is now.
     ///
     /// `None` for the other kinds of drag, and for a ray that has swung round behind the

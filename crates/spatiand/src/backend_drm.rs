@@ -98,6 +98,13 @@ const STEREO_MODE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 72 Hz achieves nothing except filling the disk.
 const SIDECAR_FAILURE_LIMIT: u32 = 30;
 
+/// How soon after rebuilding for a failing sidecar it is worth doing so again.
+///
+/// Long enough that a sidecar which is broken for good settles into being off rather than
+/// cycling the displays forever, and short enough that a transient failure is repaired while
+/// somebody is still looking at it.
+const SIDECAR_REBUILD_INTERVAL: Duration = Duration::from_secs(60);
+
 pub fn run(
     event_loop: &mut EventLoop<'static, Runtime>,
     display: &mut Display<Spatiand>,
@@ -145,7 +152,7 @@ pub fn run(
     // buttons at all, because the device had been told to stop sending. Unplugging and
     // replugging appeared to "fix" it only because that resets the device and leaves whichever
     // handle opened last as the only one.
-    let mut hmd: Option<Box<dyn spatiand_hmd::Hmd>> = None;
+    let mut hmd: Option<Box<dyn spatiand_hmd::Hmd>>;
     // Has a headset ever been open in this session?
     //
     // The difference between "you started Spatiand without plugging the glasses in" and "your
@@ -205,6 +212,9 @@ pub fn run(
     // session that never types -- or one where the wearer has turned the click off -- never
     // touches the sound device at all.
     let clicks = crate::click::Clicks::new();
+    // When the displays were last rebuilt because the sidecar could not present. Outside the
+    // rebuild loop on purpose: its whole job is to notice the second time.
+    let mut sidecar_rebuilt: Option<std::time::Instant> = None;
     // An X server for applications that cannot speak Wayland. Started before anything can be
     // launched, so the first application already has a DISPLAY to find. `None` means there is
     // no X server, which is a session where such applications do not start -- and everything
@@ -241,8 +251,6 @@ pub fn run(
     // `root:input` with no ACL for the logged-in user, so only logind can hand it over. It is
     // attached to seat0, which is what makes that possible — a device on no seat cannot be
     // taken this way, however permissive its mode bits.
-    // Whether a finger has ever been seen. Only for the log line below.
-    let mut touched_once = false;
     let (mut touchscreen, touchscreen_node) = match open_touchscreen(&mut session.clone()) {
         Some((t, path)) => (Some(t), Some(path)),
         None => (None, None),
@@ -770,7 +778,12 @@ pub fn run(
                 None
             };
 
-            let mut two_handed: Option<spatiand_input::GestureDelta> = None;
+            // Always `None`: the two-thumb move-and-scale gesture is computed below and then
+            // discarded, so the code that reads this never runs. Left in place rather than
+            // deleted because the geometry it feeds is correct and tested -- what is missing
+            // is the decision about when a two-thumb gesture should outrank the two cursors,
+            // which is a question for a headset and a pair of hands, not for a compiler.
+            let two_handed: Option<spatiand_input::GestureDelta> = None;
             let mut leaving = false;
             // Asked for from the HUD, or over a signal -- see `shutdown::picture_requested`.
             let mut screenshot = crate::shutdown::picture_requested();
@@ -906,6 +919,8 @@ pub fn run(
                     // The two-thumb gesture still takes precedence for *scaling*, but the
                     // cursors stay visible through it: hiding them mid-gesture makes it
                     // impossible to see what is being resized.
+                    // Updated so the gesture keeps its own state consistent, and dropped: see
+                    // `two_handed` above for why nothing consumes it yet.
                     let _two_handed = gesture.update(&input.left_pad, &input.right_pad);
                     if !shell.menu_is_open() {
                         pads = Some(input);
@@ -2125,13 +2140,6 @@ pub fn run(
                 // which feels like the control has stuck.
                 if let Some(touch) = touchscreen.as_mut() {
                     let events = touch.poll();
-                    // Said once, when the first finger of the session lands. The panel not
-                    // responding could be the device, the reader, the mapping or the hit test,
-                    // and this separates the first two from the last two in one line.
-                    if !events.is_empty() && !touched_once {
-                        touched_once = true;
-                        log::info!("first touch on the panel: {:?}", events.first());
-                    }
                     if !events.is_empty() {
                         for action in ui.touch(&events, levels, &audio) {
                             let knob = match action {
@@ -2305,12 +2313,37 @@ pub fn run(
                 .as_ref()
                 .is_some_and(|s| s.failures >= SIDECAR_FAILURE_LIMIT)
             {
-                log::error!(
-                    "the sidecar failed to present {SIDECAR_FAILURE_LIMIT} times in a row; \
-                     giving up on it. The glasses are unaffected."
-                );
+                // Rebuilt rather than abandoned, if it has been a while since the last time.
+                //
+                // Giving up for the rest of the session was the wrong response, and the
+                // evidence is direct: a panel that had given up came straight back when the
+                // glasses were unplugged and replugged, which does nothing except force this
+                // same rebuild. Whatever the sidecar loses when the panel changes hands
+                // between being the main output and being the sidecar, building it again
+                // recovers it.
+                //
+                // Bounded by time, not by nothing. Retrying at frame rate is what once
+                // produced a 5.8 GB log for a black screen, and a rebuild that immediately
+                // fails again would do the same thing more slowly.
+                let long_enough = sidecar_rebuilt
+                    .map(|at: std::time::Instant| at.elapsed() >= SIDECAR_REBUILD_INTERVAL)
+                    .unwrap_or(true);
                 sidecar_surface = None;
                 sidecar_ui = None;
+                if long_enough {
+                    log::warn!(
+                        "the sidecar failed to present {SIDECAR_FAILURE_LIMIT} times in a row; \
+                         rebuilding the displays. The glasses are unaffected."
+                    );
+                    sidecar_rebuilt = Some(std::time::Instant::now());
+                    break;
+                }
+                log::error!(
+                    "the sidecar failed to present {SIDECAR_FAILURE_LIMIT} times in a row \
+                     again, less than {}s after rebuilding for the same reason; leaving it \
+                     off. The glasses are unaffected.",
+                    SIDECAR_REBUILD_INTERVAL.as_secs()
+                );
             }
 
             // --- present ---

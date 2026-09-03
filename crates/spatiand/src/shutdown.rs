@@ -70,12 +70,12 @@ pub fn install() {
     for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         // SAFETY: `handle` only stores to an atomic, so it is safe to run from a signal.
         unsafe {
-            libc::signal(signal, handle as libc::sighandler_t);
+            libc::signal(signal, handle as *const () as libc::sighandler_t);
         }
     }
     // SAFETY: `picture` only stores to an atomic, so it is safe to run from a signal.
     unsafe {
-        libc::signal(libc::SIGUSR1, picture as libc::sighandler_t);
+        libc::signal(libc::SIGUSR1, picture as *const () as libc::sighandler_t);
     }
 }
 

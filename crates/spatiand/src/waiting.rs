@@ -26,6 +26,7 @@ pub enum Missing {
 /// somewhere the writing did not intend, and a sentence that folds mid-phrase reads as a bug in
 /// the layout. Held to a width that fits the Deck's own panel, which is the screen these are
 /// actually read on: the glasses, by definition, are not showing anything when they appear.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const MAX_LINE: usize = 34;
 
 /// The offer of a way out, appended to whatever the screen is already saying.

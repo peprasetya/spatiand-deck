@@ -193,12 +193,6 @@ impl Audio {
             engine.set_muted(*slot, muted);
         }
     }
-
-    pub fn set_directness(&self, directness: Directness) {
-        if let Some(engine) = &self.engine {
-            engine.set_directness(directness);
-        }
-    }
 }
 
 /// The parent of a process, from `/proc`.
