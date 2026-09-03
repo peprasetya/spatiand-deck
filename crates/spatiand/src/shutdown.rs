@@ -38,6 +38,29 @@ extern "C" fn handle(signal: libc::c_int) {
     }
 }
 
+/// Set when `SIGUSR1` arrives, and cleared by whoever takes the picture.
+static PICTURE: AtomicBool = AtomicBool::new(false);
+
+/// Take a screenshot on the next frame.
+///
+/// `SIGUSR1`, because the alternative is somebody wearing the glasses and describing what they
+/// see. A session on a headset has no way to show anyone else what is on it, which makes every
+/// question about whether something is drawn a question for a person rather than a thing to
+/// check — and that is a slow way to find out that a window is one step from being drawn.
+///
+///     kill -USR1 $(pgrep -x spatiand)
+extern "C" fn picture(signal: libc::c_int) {
+    PICTURE.store(true, Ordering::SeqCst);
+    // Deliberately *not* restoring the default: this signal is asked for repeatedly, and the
+    // default disposition for SIGUSR1 is to kill the process.
+    let _ = signal;
+}
+
+/// Has a picture been asked for? Clears the request.
+pub fn picture_requested() -> bool {
+    PICTURE.swap(false, Ordering::SeqCst)
+}
+
 /// Ask to be told about the signals that mean "stop".
 ///
 /// `SIGHUP` is in the list because that is what a session leader gets when its terminal or
@@ -49,6 +72,10 @@ pub fn install() {
         unsafe {
             libc::signal(signal, handle as libc::sighandler_t);
         }
+    }
+    // SAFETY: `picture` only stores to an atomic, so it is safe to run from a signal.
+    unsafe {
+        libc::signal(libc::SIGUSR1, picture as libc::sighandler_t);
     }
 }
 

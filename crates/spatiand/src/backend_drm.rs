@@ -772,7 +772,8 @@ pub fn run(
 
             let mut two_handed: Option<spatiand_input::GestureDelta> = None;
             let mut leaving = false;
-            let mut screenshot = false;
+            // Asked for from the HUD, or over a signal -- see `shutdown::picture_requested`.
+            let mut screenshot = crate::shutdown::picture_requested();
             if let Some(c) = controller.as_mut() {
                 c.poll();
                 // A button that was already down when this screen appeared does not count.
