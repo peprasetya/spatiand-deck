@@ -122,6 +122,23 @@ impl XWaylandShellHandler for Spatiand {
     fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
         &mut self.xwayland_shell_state
     }
+
+    /// An X11 window has been matched to the surface it draws into.
+    ///
+    /// Worth a line, because until this happens the window exists, has a place in the room and
+    /// counts towards the window count, and has nothing to draw. A window that never reaches
+    /// here is one that will never appear, and from the outside those two look identical.
+    fn surface_associated(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        _wl_surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        surface: smithay::xwayland::X11Surface,
+    ) {
+        log::info!(
+            "X11 window {:?} now has a surface to draw into",
+            surface.title()
+        );
+    }
 }
 
 /// And again for the event loop's own data, which is what the X11 window manager is handed.

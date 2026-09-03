@@ -44,8 +44,33 @@ pub use touch::{Contact, TouchEvent, Touchscreen};
 pub use trigger::Trigger;
 
 /// Valve's vendor/product for the Deck's built-in controls.
+/// Whether this crate already reads a device, so nothing else should.
+///
+/// Asked by the compositor before it hands a device to libinput. The Deck's controller and its
+/// touchscreen are both read here, straight from the kernel, because neither gives libinput
+/// what a spatial session needs — absolute pad coordinates and pressure in one case, raw
+/// contacts in the other.
+///
+/// Reading them twice is not merely wasteful, it is wrong. The controller also presents itself
+/// as an ordinary mouse, so a thumb resting on the right pad arrived a second time as pointer
+/// motion and dragged the mouse cursor around — a cursor the wearer had not touched.
+///
+/// Lives here rather than in the compositor because the identifiers are this crate's business:
+/// it is the one that knows what a Steam Deck's input devices are.
+pub fn already_read_here(vendor: u16, product: u16) -> bool {
+    match (vendor, product) {
+        (VALVE_VID, DECK_PID) => true,
+        // The Deck's touchscreen, read by `crate::touch`.
+        (TOUCH_VID, TOUCH_PID) => true,
+        _ => false,
+    }
+}
+
 const VALVE_VID: u16 = 0x28DE;
 const DECK_PID: u16 = 0x1205;
+/// The Deck's built-in touchscreen, from its own report descriptor.
+const TOUCH_VID: u16 = 0x2808;
+const TOUCH_PID: u16 = 0x1015;
 /// The vendor interface. Match on this rather than a node number: `/dev/hidrawN` numbering
 /// is not stable across boots or across which USB devices enumerate first.
 const VENDOR_INTERFACE: u8 = 2;

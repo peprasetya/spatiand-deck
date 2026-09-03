@@ -71,11 +71,14 @@ impl Default for Directness {
     fn default() -> Self {
         Self {
             // Enough to keep a window in front sounding like itself rather than like a
-            // recording of itself, and not so much that it stops being placed.
-            centred: 0.35,
+            // recording of itself, and no more. It began at three times this, and listening
+            // said that a third of the sound arriving unplaced diluted the front-to-back cue
+            // -- which is subtle at the best of times -- in order to protect a left-to-right
+            // placement that was never in doubt.
+            centred: 0.12,
             // Off to the side there is real work for the filters to do, and a plain fold has
             // nothing to say about which side a sound is on beyond louder and quieter.
-            off_axis: 0.10,
+            off_axis: 0.0,
             fade_by: 40.0 * std::f64::consts::PI / 180.0,
         }
     }

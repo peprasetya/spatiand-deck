@@ -1471,11 +1471,17 @@ pub fn run(
                             // A mouse that is being used wins, because somebody with a hand on
                             // one is not also aiming a thumb; when it has faded it has no aim
                             // at all and the pads have it back.
+                            // A thumb on a pad outranks the mouse, and that is the way round it
+                            // has to be. A mouse cursor lingers after the last movement so it
+                            // can be found again -- and while it lingered it held the cursor,
+                            // so clicking the right pad clicked wherever the mouse had been
+                            // left. Whoever is actively aiming owns the cursor; a resting mouse
+                            // is only a mark on the view until it moves again.
                             let cursor_aim =
-                                match (mouse_aim.as_ref(), right_aim.as_ref(), left_aim.as_ref()) {
-                                    (Some(mouse), _, _) => Some(mouse),
-                                    (None, Some(right), _) => Some(right),
-                                    (None, None, left) => left,
+                                match (right_aim.as_ref(), left_aim.as_ref(), mouse_aim.as_ref()) {
+                                    (Some(right), _, _) => Some(right),
+                                    (None, Some(left), _) => Some(left),
+                                    (None, None, mouse) => mouse,
                                 };
                             if let Some(a) = cursor_aim {
                                 pointers.motion(&mut runtime.state, a, &windows, time_ms);

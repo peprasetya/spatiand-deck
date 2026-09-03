@@ -23,6 +23,7 @@
 
 use std::time::{Duration, Instant};
 
+use libinput::Device as LibinputDevice;
 use smithay::backend::libinput::LibinputSessionInterface;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::Session;
@@ -100,15 +101,38 @@ impl Desk {
 
     /// Read everything that has happened since the last frame.
     pub fn poll(&mut self) -> Vec<DeskEvent> {
+        use libinput::event::device::DeviceEvent as _;
         use libinput::event::keyboard::KeyboardEventTrait;
         use libinput::event::pointer::{ButtonState, PointerScrollEvent};
-        use libinput::event::{Event, PointerEvent};
+        use libinput::event::{Event, EventTrait, PointerEvent};
 
         let mut out = Vec::new();
         if self.context.dispatch().is_err() {
             return out;
         }
         while let Some(event) = self.context.next() {
+            // Anything Spatiand reads for itself is switched off the moment libinput offers
+            // it, rather than merely ignored. Ignoring the events is not enough: libinput
+            // still opens the device, still applies its own state machine to it, and on a
+            // touchscreen that is a second reader of the same contacts. Turning it off here is
+            // the difference between "we do not listen" and "it is not speaking".
+            //
+            // The Deck's controller is the reason this matters most: it presents itself as an
+            // ordinary mouse, so a thumb on the right pad arrived a second time as pointer
+            // motion and moved a cursor nobody had touched.
+            if let Event::Device(libinput::event::DeviceEvent::Added(added)) = &event {
+                let mut device = added.device();
+                if ours(&device) {
+                    let name = device.name().to_string();
+                    let _ = device.config_send_events_set_mode(libinput::SendEventsMode::DISABLED);
+                    log::info!("libinput: leaving {name} alone; spatiand reads it directly");
+                    continue;
+                }
+                log::info!("libinput: {} ({:?})", device.name(), device.id_product());
+            }
+            if ours(&event.device()) {
+                continue;
+            }
             match event {
                 Event::Keyboard(k) => {
                     out.push(DeskEvent::Key {
@@ -123,7 +147,12 @@ impl Desk {
                     // Relative, so it is accumulated here. Clamped rather than wrapped: a
                     // pointer that reappears on the other side of the view is lost.
                     self.x = (self.x + m.dx() / ACROSS_THE_VIEW).clamp(-1.0, 1.0);
-                    self.y = (self.y + m.dy() / ACROSS_THE_VIEW).clamp(-1.0, 1.0);
+                    // Inverted, because the two conventions disagree. A mouse reports the way
+                    // a screen is measured -- down is positive -- and the pads report the way
+                    // the world is -- up is positive. Passing one straight into the other sent
+                    // the cursor the wrong way vertically and the right way horizontally,
+                    // which is the signature of exactly this.
+                    self.y = (self.y - m.dy() / ACROSS_THE_VIEW).clamp(-1.0, 1.0);
                     self.moved = Some(Instant::now());
                 }
                 Event::Pointer(PointerEvent::Button(b)) => {
@@ -150,6 +179,11 @@ impl Desk {
         }
         out
     }
+}
+
+/// Is this a device another part of Spatiand already reads?
+fn ours(device: &LibinputDevice) -> bool {
+    spatiand_input::already_read_here(device.id_vendor() as u16, device.id_product() as u16)
 }
 
 fn scroll_of<E: libinput::event::pointer::PointerScrollEvent>(event: &E) -> DeskEvent {

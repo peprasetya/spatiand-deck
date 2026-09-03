@@ -497,6 +497,11 @@ impl Spatiand {
     /// nothing downstream asks which protocol the window came from.
     pub fn adopt_x11_window(&mut self, surface: smithay::xwayland::X11Surface) {
         let pid = surface.pid();
+        let title = surface.title();
+        // Whether XWayland has already told us which surface this window draws into. It can
+        // arrive either side of the map request, and a window with none yet is invisible until
+        // it does -- so this is the number to look at when a window runs and never appears.
+        let has_surface = surface.wl_surface().is_some();
         let window = smithay::desktop::Window::new_x11_window(surface);
         let index = self.space.elements().count() as i32;
         self.space
@@ -507,9 +512,15 @@ impl Spatiand {
             self.arrived_windows.push((id, pid));
         }
         log::info!(
-            "new X11 window at yaw {:.0} deg ({} windows)",
+            "new X11 window {:?} at yaw {:.0} deg ({} windows), surface {}",
+            title,
             self.spawn_yaw.to_degrees(),
-            self.space.elements().count()
+            self.space.elements().count(),
+            if has_surface {
+                "already attached"
+            } else {
+                "not attached yet"
+            }
         );
     }
 
