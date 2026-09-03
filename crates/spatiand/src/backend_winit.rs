@@ -126,7 +126,8 @@ pub fn run(
             model: "Nested".into(),
         },
     );
-    let _global = output.create_global::<Spatiand>(&runtime.display_handle);
+    // Not advertised: clients are told about `state.screen`, whose mode is the size of a
+    // window rather than the size of the framebuffer. See `Spatiand::screen`.
     output.change_current_state(
         Some(mode),
         Some(Transform::Flipped180),
@@ -134,7 +135,7 @@ pub fn run(
         Some((0, 0).into()),
     );
     output.set_preferred(mode);
-    runtime.state.space.map_output(&output, (0, 0));
+    runtime.state.set_screen_refresh(mode.refresh);
 
     // --- head tracking ---
     let mut hmd = match spatiand_hmd::open_any() {
@@ -276,6 +277,11 @@ pub fn run(
             let mut events: Vec<ShellEvent> = Vec::new();
             for control in c.pressed() {
                 if let Some(intent) = intent_for(*control) {
+                    // Rebuilt on the way in, because the list is stale the moment anything is
+                    // launched or closed.
+                    if intent == spatiand_shell::Intent::ToggleSwitcher {
+                        shell.set_windows(runtime.state.open_windows());
+                    }
                     if let Some(event) = shell.handle(intent) {
                         events.push(event);
                     }
@@ -326,7 +332,24 @@ pub fn run(
                         sky_image = environments.current();
                         sky_dirty = true;
                     }
+                    // Nested, there is no tracker pose worth centring on -- the window in
+                    // front of you is the whole view. Focus still moves, which is the half of
+                    // it that means anything here.
+                    ShellEvent::FocusWindow(id) => {
+                        let window = runtime
+                            .state
+                            .space
+                            .elements()
+                            .find(|w| runtime.state.layout.id_of(w) == Some(id))
+                            .cloned();
+                        if let Some(window) = window {
+                            runtime.state.focus_window(&window);
+                        }
+                    }
                     ShellEvent::Hud(action) => match action {
+                        HudAction::OpenSwitcher => {
+                            shell.set_windows(runtime.state.open_windows())
+                        }
                         HudAction::Recentre => {
                             tracker.recenter();
                             log::info!("recentred");
@@ -522,9 +545,10 @@ pub fn run(
         drop(framebuffer);
         backend.submit(Some(&[Rectangle::from_size(size)]))?;
 
+        let screen = runtime.state.screen.clone();
         runtime.state.space.elements().for_each(|window| {
-            window.send_frame(&output, Duration::ZERO, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
+            window.send_frame(&screen, Duration::ZERO, Some(Duration::ZERO), |_, _| {
+                Some(screen.clone())
             })
         });
         runtime.state.space.refresh();

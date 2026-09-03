@@ -210,10 +210,14 @@ impl XwmHandler for Spatiand {
         self.adopt_x11_window(window);
     }
 
+    /// A menu, a dropdown, a tooltip: a window X11 has told the window manager to keep its
+    /// hands off.
+    ///
+    /// Drawn on the surface of the application it belongs to rather than given a place in the
+    /// room of its own. Mapping these as ordinary windows -- which is what this used to do --
+    /// is why opening VLC's menu put a second pane in the room, and its submenu a third.
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
-        // A menu or a tooltip. Mapped as an ordinary window so it is at least visible and
-        // clickable; see the module note on what doing this properly would mean.
-        self.adopt_x11_window(window);
+        self.adopt_x11_popup(window);
     }
 
     fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {
@@ -260,6 +264,32 @@ impl XwmHandler for Spatiand {
     ) {
     }
 
+    /// "Make me fullscreen."
+    ///
+    /// Granted, and it changes nothing about the size: the X screen is already exactly one
+    /// window (see `Spatiand::screen`), so a client that fullscreens itself is asking for the
+    /// size it already has. What the property buys is the client's own behaviour -- Kodi and
+    /// VLC both drop their window chrome and hide the cursor when they believe they are
+    /// fullscreen, which is the useful half of the request.
+    ///
+    /// Saying nothing at all, which is the default, leaves a player waiting for a resize that
+    /// is never coming and toggling itself back out again.
+    fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        Self::grant(&window, true, X11Surface::set_fullscreen);
+    }
+
+    fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        Self::grant(&window, false, X11Surface::set_fullscreen);
+    }
+
+    fn maximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        Self::grant(&window, true, X11Surface::set_maximized);
+    }
+
+    fn unmaximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        Self::grant(&window, false, X11Surface::set_maximized);
+    }
+
     /// The client wants to be dragged or resized by its own decorations.
     ///
     /// Declined, both of them. Windows here are moved and resized by their own title bar and
@@ -275,6 +305,31 @@ impl XwmHandler for Spatiand {
     }
 
     fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {}
+}
+
+impl Spatiand {
+    /// Say yes to a window-state request, and confirm the size while doing it.
+    ///
+    /// The size never changes -- it is already the whole screen -- but an X11 client that
+    /// changes state and hears nothing back has no way to know it was granted, and several
+    /// wait for the `ConfigureNotify` before redrawing. Sending the geometry it already has is
+    /// the cheapest way to say "done".
+    fn grant<E: std::fmt::Display>(
+        window: &X11Surface,
+        on: bool,
+        set: impl Fn(&X11Surface, bool) -> Result<(), E>,
+    ) {
+        if let Err(e) = set(window, on) {
+            log::warn!("could not change an X11 window's state: {e}");
+            return;
+        }
+        let size = window.geometry().size;
+        if size.w > 0 && size.h > 0 {
+            if let Err(e) = window.configure(Rectangle::new((0, 0).into(), size)) {
+                log::warn!("could not confirm an X11 window's size: {e}");
+            }
+        }
+    }
 }
 
 /// The event loop carries a [`Runtime`]; the Wayland display dispatches against the
@@ -323,6 +378,18 @@ impl XwmHandler for Runtime {
         above: Option<u32>,
     ) {
         self.state.configure_notify(xwm, window, geometry, above)
+    }
+    fn fullscreen_request(&mut self, xwm: XwmId, window: X11Surface) {
+        self.state.fullscreen_request(xwm, window)
+    }
+    fn unfullscreen_request(&mut self, xwm: XwmId, window: X11Surface) {
+        self.state.unfullscreen_request(xwm, window)
+    }
+    fn maximize_request(&mut self, xwm: XwmId, window: X11Surface) {
+        self.state.maximize_request(xwm, window)
+    }
+    fn unmaximize_request(&mut self, xwm: XwmId, window: X11Surface) {
+        self.state.unmaximize_request(xwm, window)
     }
     fn resize_request(&mut self, xwm: XwmId, window: X11Surface, button: u32, edge: ResizeEdge) {
         self.state.resize_request(xwm, window, button, edge)

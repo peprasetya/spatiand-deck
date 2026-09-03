@@ -162,6 +162,9 @@ pub struct PopupQuad {
     /// hang off the edge of the window that opened it, and frequently does.
     pub offset: (i32, i32),
     pub pixels: (u32, u32),
+    /// True when the buffer has no alpha channel, so whatever is in those bits is meaningless
+    /// and must not be blended against. See `u_opaque` in [`crate::gl`].
+    pub opaque: bool,
 }
 
 /// A window title, already on the GPU.
@@ -1479,8 +1482,14 @@ impl Scene {
             // The surface itself. Fully opaque: a client's own transparency would otherwise
             // let the environment through, and a half-transparent terminal floating in a room
             // is unreadable.
+            //
+            // Said in the draw call rather than only in the tint, which is what it used to be.
+            // A tint of 1.0 scales the texture's alpha; it does not replace it, so a buffer
+            // whose alpha bytes were zero -- an XRGB buffer, which is what XWayland posts --
+            // came out invisible however opaque the tint was. That is the whole of the "VLC
+            // plays the sound and you can see the room through the video" bug.
             self.quads
-                .draw(gl, window.texture, &mvp, [1.0, 1.0, 1.0, 1.0], (0.0, 1.0));
+                .draw_opaque(gl, window.texture, &mvp, [1.0, 1.0, 1.0, 1.0], (0.0, 1.0));
 
             // Menus and dropdowns, on the window's own plane and a hair in front of it.
             //
@@ -1522,7 +1531,17 @@ impl Scene {
                     ffi::TEXTURE_WRAP_T,
                     ffi::CLAMP_TO_EDGE as i32,
                 );
-                self.quads.draw(
+                // Unlike the window behind it, a menu keeps its alpha when it has any: a
+                // rounded corner or a drop shadow is drawn in it, and squaring those off looks
+                // worse than the transparency costs. Only a buffer with no alpha channel at
+                // all is forced.
+                let draw = if popup.opaque {
+                    QuadPipeline::draw_opaque
+                } else {
+                    QuadPipeline::draw
+                };
+                draw(
+                    &self.quads,
                     gl,
                     popup.texture,
                     &(eye.view_projection() * model),
@@ -1549,9 +1568,11 @@ impl Scene {
         };
         match mode {
             Mode::World => {}
-            // All three are the same thing to draw: a card of rows with one selected. The
+            // All four are the same thing to draw: a card of rows with one selected. The
             // launcher is the odd one out because it is bubbles in space, not a list.
-            Mode::Hud | Mode::Environment | Mode::Files => self.draw_card(gl, eye, fov),
+            Mode::Hud | Mode::Environment | Mode::Files | Mode::Switcher => {
+                self.draw_card(gl, eye, fov)
+            }
             Mode::Launcher => self.draw_launcher(gl, eye, shell, fov),
         }
     }
@@ -2477,6 +2498,9 @@ pub fn collect_windows(
 
     let mut out = Vec::new();
     let windows: Vec<smithay::desktop::Window> = state.space.elements().cloned().collect();
+    // Which window X11 menus belong to. Worked out once: it is a property of the session, not
+    // of the window being drawn.
+    let menu_host = state.x11_menu_host();
     for window in windows {
         // Whichever protocol the window speaks. An X11 window has no xdg toplevel, and asking
         // only for one silently skipped every X11 window: they launched, appeared in the
@@ -2543,10 +2567,10 @@ pub fn collect_windows(
             }
             let imported = with_renderer_surface_state(&popup_surface, |st| {
                 st.texture::<smithay::backend::renderer::gles::GlesTexture>(renderer.context_id())
-                    .map(|t| (t.tex_id(), t.width(), t.height()))
+                    .map(|t| (t.tex_id(), t.width(), t.height(), has_no_alpha(t)))
             })
             .flatten();
-            let Some((texture, pw, ph)) = imported else {
+            let Some((texture, pw, ph, opaque)) = imported else {
                 continue;
             };
             popups.push(PopupQuad {
@@ -2554,7 +2578,45 @@ pub fn collect_windows(
                 texture,
                 offset: (offset.x, offset.y),
                 pixels: (pw, ph),
+                opaque,
             });
+        }
+
+        // The same treatment for an X11 application's menus, which are not popups as far as
+        // the protocol is concerned -- they are separate top-level windows that X has asked
+        // nobody to manage. Placing them on the parent's surface at the coordinates X gave
+        // them is what makes a menu look like a menu instead of a second window.
+        if menu_host.as_ref() == Some(&window) {
+            let origin = window
+                .x11_surface()
+                .map(|x| x.geometry().loc)
+                .unwrap_or_default();
+            for x11 in &state.x11_popups {
+                let Some(popup_surface) = x11.wl_surface() else {
+                    continue;
+                };
+                if import_surface_tree(renderer, &popup_surface).is_err() {
+                    continue;
+                }
+                let imported = with_renderer_surface_state(&popup_surface, |st| {
+                    st.texture::<smithay::backend::renderer::gles::GlesTexture>(
+                        renderer.context_id(),
+                    )
+                    .map(|t| (t.tex_id(), t.width(), t.height(), has_no_alpha(t)))
+                })
+                .flatten();
+                let Some((texture, pw, ph, opaque)) = imported else {
+                    continue;
+                };
+                let loc = x11.geometry().loc;
+                popups.push(PopupQuad {
+                    surface: popup_surface,
+                    texture,
+                    offset: (loc.x - origin.x, loc.y - origin.y),
+                    pixels: (pw, ph),
+                    opaque,
+                });
+            }
         }
 
         // What the client actually committed, which need not be what it was offered: a
@@ -2586,6 +2648,33 @@ pub fn collect_windows(
         });
     }
     out
+}
+
+/// Whether a texture's alpha channel means anything.
+///
+/// `GlesTexture::format` reports the *opaque* variant of the format -- `Xrgb8888` rather than
+/// `Argb8888` -- when the buffer it came from has no alpha channel, which is Smithay's way of
+/// saying "those eight bits are padding". Blending against padding is how a video ends up
+/// see-through.
+fn has_no_alpha(texture: &smithay::backend::renderer::gles::GlesTexture) -> bool {
+    use smithay::backend::allocator::Fourcc;
+    use smithay::backend::renderer::Texture;
+    matches!(
+        texture.format(),
+        Some(
+            Fourcc::Xrgb8888
+                | Fourcc::Xbgr8888
+                | Fourcc::Rgbx8888
+                | Fourcc::Bgrx8888
+                | Fourcc::Xrgb2101010
+                | Fourcc::Xbgr2101010
+                | Fourcc::Rgbx1010102
+                | Fourcc::Bgrx1010102
+                | Fourcc::Rgb888
+                | Fourcc::Bgr888
+                | Fourcc::Rgb565
+        )
+    )
 }
 
 /// Say whether this surface's failure to draw is worth mentioning yet.

@@ -60,6 +60,12 @@ pub enum HudAction {
     Calibrate,
     /// Save what the wearer is looking at, so a problem can be shown rather than described.
     Screenshot,
+    /// Open the list of open windows.
+    ///
+    /// Here as well as on a back paddle because a paddle is a control nobody finds by
+    /// accident. The row is what makes the feature discoverable; the paddle is what makes it
+    /// worth using once you know.
+    OpenSwitcher,
     /// Show or hide the on-screen keyboard.
     ToggleKeyboard,
     /// Open the environment picker.
@@ -177,6 +183,11 @@ impl Hud {
                 label: "Take a screenshot",
                 detail: "Saves what you are looking at to your Pictures folder",
                 action: HudAction::Screenshot,
+            },
+            HudItem {
+                label: "Windows",
+                detail: "Switch to another window and bring it in front of you",
+                action: HudAction::OpenSwitcher,
             },
             HudItem {
                 label: "Environment",
@@ -412,6 +423,7 @@ mod tests {
                 "Recentre",
                 "Keyboard",
                 "Take a screenshot",
+                "Windows",
                 "Environment",
                 "Bluetooth",
                 "Wi-Fi",

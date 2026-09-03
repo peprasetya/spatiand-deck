@@ -28,6 +28,14 @@ pub fn intent_for(control: Control) -> Option<Intent> {
         Control::B => Intent::Back,
         Control::Steam => Intent::ToggleHud,
         Control::Quick => Intent::ToggleLauncher,
+        // The left back paddle, and deliberately not a shoulder button.
+        //
+        // Cycling windows used to live on L1/R1, which is where every tabbed thing puts
+        // "previous" and "next" -- and which is also two of the buttons a game needs most. The
+        // paddles are the four controls nothing else on this device claims, so the switcher
+        // sits there and the shoulders are given back. It is also in the HUD, because nobody
+        // discovers a paddle.
+        Control::L4 => Intent::ToggleSwitcher,
         // The right pad's click is the pointer's select, handled by the pointer rather than by
         // the menu state machine, so it is deliberately not an intent.
         _ => return None,
@@ -42,6 +50,24 @@ mod tests {
     fn the_two_menu_buttons_are_bound_the_way_they_are_labelled() {
         assert_eq!(intent_for(Control::Steam), Some(Intent::ToggleHud));
         assert_eq!(intent_for(Control::Quick), Some(Intent::ToggleLauncher));
+    }
+
+    #[test]
+    fn the_shoulder_buttons_belong_to_whatever_is_running() {
+        // They used to step focus between windows, which cost a game the two buttons it wants
+        // most and made blind cycling the only way to reach a window. The switcher replaced
+        // it. This is the invariant that keeps them free: Spatiand binds them to nothing, in
+        // either direction -- no intent, and no key typed into the focused application either,
+        // so the coming per-application mapping has them to give away.
+        for control in [Control::L1, Control::R1] {
+            assert_eq!(intent_for(control), None, "{control:?} is claimed again");
+            assert_eq!(key_for(control), None, "{control:?} types something");
+        }
+    }
+
+    #[test]
+    fn the_switcher_is_on_a_paddle() {
+        assert_eq!(intent_for(Control::L4), Some(Intent::ToggleSwitcher));
     }
 
     #[test]
@@ -181,14 +207,12 @@ mod key_tests {
 
     #[test]
     fn the_way_out_of_the_session_is_never_typed_into_an_application() {
-        // STEAM and the QAM button open the shell's own surfaces, and the bumpers move
-        // between windows. If any of them also typed, a full-screen application could take
-        // the only way out of itself.
+        // STEAM and the QAM button open the shell's own surfaces, and a back paddle opens
+        // the window switcher. If any of them also typed, a full-screen application could
+        // take the only way out of itself.
         for control in [
             Control::Steam,
             Control::Quick,
-            Control::L1,
-            Control::R1,
             Control::L4,
             Control::R4,
             Control::L5,

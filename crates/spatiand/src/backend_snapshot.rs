@@ -180,10 +180,10 @@ pub fn run(
         size: (width as i32, height as i32).into(),
         refresh: 72_000,
     };
-    let _global = output.create_global::<Spatiand>(&runtime.display_handle);
+    // Not advertised: clients are told about `state.screen`. See `Spatiand::screen`.
     output.change_current_state(Some(output_mode), None, None, Some((0, 0).into()));
     output.set_preferred(output_mode);
-    runtime.state.space.map_output(&output, (0, 0));
+    runtime.state.set_screen_refresh(output_mode.refresh);
     let environments = Environments::discover();
     let sky_image = environments.current();
     let mut scene = Scene::new(&mut renderer, &sky_image)?;
@@ -263,11 +263,12 @@ pub fn run(
                             for window in runtime.state.space.elements() {
                                 // Frame callbacks are what tell a client it may draw the next
                                 // frame. Without them most toolkits paint once and stop.
+                                let screen = runtime.state.screen.clone();
                                 window.send_frame(
-                                    &output,
+                                    &screen,
                                     std::time::Duration::ZERO,
                                     Some(std::time::Duration::ZERO),
-                                    |_, _| Some(output.clone()),
+                                    |_, _| Some(screen.clone()),
                                 );
                             }
                             runtime.state.space.refresh();
@@ -291,10 +292,7 @@ pub fn run(
     {
         let ppd_now = TextRenderer::px_per_degree(width, 40.0);
         for quad in windows.iter_mut() {
-            let title = runtime
-                .state
-                .title_of(&quad.window)
-                .unwrap_or_else(|| "Untitled".to_string());
+            let title = runtime.state.display_title(&quad.window);
             quad.title = scene.title_texture(&mut renderer, &mut text, &title, ppd_now);
             if let Some(app_id) = runtime.state.app_id_of(&quad.window) {
                 quad.icon = scene.window_icon(&mut renderer, &app_id);

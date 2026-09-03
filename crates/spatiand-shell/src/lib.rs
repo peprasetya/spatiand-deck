@@ -21,6 +21,7 @@ pub mod grid;
 pub mod hud;
 pub mod keyboard;
 pub mod launcher;
+pub mod switcher;
 
 pub use category::{Group, GROUPS};
 pub use environment::{
@@ -31,6 +32,7 @@ pub use grid::{Direction as NavDirection, Grid};
 pub use hud::{DesktopPanels, Hud, HudAction, HudItem};
 pub use keyboard::{Key, Keyboard};
 pub use launcher::{AppEntry, BubblePlacement, Launcher, Level};
+pub use switcher::{Switcher, WindowEntry};
 
 /// What the wearer meant, independent of which button they pressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +46,12 @@ pub enum Intent {
     ToggleHud,
     /// Toggle the launcher — the `⋯` button.
     ToggleLauncher,
+    /// Show the list of open windows — the left back paddle.
+    ///
+    /// On a back paddle rather than a shoulder button because the shoulders belong to whatever
+    /// is running: a game needs them, and this session should not be the reason it cannot have
+    /// them. The paddles are the four controls nothing else on the device claims.
+    ToggleSwitcher,
 }
 
 /// Which surface owns the wearer's attention.
@@ -58,6 +66,8 @@ pub enum Mode {
     /// Looking for an image to add. Reached from the environment picker.
     Files,
     Launcher,
+    /// The list of open windows.
+    Switcher,
 }
 
 /// Something the compositor has to act on.
@@ -76,6 +86,10 @@ pub enum ShellEvent {
     ListDirectory(Option<String>),
     /// Add this file — named relative to the directory last listed — to the environments.
     AddEnvironment(String),
+    /// Give this window focus and bring it to the centre of the view.
+    ///
+    /// Carries the compositor's own window id, which the shell only ever passes back.
+    FocusWindow(usize),
 }
 
 pub struct Shell {
@@ -84,6 +98,7 @@ pub struct Shell {
     launcher: Launcher,
     environments: EnvironmentPicker,
     files: FileBrowser,
+    switcher: Switcher,
 }
 
 impl Shell {
@@ -96,6 +111,7 @@ impl Shell {
             launcher: Launcher::new(apps),
             environments: EnvironmentPicker::default(),
             files: FileBrowser::default(),
+            switcher: Switcher::default(),
         }
     }
 
@@ -117,6 +133,16 @@ impl Shell {
 
     pub fn files(&self) -> &FileBrowser {
         &self.files
+    }
+
+    pub fn switcher(&self) -> &Switcher {
+        &self.switcher
+    }
+
+    /// Hand the switcher the open windows. The compositor calls this immediately before the
+    /// switcher opens, because the list is stale the moment anything is launched or closed.
+    pub fn set_windows(&mut self, windows: Vec<WindowEntry>) {
+        self.switcher.show(windows);
     }
 
     pub fn set_apps(&mut self, apps: Vec<AppEntry>) {
@@ -173,6 +199,19 @@ impl Shell {
                 };
                 self.enter(target)
             }
+            // Opening it with nothing open would be a glass panel apologising for itself, so
+            // that case simply does nothing. The compositor fills the list just before this
+            // arrives, which is what makes "nothing open" knowable here.
+            Intent::ToggleSwitcher => {
+                let target = if self.mode == Mode::Switcher {
+                    Mode::World
+                } else if self.switcher.is_empty() {
+                    return None;
+                } else {
+                    Mode::Switcher
+                };
+                self.enter(target)
+            }
             Intent::Back => match self.mode {
                 // B in the world is deliberately inert. The way out of Spatiand is an explicit
                 // row in the HUD, because a stray press of B closing the whole session — with
@@ -195,6 +234,7 @@ impl Shell {
                     Mode::Environment => self.environments.step(direction),
                     Mode::Files => self.files.step(direction),
                     Mode::Launcher => self.launcher.step(direction),
+                    Mode::Switcher => self.switcher.step(direction),
                     // In the world the D-pad will move focus between windows; until windows
                     // are drawn there is nothing to move between.
                     Mode::World => false,
@@ -210,6 +250,10 @@ impl Shell {
                     // is what makes a newly dropped-in image appear.
                     match action {
                         HudAction::OpenEnvironments => self.mode = Mode::Environment,
+                        // Same shape as the environment row: it opens a list rather than
+                        // doing something, and the compositor answers the event by filling
+                        // that list in.
+                        HudAction::OpenSwitcher => self.mode = Mode::Switcher,
                         // Everything else takes you back to the world, settings panels
                         // included: staying on the menu after recentring hides the thing you
                         // just changed, and staying on it after opening Wi-Fi leaves a menu
@@ -247,6 +291,11 @@ impl Shell {
                     let app = self.launcher.activate()?;
                     self.mode = Mode::World;
                     Some(ShellEvent::Launch(app))
+                }
+                Mode::Switcher => {
+                    let id = self.switcher.activate()?;
+                    self.mode = Mode::World;
+                    Some(ShellEvent::FocusWindow(id))
                 }
                 Mode::World => None,
             },

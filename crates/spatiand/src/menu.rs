@@ -161,6 +161,29 @@ pub fn model(shell: &Shell) -> Option<MenuModel> {
             detail: "Nothing was found in the system's application folders.".into(),
             footer: "B back".into(),
         }),
+        Mode::Switcher => {
+            let switcher = shell.switcher();
+            Some(MenuModel {
+                title: "Windows".into(),
+                rows: switcher
+                    .entries()
+                    .iter()
+                    .map(|w| {
+                        if w.current {
+                            // Spelt out rather than marked, for the same reason as the
+                            // environment list: a glyph read through optics at an angle is a
+                            // box as often as it is a tick.
+                            MenuRow::with(w.title.clone(), "In front of you")
+                        } else {
+                            MenuRow::plain(w.title.clone())
+                        }
+                    })
+                    .collect(),
+                cursor: switcher.cursor(),
+                detail: "Choosing a window brings it to the centre of your view.".into(),
+                footer: FOOTER_SELECT.into(),
+            })
+        }
         Mode::Launcher => None,
     }
 }

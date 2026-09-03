@@ -471,13 +471,17 @@ pub fn run(
             size: (w as i32, h as i32).into(),
             refresh: (mode.vrefresh() * 1000) as i32,
         };
-        // Kept, because a `GlobalId` is a handle and not a guard: dropping it advertises the
-        // output forever. Without removing it explicitly, every rebuild left another display
-        // on offer -- and a session that started before the glasses were plugged in went on
-        // advertising the Deck's own 800x1280 portrait panel for the rest of its life. An
-        // application that sizes itself from a display picked that one, laid its interface out
-        // in portrait, and drew it into a landscape window.
-        let output_global = output.create_global::<Spatiand>(&runtime.display_handle);
+        // Not advertised to clients, and that is the point. This output is the *scanout*: the
+        // glasses' 3840x1080 framebuffer, half of it per eye. Telling an application that its
+        // screen is 3840x1080 is how Kodi ended up laying itself out for a display twice as
+        // wide as the world and then having it squeezed onto a quad. Clients see
+        // `state.screen` instead, whose mode is the size of a window.
+        //
+        // This also retires an old bug rather than working around it: a `GlobalId` is a handle
+        // and not a guard, so every display rebuild used to leave another stale output on
+        // offer -- and a session that started before the glasses were plugged in went on
+        // advertising the Deck's own 800x1280 portrait panel for the rest of its life.
+        // There is nothing to leak now, because nothing is created.
         output.change_current_state(
             Some(output_mode),
             Some(Transform::Normal),
@@ -485,7 +489,6 @@ pub fn run(
             Some((0, 0).into()),
         );
         output.set_preferred(output_mode);
-        runtime.state.space.map_output(&output, (0, 0));
 
         let mut compositor: DrmCompositor<
             GbmAllocator<DrmDeviceFd>,
@@ -663,6 +666,12 @@ pub fn run(
             }
         }
         log::info!("presenting at {w}x{h}, stereo: {on_glasses}");
+        // Clients are told how often the world is redrawn, but never how large it is: their
+        // screen is a window. Getting the rate right matters to anything that picks a frame
+        // cadence -- a player told 60 while the glasses run at 72 judders.
+        if let Some(m) = output.current_mode() {
+            runtime.state.set_screen_refresh(m.refresh);
+        }
 
         // --- scene setup ---
         let stereo = StereoConfig {
@@ -856,9 +865,14 @@ pub fn run(
                         //
                         // It used to move focus between windows instead, which meant an
                         // application that wants arrow keys -- a media centre, a file list,
-                        // anything driven from a sofa -- could not be driven at all. Cycling
-                        // windows moved to the bumpers, which is where every tabbed thing
-                        // puts "previous" and "next" anyway, and the D-pad now types.
+                        // anything driven from a sofa -- could not be driven at all.
+                        //
+                        // Cycling windows went to the shoulder bumpers for a while, which is
+                        // where every tabbed thing puts "previous" and "next". They have since
+                        // been given back: the shoulders are two of the buttons a game wants
+                        // most, and stepping blind through a ring of windows meant looking at
+                        // each one to find out where you were. Both problems are the window
+                        // switcher's now -- a paddle, and a list you can read.
                         //
                         // This is the small version of something bigger: eventually every
                         // control should be remappable per application and forwarded without
@@ -866,27 +880,6 @@ pub fn run(
                         // the fixed mapping that makes the common case work today, kept in
                         // one table so that replacing it is replacing one table.
                         if !shell.menu_is_open() {
-                            let step = match control {
-                                spatiand_input::Control::L1 => -1i32,
-                                spatiand_input::Control::R1 => 1,
-                                _ => 0,
-                            };
-                            if step != 0 {
-                                let all: Vec<smithay::desktop::Window> =
-                                    runtime.state.space.elements().cloned().collect();
-                                if !all.is_empty() {
-                                    let current = all
-                                        .iter()
-                                        .position(|w| runtime.state.layout.is_focused(w))
-                                        .unwrap_or(0)
-                                        as i32;
-                                    let next =
-                                        (current + step).rem_euclid(all.len() as i32) as usize;
-                                    let window = all[next].clone();
-                                    runtime.state.focus_window(&window);
-                                }
-                                continue;
-                            }
                             // Pressed here and released below, so a held direction repeats in
                             // the application exactly as a held arrow key does -- scrolling a
                             // long list is one press, not forty.
@@ -897,6 +890,13 @@ pub fn run(
                             }
                         }
                         if let Some(intent) = intent_for(*control) {
+                            // The switcher's list is stale the moment anything is launched or
+                            // closed, so it is rebuilt on the way in rather than kept up to
+                            // date. This is also what lets the shell decline to open with
+                            // nothing open.
+                            if intent == spatiand_shell::Intent::ToggleSwitcher {
+                                shell.set_windows(runtime.state.open_windows());
+                            }
                             if let Some(event) = shell.handle(intent) {
                                 shell_events.push(event);
                             }
@@ -976,6 +976,29 @@ pub fn run(
                         sky_image = environments.current();
                         sky_dirty = true;
                     }
+                    // Switching to a window brings it to you rather than turning you to it.
+                    // A 3DoF room has no way to move the wearer, and the alternative -- "your
+                    // window is over there somewhere" -- is the problem the switcher exists to
+                    // solve.
+                    ShellEvent::FocusWindow(id) => {
+                        let window = runtime
+                            .state
+                            .space
+                            .elements()
+                            .find(|w| runtime.state.layout.id_of(w) == Some(id))
+                            .cloned();
+                        if let Some(window) = window {
+                            let yaw = tracker.euler_degrees().yaw.to_radians();
+                            if let Some(mut placement) = runtime.state.layout.get(&window) {
+                                // Size and distance are the wearer's choices and are left
+                                // alone. Only where it sits changes.
+                                placement.yaw = yaw;
+                                placement.pitch = 0.0;
+                                runtime.state.layout.set(&window, placement);
+                            }
+                            runtime.state.focus_window(&window);
+                        }
+                    }
                     ShellEvent::Hud(action) => match action {
                         HudAction::Recentre => {
                             tracker.recenter();
@@ -993,6 +1016,11 @@ pub fn run(
                             shell.set_environments(environments.entries(), environments.choice());
                         }
                         HudAction::Screenshot => screenshot = true,
+                        // The shell has already switched mode; all that is owed is the list,
+                        // exactly as for the environment picker.
+                        HudAction::OpenSwitcher => {
+                            shell.set_windows(runtime.state.open_windows())
+                        }
                         HudAction::ToggleKeyboard => {
                             keyboard.open = !keyboard.open;
                             log::info!(
@@ -1272,10 +1300,7 @@ pub fn run(
             // Import client buffers before the draw closure takes the context.
             let mut windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
             for quad in windows.iter_mut() {
-                let title = runtime
-                    .state
-                    .title_of(&quad.window)
-                    .unwrap_or_else(|| "Untitled".to_string());
+                let title = runtime.state.display_title(&quad.window);
                 quad.title = scene.title_texture(&mut renderer, &mut text, &title, ppd);
                 if let Some(app_id) = runtime.state.app_id_of(&quad.window) {
                     quad.icon = scene.window_icon(&mut renderer, &app_id);
@@ -2407,9 +2432,12 @@ pub fn run(
                 last_report = std::time::Instant::now();
             }
 
+            // Frame callbacks go out against the output the client believes it is on, which
+            // is the only one it has ever been told about.
+            let screen = runtime.state.screen.clone();
             runtime.state.space.elements().for_each(|window| {
-                window.send_frame(&output, Duration::ZERO, Some(Duration::ZERO), |_, _| {
-                    Some(output.clone())
+                window.send_frame(&screen, Duration::ZERO, Some(Duration::ZERO), |_, _| {
+                    Some(screen.clone())
                 })
             });
             runtime.state.space.refresh();
@@ -2422,12 +2450,9 @@ pub fn run(
             break;
         }
         // Fell out of the frame loop without quitting: the display situation changed, so
-        // go round and rebuild against whatever is there now. The old output has to stop being
-        // advertised on the way, or clients accumulate displays that no longer show anything.
-        runtime.state.space.unmap_output(&output);
-        runtime
-            .display_handle
-            .remove_global::<Spatiand>(output_global);
+        // go round and rebuild against whatever is there now. Nothing to withdraw from
+        // clients -- what they were told about is `state.screen`, which does not change when
+        // the hardware does.
     }
 
     if let Some(x) = hmd.as_mut() {

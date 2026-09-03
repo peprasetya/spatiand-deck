@@ -42,10 +42,19 @@ uniform vec4 u_tint;
 // Left/right halves of a side-by-side source, so one texture can feed both eyes with
 // different content. (0,1) means "use the whole thing", which is the mono case.
 uniform vec2 u_uv_range;
+// 1.0 to ignore whatever is in the texture's alpha channel.
+//
+// Needed because a buffer can carry an alpha channel that means nothing. An XRGB buffer --
+// which is what XWayland hands over for an ordinary X11 window, and what a good many Wayland
+// clients post too -- has eight bits where alpha would be and no obligation to put anything
+// sensible in them. Blending against those bits is why a video played in VLC was audible,
+// present, and completely see-through: its alpha bytes were zero.
+uniform float u_opaque;
 out vec4 f_color;
 void main() {
     vec2 uv = vec2(u_uv_range.x + v_uv.x * (u_uv_range.y - u_uv_range.x), v_uv.y);
     f_color = texture(u_tex, uv) * u_tint;
+    f_color.a = mix(f_color.a, u_tint.a, u_opaque);
 }
 "#;
 
@@ -336,6 +345,7 @@ pub struct QuadPipeline {
     loc_tex: i32,
     loc_tint: i32,
     loc_uv_range: i32,
+    loc_opaque: i32,
 }
 
 impl QuadPipeline {
@@ -356,6 +366,7 @@ impl QuadPipeline {
             loc_tex: gl.GetUniformLocation(program, name("u_tex").as_ptr()),
             loc_tint: gl.GetUniformLocation(program, name("u_tint").as_ptr()),
             loc_uv_range: gl.GetUniformLocation(program, name("u_uv_range").as_ptr()),
+            loc_opaque: gl.GetUniformLocation(program, name("u_opaque").as_ptr()),
         })
     }
 
@@ -371,6 +382,37 @@ impl QuadPipeline {
         tint: [f32; 4],
         uv_range: (f32, f32),
     ) {
+        self.draw_inner(gl, texture, mvp, tint, uv_range, 0.0);
+    }
+
+    /// The same, ignoring whatever the texture's alpha channel says.
+    ///
+    /// For anything whose buffer has no real alpha -- see `u_opaque`. Separate from `draw`
+    /// rather than an argument to it because it is the rare case and there are two dozen call
+    /// sites that want the ordinary one.
+    ///
+    /// # Safety
+    /// Must be called with the GL context current, i.e. inside `with_context`.
+    pub unsafe fn draw_opaque(
+        &self,
+        gl: &ffi::Gles2,
+        texture: u32,
+        mvp: &Mat4,
+        tint: [f32; 4],
+        uv_range: (f32, f32),
+    ) {
+        self.draw_inner(gl, texture, mvp, tint, uv_range, 1.0);
+    }
+
+    unsafe fn draw_inner(
+        &self,
+        gl: &ffi::Gles2,
+        texture: u32,
+        mvp: &Mat4,
+        tint: [f32; 4],
+        uv_range: (f32, f32),
+        opaque: f32,
+    ) {
         gl.UseProgram(self.program);
         gl.BindVertexArray(self.quad.vao);
 
@@ -384,6 +426,7 @@ impl QuadPipeline {
         gl.UniformMatrix4fv(self.loc_mvp, 1, ffi::FALSE, mvp.to_cols_array().as_ptr());
         gl.Uniform4f(self.loc_tint, tint[0], tint[1], tint[2], tint[3]);
         gl.Uniform2f(self.loc_uv_range, uv_range.0, uv_range.1);
+        gl.Uniform1f(self.loc_opaque, opaque);
 
         gl.DrawArrays(ffi::TRIANGLES, 0, 6);
         gl.BindVertexArray(0);
