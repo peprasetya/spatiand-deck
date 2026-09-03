@@ -11,6 +11,9 @@
 //! find out where you are. A list you can read before committing is strictly better, and it
 //! gives the buttons back.
 //!
+//! It is reached from the HUD and from no button at all, which is the same argument carried to
+//! its conclusion: every control this session claims is one an application cannot have.
+//!
 //! What it does *not* do is move focus as the highlight moves. Focusing a window here also
 //! brings it to the centre of the view, and doing that to every window you pass through on the
 //! way would rearrange the room to reach one window.

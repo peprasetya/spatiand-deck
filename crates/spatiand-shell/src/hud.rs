@@ -62,9 +62,9 @@ pub enum HudAction {
     Screenshot,
     /// Open the list of open windows.
     ///
-    /// Here as well as on a back paddle because a paddle is a control nobody finds by
-    /// accident. The row is what makes the feature discoverable; the paddle is what makes it
-    /// worth using once you know.
+    /// The only way in, on purpose. It had a button for an afternoon -- a back paddle -- and
+    /// the argument that took it away is the one that freed the shoulders: a control this
+    /// session claims is a control a game cannot have, and there are only so many on a Deck.
     OpenSwitcher,
     /// Show or hide the on-screen keyboard.
     ToggleKeyboard,

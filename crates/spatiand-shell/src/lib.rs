@@ -46,11 +46,12 @@ pub enum Intent {
     ToggleHud,
     /// Toggle the launcher — the `⋯` button.
     ToggleLauncher,
-    /// Show the list of open windows — the left back paddle.
+    /// Show the list of open windows.
     ///
-    /// On a back paddle rather than a shoulder button because the shoulders belong to whatever
-    /// is running: a game needs them, and this session should not be the reason it cannot have
-    /// them. The paddles are the four controls nothing else on the device claims.
+    /// Deliberately bound to no button. Every control this session claims is one an
+    /// application or a game cannot have, and a switcher is not worth a button when it is one
+    /// row of the HUD away. The intent exists so that binding it later is a line in a table --
+    /// on a keyboard's Alt-Tab, say, where the key costs nobody anything.
     ToggleSwitcher,
 }
 

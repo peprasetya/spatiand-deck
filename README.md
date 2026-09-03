@@ -38,10 +38,10 @@ makes Kodi drop its chrome and fill the window instead of laying out for a
 framebuffer twice as wide as the world.
 
 **Input.** The Deck's trackpads are two pointers with laser beams. The D-pad
-types arrow keys into the focused window, A is enter, B is escape. The left back
-paddle opens a window switcher — pick a window and it comes to the centre of
-your view. The shoulder buttons are deliberately unbound, so they are there for
-games. A USB or
+types arrow keys into the focused window, A is enter, B is escape. A window switcher
+in the HUD brings any window to the centre of your view. The shoulder buttons
+and the four back paddles are deliberately bound to nothing, so they are there
+for applications and games. A USB or
 Bluetooth keyboard types; a mouse is a third pointer that fades when idle.
 
 **The panel** is a touch sidecar: volume, brightness, audio device, a second

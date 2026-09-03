@@ -28,14 +28,6 @@ pub fn intent_for(control: Control) -> Option<Intent> {
         Control::B => Intent::Back,
         Control::Steam => Intent::ToggleHud,
         Control::Quick => Intent::ToggleLauncher,
-        // The left back paddle, and deliberately not a shoulder button.
-        //
-        // Cycling windows used to live on L1/R1, which is where every tabbed thing puts
-        // "previous" and "next" -- and which is also two of the buttons a game needs most. The
-        // paddles are the four controls nothing else on this device claims, so the switcher
-        // sits there and the shoulders are given back. It is also in the HUD, because nobody
-        // discovers a paddle.
-        Control::L4 => Intent::ToggleSwitcher,
         // The right pad's click is the pointer's select, handled by the pointer rather than by
         // the menu state machine, so it is deliberately not an intent.
         _ => return None,
@@ -53,21 +45,26 @@ mod tests {
     }
 
     #[test]
-    fn the_shoulder_buttons_belong_to_whatever_is_running() {
-        // They used to step focus between windows, which cost a game the two buttons it wants
-        // most and made blind cycling the only way to reach a window. The switcher replaced
-        // it. This is the invariant that keeps them free: Spatiand binds them to nothing, in
-        // either direction -- no intent, and no key typed into the focused application either,
-        // so the coming per-application mapping has them to give away.
-        for control in [Control::L1, Control::R1] {
+    fn the_shoulders_and_the_paddles_belong_to_whatever_is_running() {
+        // Six buttons Spatiand does not touch, and the rule is worth stating as a rule: every
+        // control this session claims is one an application or a game cannot have.
+        //
+        // The shoulders used to step focus between windows and the switcher briefly lived on a
+        // paddle. Both were the same mistake at different sizes. Cycling windows is now
+        // reached from the HUD, where it costs no buttons at all, and these six are bound to
+        // nothing in either direction -- no intent, and no key typed into the focused
+        // application either -- so the coming per-application mapping has them to give away.
+        for control in [
+            Control::L1,
+            Control::R1,
+            Control::L4,
+            Control::R4,
+            Control::L5,
+            Control::R5,
+        ] {
             assert_eq!(intent_for(control), None, "{control:?} is claimed again");
             assert_eq!(key_for(control), None, "{control:?} types something");
         }
-    }
-
-    #[test]
-    fn the_switcher_is_on_a_paddle() {
-        assert_eq!(intent_for(Control::L4), Some(Intent::ToggleSwitcher));
     }
 
     #[test]
@@ -207,17 +204,14 @@ mod key_tests {
 
     #[test]
     fn the_way_out_of_the_session_is_never_typed_into_an_application() {
-        // STEAM and the QAM button open the shell's own surfaces, and a back paddle opens
-        // the window switcher. If any of them also typed, a full-screen application could
-        // take the only way out of itself.
-        for control in [
-            Control::Steam,
-            Control::Quick,
-            Control::L4,
-            Control::R4,
-            Control::L5,
-            Control::R5,
-        ] {
+        // STEAM and the QAM button open the shell's own surfaces. If either of them also
+        // typed, a full-screen application could take the only way out of itself.
+        //
+        // The back paddles were once on this list, as the reserved escape from a running
+        // game. They are not reserved for anything now -- see the shoulders-and-paddles test
+        // -- and the escape from a game will have to be the STEAM button, which is the one
+        // control this session cannot give away.
+        for control in [Control::Steam, Control::Quick] {
             assert_eq!(key_for(control), None, "{control:?} would be typed");
         }
     }
