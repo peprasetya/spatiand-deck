@@ -242,6 +242,10 @@ pub fn run(
     // attached to seat0, which is what makes that possible — a device on no seat cannot be
     // taken this way, however permissive its mode bits.
     let mut touchscreen = open_touchscreen(&mut session.clone());
+    // Anything a person has plugged in or paired: a keyboard, a mouse, a keyboard with a
+    // trackpad on it. Until this existed none of them did anything -- one would pair, report
+    // itself connected, and type into nothing.
+    let mut desk = crate::desk::Desk::new(&session);
     let backlight = crate::system::Backlight::find();
     // What the sidecar shows and changes. Read here once so the panel has something to draw
     // before the first two-second poll comes round; the glasses filled in when one is opened.
@@ -1253,6 +1257,24 @@ pub fn run(
                 }
             }
 
+            // A keyboard and a mouse, if there are any.
+            //
+            // Keys go straight to whatever has focus, exactly as the on-screen keyboard's do.
+            // Mouse buttons and the wheel are held for the pointer section below, which is
+            // where every other cursor is dealt with and where the ray has been built.
+            let mut mouse_events = Vec::new();
+            if let Some(d) = desk.as_mut() {
+                for event in d.poll() {
+                    match event {
+                        crate::desk::DeskEvent::Key { code, pressed } => {
+                            let now = started.elapsed().as_millis() as u32;
+                            send_key_state(&mut runtime.state, code, pressed, now);
+                        }
+                        other => mouse_events.push(other),
+                    }
+                }
+            }
+
             // Windows that have come and gone since the last frame. Collected by the Wayland
             // handlers, which have no business reaching into an audio engine, and drained
             // here where the engine lives.
@@ -1303,6 +1325,16 @@ pub fn run(
             };
             let right_aim = pads.as_ref().and_then(|p| aim_of(&p.right_pad));
             let left_aim = pads.as_ref().and_then(|p| aim_of(&p.left_pad));
+            // The mouse aims the same way a thumb does: a position from -1 to 1, through the
+            // head's orientation. It keeps its own position because a mouse only ever says how
+            // far it has moved.
+            let mouse_cursor = desk.as_ref().and_then(|d| d.cursor());
+            let mouse_aim = mouse_cursor.map(|(x, y, _)| {
+                pointer::aim(
+                    ray_from_pad(x, y, orientation, origin, &pointer_config),
+                    &windows,
+                )
+            });
 
             // Light the close button whichever hand is over it. Either pad can press it, so
             // lighting only the one under the dominant hand would leave the other pressing a
@@ -1436,10 +1468,15 @@ pub fn run(
                             // thing being aimed was the right one. The right pad owns the
                             // cursor whenever it is touched; the left pad only inherits it
                             // when the right thumb is off the pad entirely.
-                            let cursor_aim = match (right_aim.as_ref(), left_aim.as_ref()) {
-                                (Some(right), _) => Some(right),
-                                (None, left) => left,
-                            };
+                            // A mouse that is being used wins, because somebody with a hand on
+                            // one is not also aiming a thumb; when it has faded it has no aim
+                            // at all and the pads have it back.
+                            let cursor_aim =
+                                match (mouse_aim.as_ref(), right_aim.as_ref(), left_aim.as_ref()) {
+                                    (Some(mouse), _, _) => Some(mouse),
+                                    (None, Some(right), _) => Some(right),
+                                    (None, None, left) => left,
+                                };
                             if let Some(a) = cursor_aim {
                                 pointers.motion(&mut runtime.state, a, &windows, time_ms);
                             }
@@ -1464,6 +1501,30 @@ pub fn run(
                                     spatiand_input::Scroll::Idle => {}
                                 }
                             }
+                        }
+                    }
+                }
+
+                // What the mouse's own buttons and wheel did. Aimed wherever its cursor is, which
+                // is the only pointer it can be talking about.
+                if let Some(aim) = mouse_aim.as_ref() {
+                    for event in &mouse_events {
+                        match *event {
+                            crate::desk::DeskEvent::Button { code, pressed } => {
+                                if pressed {
+                                    pointers.motion(&mut runtime.state, aim, &windows, time_ms);
+                                    if let Some(quad) = aim.hit.and_then(|(i, _)| windows.get(i)) {
+                                        runtime.state.focus_window(&quad.window);
+                                    }
+                                }
+                                pointers.button(&mut runtime.state, code, pressed, time_ms);
+                            }
+                            crate::desk::DeskEvent::Scroll { dx, dy } => {
+                                // A wheel notch is about fifteen units to a client, and libinput
+                                // reports it in the same terms, so this is passed on as it comes.
+                                pointers.scroll(&mut runtime.state, dx, dy, time_ms);
+                            }
+                            crate::desk::DeskEvent::Key { .. } => {}
                         }
                     }
                 }
@@ -1947,12 +2008,34 @@ pub fn run(
                         // the left beam then removes the pointer you are working with.
                         let right_owns =
                             pads.as_ref().map(|p| p.right_pad.clicked).unwrap_or(false);
-                        for (aim, right_hand, on_keys) in [
-                            (right_aim.as_ref(), true, keyboard_reach[0]),
-                            (left_aim.as_ref(), false, keyboard_reach[1]),
+                        for (aim, aimed_by, on_keys, fade) in [
+                            (
+                                right_aim.as_ref(),
+                                crate::scene::Pointing::RightThumb,
+                                keyboard_reach[0],
+                                1.0,
+                            ),
+                            (
+                                left_aim.as_ref(),
+                                crate::scene::Pointing::LeftThumb,
+                                keyboard_reach[1],
+                                1.0,
+                            ),
+                            // Last, and fading: a mouse nobody has touched for a while should
+                            // stop covering what is behind it.
+                            (
+                                mouse_aim.as_ref(),
+                                crate::scene::Pointing::Mouse,
+                                None,
+                                mouse_cursor.map(|c| c.2).unwrap_or(0.0),
+                            ),
                         ] {
                             let Some(a) = aim else { continue };
-                            if !right_hand && right_owns && !pointers.is_dragging() {
+                            let right_hand = aimed_by == crate::scene::Pointing::RightThumb;
+                            if aimed_by == crate::scene::Pointing::LeftThumb
+                                && right_owns
+                                && !pointers.is_dragging()
+                            {
                                 continue;
                             }
                             let cursor = match (right_hand, dragging_edge, a.zone) {
@@ -1966,8 +2049,9 @@ pub fn run(
                                 orientation,
                                 &a.ray,
                                 nearer(a.hit.map(|(_, h)| h), on_keys),
-                                right_hand,
+                                aimed_by,
                                 cursor,
+                                fade,
                             );
                         }
 

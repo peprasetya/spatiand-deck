@@ -258,6 +258,29 @@ const CARD_HEIGHT_FRACTION: f64 = 0.68;
 /// How far in front of the wearer a menu hangs, metres.
 const MENU_DISTANCE: f32 = 1.6;
 
+/// Which of the three pointers this is.
+///
+/// Two thumbs and a mouse. They have to be told apart at a glance — a two-handed gesture is
+/// impossible to aim otherwise — and colour reads more easily out of the corner of an eye than
+/// shape does. Warm for the right hand, cool for the left, and a pale green for the mouse,
+/// which is nobody's hand and should not look like one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pointing {
+    RightThumb,
+    LeftThumb,
+    Mouse,
+}
+
+impl Pointing {
+    fn hue(self) -> [f32; 3] {
+        match self {
+            Pointing::RightThumb => [1.0, 0.78, 0.42],
+            Pointing::LeftThumb => [0.52, 0.82, 1.0],
+            Pointing::Mouse => [0.62, 1.0, 0.72],
+        }
+    }
+}
+
 /// Textures and pipelines that live for the session.
 pub struct Scene {
     quads: QuadPipeline,
@@ -1812,8 +1835,9 @@ impl Scene {
         eye: &Eye,
         ray: &Ray,
         hit: Option<Hit>,
-        right_hand: bool,
+        aimed_by: Pointing,
         cursor: Cursor,
+        fade: f32,
     ) {
         // With nothing under the pointer, park the reticle at a fixed distance so it is still
         // visible. A cursor that vanishes whenever it leaves a window is impossible to aim.
@@ -1851,22 +1875,15 @@ impl Scene {
             point.extend(1.0),
         );
 
-        // Two pads means two cursors, and they have to be told apart at a glance -- otherwise
-        // a two-handed gesture is impossible to aim. Warm for the right hand, cool for the
-        // left, which is easier to read peripherally than two shapes would be.
-        let hue = if right_hand {
-            [1.0, 0.78, 0.42]
-        } else {
-            [0.52, 0.82, 1.0]
-        };
-        let alpha = if hit.is_some() { 0.95 } else { 0.5 };
+        let hue = aimed_by.hue();
+        let alpha = if hit.is_some() { 0.95 } else { 0.5 } * fade;
         let tint = [hue[0], hue[1], hue[2], alpha];
         self.quads.draw(
             gl,
             match cursor {
                 Cursor::Resize { .. } => self.resize_cursor,
-                Cursor::Point if right_hand => self.reticle,
-                Cursor::Point => self.reticle_left,
+                Cursor::Point if aimed_by == Pointing::LeftThumb => self.reticle_left,
+                Cursor::Point => self.reticle,
             },
             &(eye.view_projection() * model),
             tint,
@@ -1885,25 +1902,30 @@ impl Scene {
         orientation: glam::DQuat,
         ray: &Ray,
         hit: Option<Hit>,
-        right_hand: bool,
+        aimed_by: Pointing,
         cursor: Cursor,
+        fade: f32,
     ) {
-        let distance = hit.map(|h| h.distance as f32).unwrap_or(2.5);
-        let point = (ray.origin + ray.direction * distance as f64).as_vec3();
-        let hue = if right_hand {
-            [1.0, 0.78, 0.42]
-        } else {
-            [0.52, 0.82, 1.0]
-        };
-        let alpha = if hit.is_some() { 0.55 } else { 0.28 };
-        self.draw_beam(
-            gl,
-            eye,
-            Self::hand_anchor(orientation, right_hand),
-            point,
-            [hue[0], hue[1], hue[2], alpha],
-        );
-        self.draw_pointer(gl, eye, ray, hit, right_hand, cursor);
+        // A beam comes from a hand. A mouse is on a table and has none, and drawing one from
+        // the middle of the wearer's chest to their cursor looks like a fault rather than a
+        // pointer -- so the mouse gets the reticle and nothing else.
+        if let Some(anchor) = Self::pointer_anchor(orientation, aimed_by) {
+            let distance = hit.map(|h| h.distance as f32).unwrap_or(2.5);
+            let point = (ray.origin + ray.direction * distance as f64).as_vec3();
+            let hue = aimed_by.hue();
+            let alpha = if hit.is_some() { 0.55 } else { 0.28 } * fade;
+            self.draw_beam(gl, eye, anchor, point, [hue[0], hue[1], hue[2], alpha]);
+        }
+        self.draw_pointer(gl, eye, ray, hit, aimed_by, cursor, fade);
+    }
+
+    /// Where a pointer's beam starts, or `None` for one that has no hand behind it.
+    fn pointer_anchor(orientation: glam::DQuat, aimed_by: Pointing) -> Option<Vec3> {
+        match aimed_by {
+            Pointing::RightThumb => Some(Self::hand_anchor(orientation, true)),
+            Pointing::LeftThumb => Some(Self::hand_anchor(orientation, false)),
+            Pointing::Mouse => None,
+        }
     }
 
     /// Draw a beam between two points, turned to face the eye.
@@ -2456,10 +2478,18 @@ pub fn collect_windows(
     let mut out = Vec::new();
     let windows: Vec<smithay::desktop::Window> = state.space.elements().cloned().collect();
     for window in windows {
-        let Some(toplevel) = window.toplevel() else {
+        // Whichever protocol the window speaks. An X11 window has no xdg toplevel, and asking
+        // only for one silently skipped every X11 window: they launched, appeared in the
+        // window count, took a place in the room, and were never drawn. `WaylandFocus` is the
+        // accessor that does not care -- XWayland gives each of its windows a wl_surface like
+        // anything else, which is the whole reason the rest of the compositor can ignore the
+        // difference.
+        use smithay::wayland::seat::WaylandFocus;
+        let Some(surface) = window.wl_surface().map(|s| s.into_owned()) else {
+            // An X11 window whose surface has not been associated yet. It arrives a moment
+            // later, and the next frame will draw it.
             continue;
         };
-        let surface = toplevel.wl_surface().clone();
         if let Err(e) = import_surface_tree(renderer, &surface) {
             log::debug!("could not import a surface: {e}");
             continue;
