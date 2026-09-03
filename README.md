@@ -18,18 +18,30 @@ an honest account of which parts do what.
 real Wayland clients as windows you can point at, move, resize and close. A 360°
 environment behind them. A launcher, a HUD, and a virtual keyboard.
 
-**X11 applications**, through XWayland — which matters more than it sounds,
-because a great many programs have no Wayland support and never will. VLC is the
-one this was built for.
+**X11 applications run**, through XWayland — VLC, Kodi, Firefox — which matters
+because a great many programs have no Wayland support and never will. They are
+**not supported**: X11's model of menus and screen positions does not survive
+being put in a room, every X11 window says so on its title bar, and
+[docs/x11.md](docs/x11.md) says exactly what breaks.
 
 **Spatial audio.** Each window gets its own audio sink; its channels are placed
 around you and rendered to two ears through a measured head-related transfer
-function. Turn towards a window and its sound turns with you. A 5.1 or 7.1 mix
-keeps its shape: the front channels follow the picture, the surrounds swing
-round behind you. Windows that make a sound grow a speaker on their title bar.
+function. Turn towards a window and its sound turns with you. Mono through
+7.1.4 keeps its shape: the front channels sit on the window's own edges wherever
+you put it, the surrounds swing round behind you. Windows that make a sound grow
+a speaker on their title bar.
+
+**No fullscreen, and applications are told so.** The one output a client can see
+reports the size of a *window*, so a player sizes itself for what it was
+actually given. Asking for fullscreen is granted at that size, which is what
+makes Kodi drop its chrome and fill the window instead of laying out for a
+framebuffer twice as wide as the world.
 
 **Input.** The Deck's trackpads are two pointers with laser beams. The D-pad
-types arrow keys into the focused window, A is enter, B is escape. A USB or
+types arrow keys into the focused window, A is enter, B is escape. The left back
+paddle opens a window switcher — pick a window and it comes to the centre of
+your view. The shoulder buttons are deliberately unbound, so they are there for
+games. A USB or
 Bluetooth keyboard types; a mouse is a third pointer that fades when idle.
 
 **The panel** is a touch sidecar: volume, brightness, audio device, a second
@@ -41,8 +53,12 @@ Listed because finding out by hitting them is worse.
 
   * **Two-handed window gestures.** The geometry is written and tested; nothing
     consumes it, so moving and scaling with both thumbs does nothing.
-  * **Fullscreen.** There is no fullscreen mode. Applications that expect one —
-    Kodi, most players — lay out for the wrong size until told otherwise.
+  * **Stereoscopic windows.** A 3D film in a window is drawn to both eyes
+    identically. The renderer can already sample half a buffer per eye; the
+    protocol for an application to ask for it is specified in
+    [docs/apps.md](docs/apps.md) and not built.
+  * **VR video.** The environment can be 180° or 360°, mono or stereo, but only
+    from an image file. An application cannot yet be the source.
   * **Games.** The plan reserves a virtual gamepad and an escape gesture for
     this. Neither is built. A game will run and be unplayable.
   * **Per-application input mapping.** The controller mapping is one fixed
@@ -122,8 +138,16 @@ on purpose — it is shown precisely when there is no headset to ask.
 | `spatiand-proto` | private Wayland protocols (scaffolded) |
 | `spatiand` | the compositor itself |
 
-`docs/xreal-air.md` is a protocol reference for the glasses, verified against
-hardware. It is probably the most reusable thing here.
+## Documentation
+
+| | |
+|---|---|
+| [docs/apps.md](docs/apps.md) | Writing an application for Spatiand: window sizing, audio layouts, and the stereo and immersive-video protocols as they are specified so far |
+| [docs/x11.md](docs/x11.md) | Why X11 runs and is not supported |
+| [docs/install.md](docs/install.md) | Installing a release, and what to check when it goes wrong |
+| [docs/xreal-air.md](docs/xreal-air.md) | The glasses' protocol, verified against hardware. Probably the most reusable thing here |
+| [docs/steam-deck-controller.md](docs/steam-deck-controller.md) | The controller's HID reports |
+| [docs/state.md](docs/state.md) | Where the session keeps things |
 
 ## Licence
 

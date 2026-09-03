@@ -204,6 +204,7 @@ fn layout_code(layout: Layout) -> u32 {
         Layout::Surround51 => 3,
         Layout::Surround71 => 4,
         Layout::Surround714 => 5,
+        Layout::Surround514 => 6,
     }
 }
 
@@ -214,6 +215,7 @@ fn layout_from_code(code: u32) -> Option<Layout> {
         3 => Layout::Surround51,
         4 => Layout::Surround71,
         5 => Layout::Surround714,
+        6 => Layout::Surround514,
         _ => return None,
     })
 }

@@ -74,6 +74,11 @@ pub enum Layout {
     Surround51,
     /// 3 front, 2 side, 2 rear, LFE.
     Surround71,
+    /// 5.1 with four height channels. What a Dolby Atmos or DTS:X track most often becomes on
+    /// a machine whose renderer is asked for heights but not for side speakers -- and what a
+    /// media player is most likely to send here, since the alternative asks the wearer's
+    /// headphones to be a twelve-speaker room.
+    Surround514,
     /// 7.1 with four height channels — what a decoded Atmos track becomes once something has
     /// turned its objects into speakers.
     Surround714,
@@ -96,6 +101,18 @@ impl Layout {
                 RearRight,
                 SideLeft,
                 SideRight,
+            ],
+            Layout::Surround514 => &[
+                FrontLeft,
+                FrontRight,
+                FrontCentre,
+                Lfe,
+                RearLeft,
+                RearRight,
+                TopFrontLeft,
+                TopFrontRight,
+                TopRearLeft,
+                TopRearRight,
             ],
             Layout::Surround714 => &[
                 FrontLeft,
@@ -130,6 +147,7 @@ impl Layout {
             2 => Some(Layout::Stereo),
             6 => Some(Layout::Surround51),
             8 => Some(Layout::Surround71),
+            10 => Some(Layout::Surround514),
             12 => Some(Layout::Surround714),
             _ => None,
         }
@@ -327,6 +345,7 @@ mod tests {
             Layout::Stereo,
             Layout::Surround51,
             Layout::Surround71,
+            Layout::Surround514,
             Layout::Surround714,
         ] {
             assert_eq!(layout.count(), layout.channels().len());

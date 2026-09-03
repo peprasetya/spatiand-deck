@@ -341,6 +341,7 @@ impl Binaural {
             Layout::Stereo,
             Layout::Surround51,
             Layout::Surround71,
+            Layout::Surround514,
             Layout::Surround714,
         ]
         .into_iter()
