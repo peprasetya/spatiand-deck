@@ -2578,7 +2578,17 @@ pub fn collect_windows(
             .flatten();
             let Some((texture, pw, ph, opaque)) = imported else {
                 if note_once(4, &popup_surface) {
-                    log::info!("a menu is open but has committed nothing to draw yet");
+                    // Whether there is a buffer at all separates the two very different
+                    // reasons this happens: a client that has not painted yet, and a buffer
+                    // we failed to make a texture from.
+                    let buffered = with_renderer_surface_state(&popup_surface, |st| {
+                        st.buffer_size().is_some()
+                    })
+                    .unwrap_or(false);
+                    log::info!(
+                        "a menu is open but has nothing to draw yet (buffer: {})",
+                        if buffered { "yes" } else { "none" }
+                    );
                 }
                 continue;
             };

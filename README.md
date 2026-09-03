@@ -111,6 +111,18 @@ And a running session will take a picture of itself:
 
     kill -USR1 $(pgrep -x spatiand)
 
+The snapshot backend can also *click*, which is the only way to open a real
+application's menu without wearing anything:
+
+    SPATIAND_BACKEND=snapshot SPATIAND_CLIENT=dolphin \
+      SPATIAND_CLICK=0.09,0.03 SPATIAND_SNAPSHOT=/tmp/menu.png spatiand
+
+`tools/popup-probe.c` is a ninety-line Wayland client that opens a window and a
+menu and nothing else. It exists because menus were broken for a reason no
+amount of reading found, and because the first version of it — which painted at
+the first configure, like no real toolkit does — worked perfectly and proved
+nothing.
+
 ## How it is put together
 
 Nine crates. The three that touch hardware — `spatiand-hmd`, `spatiand-input`,

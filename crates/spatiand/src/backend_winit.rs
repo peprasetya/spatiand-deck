@@ -546,11 +546,7 @@ pub fn run(
         backend.submit(Some(&[Rectangle::from_size(size)]))?;
 
         let screen = runtime.state.screen.clone();
-        runtime.state.space.elements().for_each(|window| {
-            window.send_frame(&screen, Duration::ZERO, Some(Duration::ZERO), |_, _| {
-                Some(screen.clone())
-            })
-        });
+        runtime.state.send_frames(&screen, Duration::ZERO);
         runtime.state.space.refresh();
         display.dispatch_clients(&mut runtime.state)?;
         display.flush_clients()?;

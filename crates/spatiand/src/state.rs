@@ -325,6 +325,41 @@ impl Spatiand {
         }
     }
 
+    /// Tell every surface it may draw the next frame -- menus included.
+    ///
+    /// The menus are the point. A frame callback is how a toolkit is told "your last frame was
+    /// shown, paint the next one", and Qt will not paint a surface until it has had one.
+    /// Sending them only to windows meant a menu was created, configured, and then waited for
+    /// ever for permission to draw: the log said the client had asked for a menu and committed
+    /// nothing, and from inside the headset it looked exactly like a button that did nothing.
+    ///
+    /// A popup is a separate surface with its own callbacks, so a window's own `send_frame`
+    /// does not reach it -- it walks the window's subsurfaces and stops there. This is the
+    /// whole difference, and it took a client written by hand to find it: that one painted
+    /// immediately without waiting to be asked, which is why it worked and every real
+    /// application did not.
+    pub fn send_frames(&self, output: &Output, time: std::time::Duration) {
+        use smithay::desktop::utils::send_frames_surface_tree;
+        use smithay::wayland::seat::WaylandFocus;
+        for window in self.space.elements() {
+            window.send_frame(output, time, Some(std::time::Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
+            let Some(surface) = window.wl_surface() else {
+                continue;
+            };
+            for (popup, _) in smithay::desktop::PopupManager::popups_for_surface(&surface) {
+                send_frames_surface_tree(
+                    popup.wl_surface(),
+                    output,
+                    time,
+                    Some(std::time::Duration::ZERO),
+                    |_, _| Some(output.clone()),
+                );
+            }
+        }
+    }
+
     /// Every open window, for the switcher.
     ///
     /// Titles rather than handles: the shell has no window type and is not being given one.
@@ -676,12 +711,36 @@ impl XdgShellHandler for Spatiand {
         log::info!("a client asked to grab the input for its menu; not granted");
     }
 
+    /// "Put my menu somewhere else."
+    ///
+    /// Answering this is not optional, and not answering it is why no menu in any real
+    /// application ever appeared.
+    ///
+    /// Qt opens a menu in two steps: it creates the popup, and then immediately repositions it
+    /// once the widget knows its own size. The protocol says the compositor must reply with
+    /// `repositioned` carrying the client's token, followed by a configure -- and Qt will not
+    /// attach a buffer until it arrives. Doing nothing here left every menu created, correctly
+    /// configured, and then waiting for ever for permission to draw. From inside the headset
+    /// it looked exactly like a button that did nothing.
+    ///
+    /// It survived so long because a client written by hand to test popups does not do this:
+    /// it paints at the first configure and works perfectly, which is what made the popup path
+    /// look sound. The bug is only reachable through a toolkit -- which is to say through
+    /// every application anyone actually runs.
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        // Carries the token *and* the configure: smithay sends `repositioned` and then the
+        // same configure `send_configure` would have.
+        surface.send_repositioned(token);
+        log::info!("a menu asked to move; repositioned (token {token})");
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
@@ -842,12 +901,19 @@ impl Spatiand {
                     .get::<smithay::wayland::shell::xdg::XdgPopupSurfaceData>()
                     .and_then(|data| data.lock().ok().map(|d| d.initial_configure_sent))
             });
-            if sent == Some(false) {
-                // Cannot fail on a live surface with an unsent initial configure, but a client
-                // that raced its own destroy can still get here.
-                if let Err(e) = popup.send_configure() {
-                    log::debug!("could not configure a popup: {e}");
+            match sent {
+                Some(false) => {
+                    // Cannot fail on a live surface with an unsent initial configure, but a
+                    // client that raced its own destroy can still get here.
+                    match popup.send_configure() {
+                        Ok(serial) => log::info!("configured a menu (serial {serial:?})"),
+                        Err(e) => log::warn!("could not configure a menu: {e}"),
+                    }
                 }
+                Some(true) => log::debug!("a menu committed again"),
+                // No popup data on a surface the popup manager says is a popup. Worth a word:
+                // it would mean the configure never gets sent and the menu waits for ever.
+                None => log::warn!("a menu has no popup state to configure from"),
             }
             return;
         }

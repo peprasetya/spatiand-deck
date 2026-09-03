@@ -32,6 +32,12 @@
 //! USB with no display behind them. Both are states that need broken hardware to reach, which
 //! is exactly why they are worth being able to look at without it.
 //!
+//! `SPATIAND_CLICK=u,v` clicks the client's window at that fraction across it once it has
+//! painted, and `SPATIAND_CLICK_BUTTON=right` uses the other button. This is how a menu gets
+//! opened without a person: a menu is opened *by* a click, so a harness that cannot click can
+//! only photograph an application sitting there with no menu open, which proves nothing.
+//! `tools/popup-probe.c` is the matching minimal client.
+//!
 //! `SPATIAND_CLIENT` goes further and launches a real Wayland application into the snapshot:
 //! a full compositor runs, the client connects, commits a buffer, and the frame is rendered
 //! with that window in it. That is the only way to answer "what does an app actually look like
@@ -260,17 +266,10 @@ pub fn run(
                         log::info!("client mapped; letting it paint");
                         let settle = std::time::Instant::now() + std::time::Duration::from_secs(3);
                         while std::time::Instant::now() < settle {
-                            for window in runtime.state.space.elements() {
-                                // Frame callbacks are what tell a client it may draw the next
-                                // frame. Without them most toolkits paint once and stop.
-                                let screen = runtime.state.screen.clone();
-                                window.send_frame(
-                                    &screen,
-                                    std::time::Duration::ZERO,
-                                    Some(std::time::Duration::ZERO),
-                                    |_, _| Some(screen.clone()),
-                                );
-                            }
+                            // Frame callbacks are what tell a client it may draw the next
+                            // frame. Without them most toolkits paint once and stop.
+                            let screen = runtime.state.screen.clone();
+                            runtime.state.send_frames(&screen, std::time::Duration::ZERO);
                             runtime.state.space.refresh();
                             display.dispatch_clients(&mut runtime.state)?;
                             display.flush_clients()?;
@@ -278,6 +277,24 @@ pub fn run(
                                 .dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
                         }
                         windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+                        // A click, if one was asked for, and then time to answer it. A menu
+                        // is two round trips away: the client has to be told, create the
+                        // popup, hear its configure, and commit a buffer.
+                        if let Some(at) = requested_click() {
+                            click_on_the_window(&mut runtime.state, &windows, at);
+                            let answered =
+                                std::time::Instant::now() + std::time::Duration::from_secs(3);
+                            while std::time::Instant::now() < answered {
+                                let screen = runtime.state.screen.clone();
+                                runtime.state.send_frames(&screen, std::time::Duration::ZERO);
+                                runtime.state.space.refresh();
+                                display.dispatch_clients(&mut runtime.state)?;
+                                display.flush_clients()?;
+                                event_loop
+                                    .dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
+                            }
+                            windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+                        }
                         break;
                     }
                 }
@@ -640,4 +657,94 @@ fn draw_sidecar(
     image::save_buffer(out, &pixels, panel.0, panel.1, image::ColorType::Rgba8)?;
     log::info!("wrote {}", out.display());
     Ok(())
+}
+
+/// Where a synthetic click should land, as a fraction across the window.
+///
+/// `SPATIAND_CLICK=u,v`, both 0..1 -- so `0.5,0.5` is the middle of the client's surface and
+/// `0.06,0.09` is a toolbar button near the top left. `SPATIAND_CLICK_BUTTON=right` sends the
+/// other one.
+///
+/// This exists because of one bug, and it is worth saying which: menus in real applications
+/// did not appear, and the only way to reproduce it was to put the glasses on and click
+/// something. A menu is opened *by* a click, so a harness that cannot click cannot see the
+/// thing at all -- it can launch an application and photograph it sitting there with no menu
+/// open, which proves nothing. Pressing a real toolbar button and photographing what happens
+/// next is the difference between reading the code again and knowing.
+fn requested_click() -> Option<(f64, f64)> {
+    let raw = std::env::var("SPATIAND_CLICK").ok()?;
+    let (u, v) = raw.split_once(',')?;
+    let u: f64 = u.trim().parse().ok()?;
+    let v: f64 = v.trim().parse().ok()?;
+    Some((u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)))
+}
+
+/// Press and release a mouse button on the first window.
+///
+/// Deliberately *not* routed through the ray caster. There is no head, no pad and no aim here;
+/// what is being tested is what a client does when the pointer arrives, and going through the
+/// 3D pointer would be testing the ray maths instead. These are the same events it ends up
+/// sending: enter, motion in surface pixels, press, release.
+fn click_on_the_window(
+    state: &mut Spatiand,
+    windows: &[crate::scene::WindowQuad],
+    at: (f64, f64),
+) {
+    use smithay::input::pointer::{ButtonEvent, MotionEvent};
+    use smithay::utils::{Point, SERIAL_COUNTER};
+
+    let Some(window) = windows.first() else {
+        log::warn!("asked for a click with no window to click on");
+        return;
+    };
+    let button = match std::env::var("SPATIAND_CLICK_BUTTON").as_deref() {
+        Ok("right") => crate::pointer::BTN_RIGHT,
+        Ok("middle") => crate::pointer::BTN_MIDDLE,
+        _ => crate::pointer::BTN_LEFT,
+    };
+    let location = Point::from((at.0 * window.pixels.0 as f64, at.1 * window.pixels.1 as f64));
+    log::info!(
+        "clicking button {button:#x} at {:.0},{:.0} of {}x{}",
+        location.x,
+        location.y,
+        window.pixels.0,
+        window.pixels.1
+    );
+    let Some(pointer) = state.seat.get_pointer() else {
+        return;
+    };
+    let surface = window.surface.clone();
+    // Keyboard focus as well as pointer focus: several toolkits open a menu from the focused
+    // widget rather than from what is under the cursor.
+    let window = window.window.clone();
+    state.focus_window(&window);
+
+    // The second element is the surface's ORIGIN, not the position within it -- smithay sends
+    // the client `location - origin`. Our space is one surface at a time, so it is zero.
+    pointer.motion(
+        state,
+        Some((surface, Point::from((0.0, 0.0)))),
+        &MotionEvent {
+            location,
+            serial: SERIAL_COUNTER.next_serial(),
+            time: 100,
+        },
+    );
+    pointer.frame(state);
+    for (pressed, time) in [(true, 110u32), (false, 190u32)] {
+        pointer.button(
+            state,
+            &ButtonEvent {
+                button,
+                state: if pressed {
+                    smithay::backend::input::ButtonState::Pressed
+                } else {
+                    smithay::backend::input::ButtonState::Released
+                },
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        pointer.frame(state);
+    }
 }

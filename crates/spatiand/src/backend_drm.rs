@@ -2478,13 +2478,10 @@ pub fn run(
             }
 
             // Frame callbacks go out against the output the client believes it is on, which
-            // is the only one it has ever been told about.
+            // is the only one it has ever been told about. Menus get them too -- see
+            // `Spatiand::send_frames`.
             let screen = runtime.state.screen.clone();
-            runtime.state.space.elements().for_each(|window| {
-                window.send_frame(&screen, Duration::ZERO, Some(Duration::ZERO), |_, _| {
-                    Some(screen.clone())
-                })
-            });
+            runtime.state.send_frames(&screen, Duration::ZERO);
             runtime.state.space.refresh();
             display.dispatch_clients(&mut runtime.state)?;
             display.flush_clients()?;
