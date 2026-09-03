@@ -2491,7 +2491,16 @@ pub fn collect_windows(
             continue;
         };
         if let Err(e) = import_surface_tree(renderer, &surface) {
-            log::debug!("could not import a surface: {e}");
+            // Reported once per window rather than once per frame. A window that never draws
+            // is one of the hardest things to diagnose from the outside -- it runs, it counts,
+            // it takes a place in the room, and nothing says why it is not there -- so the
+            // reason is worth saying out loud the first time.
+            if note_import_failure(&surface) {
+                log::warn!(
+                    "a window has a surface but nothing to draw from it: {e} ({})",
+                    state.title_of(&window).unwrap_or_else(|| "untitled".into())
+                );
+            }
             continue;
         }
         let context = renderer.context_id();
@@ -2501,10 +2510,25 @@ pub fn collect_windows(
         })
         .flatten();
         let Some((texture, width, height)) = imported else {
-            // Mapped but nothing committed yet. Normal for the first frames after a launch.
+            // Mapped but nothing committed yet. Normal for the first frames after a launch --
+            // and not normal at all if it never stops, which is why it is said once.
+            if note_import_failure(&surface) {
+                log::info!(
+                    "a window has a surface but has committed nothing to draw yet ({})",
+                    state.title_of(&window).unwrap_or_else(|| "untitled".into())
+                );
+            }
             continue;
         };
         let Some(placement) = state.layout.get(&window) else {
+            // In the space but with nowhere to be. An X11 window adopted before its placement
+            // existed would sit here silently for the rest of the session.
+            if note_import_failure(&surface) {
+                log::warn!(
+                    "a window has no place in the room, so it is not drawn ({})",
+                    state.title_of(&window).unwrap_or_else(|| "untitled".into())
+                );
+            }
             continue;
         };
 
@@ -2562,6 +2586,22 @@ pub fn collect_windows(
         });
     }
     out
+}
+
+/// Say whether this surface's failure to draw is worth mentioning yet.
+///
+/// Once per surface, because the alternative is seventy-two identical lines a second and a log
+/// nobody can read.
+fn note_import_failure(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> bool {
+    use smithay::reexports::wayland_server::Resource;
+    thread_local! {
+        static TOLD: std::cell::RefCell<std::collections::HashSet<
+            smithay::reexports::wayland_server::backend::ObjectId,
+        >> = std::cell::RefCell::new(std::collections::HashSet::new());
+    }
+    TOLD.with(|told| told.borrow_mut().insert(surface.id()))
 }
 
 /// Remember a window's surface size, and say whether it has just changed.

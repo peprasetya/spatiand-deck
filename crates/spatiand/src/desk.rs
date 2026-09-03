@@ -69,9 +69,14 @@ impl Desk {
     ///
     /// `None` if libinput cannot be reached at all, which is a session with no keyboard rather
     /// than no session — so it is a warning and nothing more.
-    pub fn new(session: &LibSeatSession) -> Option<Desk> {
-        let mut context =
-            libinput::Libinput::new_with_udev(LibinputSessionInterface::from(session.clone()));
+    pub fn new(session: &LibSeatSession, reserved: Vec<std::path::PathBuf>) -> Option<Desk> {
+        for path in &reserved {
+            log::info!("libinput will not be offered {}", path.display());
+        }
+        let mut context = libinput::Libinput::new_with_udev(OnlyWhatWeDoNotRead {
+            session: LibinputSessionInterface::from(session.clone()),
+            reserved,
+        });
         if context.udev_assign_seat(&session.seat()).is_err() {
             log::warn!("no keyboard or mouse: this seat has no input devices we can open");
             return None;
@@ -186,6 +191,13 @@ fn ours(device: &LibinputDevice) -> bool {
 /// and libinput never adds the device at all.
 struct OnlyWhatWeDoNotRead {
     session: LibinputSessionInterface<LibSeatSession>,
+    /// Exact device nodes this session has already opened for itself.
+    ///
+    /// By path rather than by identity, because identity did not work: deriving a vendor and
+    /// product from the path through sysfs looked correct, matched nothing, and the only
+    /// symptom was a touchscreen that stopped responding. A path we are already holding is not
+    /// a guess about anything.
+    reserved: Vec<std::path::PathBuf>,
 }
 
 impl libinput::LibinputInterface for OnlyWhatWeDoNotRead {

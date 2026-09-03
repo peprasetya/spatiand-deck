@@ -241,11 +241,18 @@ pub fn run(
     // `root:input` with no ACL for the logged-in user, so only logind can hand it over. It is
     // attached to seat0, which is what makes that possible — a device on no seat cannot be
     // taken this way, however permissive its mode bits.
-    let mut touchscreen = open_touchscreen(&mut session.clone());
+    let (mut touchscreen, touchscreen_node) = match open_touchscreen(&mut session.clone()) {
+        Some((t, path)) => (Some(t), Some(path)),
+        None => (None, None),
+    };
     // Anything a person has plugged in or paired: a keyboard, a mouse, a keyboard with a
     // trackpad on it. Until this existed none of them did anything -- one would pair, report
     // itself connected, and type into nothing.
-    let mut desk = crate::desk::Desk::new(&session);
+    // The node we just took is named explicitly rather than recognised, because recognising
+    // it did not work: deriving a device's identity from its path through sysfs looked right
+    // and quietly matched nothing, so libinput opened the touchscreen anyway and the panel
+    // went dead. The path is a fact we already have.
+    let mut desk = crate::desk::Desk::new(&session, touchscreen_node.into_iter().collect());
     let backlight = crate::system::Backlight::find();
     // What the sidecar shows and changes. Read here once so the panel has something to draw
     // before the first two-second poll comes round; the glasses filled in when one is opened.
@@ -2532,7 +2539,9 @@ fn first_free_crtc(
 ///
 /// Failure is not fatal and barely worth a warning at error level: a Deck has a touchscreen,
 /// a desktop with glasses attached does not, and the sidecar is perfectly readable either way.
-fn open_touchscreen(session: &mut LibSeatSession) -> Option<spatiand_input::Touchscreen> {
+fn open_touchscreen(
+    session: &mut LibSeatSession,
+) -> Option<(spatiand_input::Touchscreen, std::path::PathBuf)> {
     let node = spatiand_input::touch::find_touchscreens()
         .into_iter()
         .next()?;
@@ -2548,7 +2557,7 @@ fn open_touchscreen(session: &mut LibSeatSession) -> Option<spatiand_input::Touc
         }
     };
     match spatiand_input::Touchscreen::from_fd(fd) {
-        Ok(t) => Some(t),
+        Ok(t) => Some((t, node.path.clone())),
         Err(e) => {
             log::warn!("touchscreen {} is unusable: {e}", node.path.display());
             None
