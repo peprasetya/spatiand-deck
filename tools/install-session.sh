@@ -21,6 +21,15 @@
 # and the compositor cannot take the display without running a separate seatd as root.
 set -euo pipefail
 
+# Bumped whenever the *content* of the session entry below changes.
+#
+# Written into the entry and read back by go-to-spatiand.sh, which used to re-register only
+# when the entry was missing -- so an entry that was present and out of date was left alone
+# forever. That is not hypothetical: DesktopNames gained KDE, without which no Flatpak file
+# chooser opens, and every machine that already had a session entry would have carried on
+# without it.
+ENTRY_REVISION=2
+
 if [[ $EUID -ne 0 ]]; then
     echo "!! Run this with sudo:  sudo $0" >&2
     exit 1
@@ -114,6 +123,7 @@ Comment=Spatiand — 3D spatial desktop for XR glasses
 Exec=$LAUNCHER
 Type=Application
 DesktopNames=Spatiand;KDE
+X-Spatiand-Revision=$ENTRY_REVISION
 EOF
 
 echo

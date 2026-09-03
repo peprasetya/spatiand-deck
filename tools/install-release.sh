@@ -62,6 +62,7 @@ Comment=Spatiand - 3D spatial desktop for XR glasses
 Exec=$LAUNCHER
 Type=Application
 DesktopNames=Spatiand;KDE
+X-Spatiand-Revision=2
 ENTRY
 if command -v steamos-readonly >/dev/null; then steamos-readonly enable || true; fi
 EOF

@@ -42,13 +42,26 @@ than this machine's ($(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$')):\n
 distrobox enter --name holo -- bash -c 'cd ~/spatiand && cargo build --release'"
 fi
 
-if [[ ! -f "$SESSION" || ! -x "$LAUNCHER" ]]; then
+# Missing, or merely out of date.
+#
+# "Missing" used to be the only case this looked for, which meant an entry that was present
+# and stale was left alone forever -- and a stale entry is not a theoretical worry: the one
+# before this gained KDE in DesktopNames, without which no Flatpak file chooser opens. The
+# revision is written into the entry by install-session.sh and read out of that same script
+# here, so there is one number and it lives with the thing it describes.
+want_revision=$(grep -oE '^ENTRY_REVISION=[0-9]+' "$REPO/tools/install-session.sh" |
+    head -1 | cut -d= -f2)
+have_revision=$(grep -oE '^X-Spatiand-Revision=[0-9]+' "$SESSION" 2>/dev/null |
+    head -1 | cut -d= -f2)
+if [[ ! -f "$SESSION" || ! -x "$LAUNCHER" ]] ||
+    [[ -n "$want_revision" && ${have_revision:-0} -lt $want_revision ]]; then
     if command -v kdialog >/dev/null; then
         kdialog --title "Spatiand" --msgbox \
-"Spatial mode needs to be re-registered.
+"Spatial mode needs to be registered.
 
-A SteamOS update replaces the system partition, which removes the session
-entry. Your settings, calibration and the app itself are untouched.
+Either a SteamOS update replaced the system partition, which removes the
+session entry, or this version of Spatiand needs a newer one. Your settings,
+calibration and the app itself are untouched.
 
 You will be asked for your password."
     fi
