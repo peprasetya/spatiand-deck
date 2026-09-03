@@ -87,10 +87,12 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn new(apps: Vec<AppEntry>, panels: DesktopPanels) -> Self {
+    /// `calibrated` says whether head tracking has ever been calibrated, which moves one row
+    /// in the HUD -- see [`Hud::with_calibration`].
+    pub fn new(apps: Vec<AppEntry>, panels: DesktopPanels, calibrated: bool) -> Self {
         Self {
             mode: Mode::World,
-            hud: Hud::new(panels),
+            hud: Hud::with_calibration(panels, calibrated),
             launcher: Launcher::new(apps),
             environments: EnvironmentPicker::default(),
             files: FileBrowser::default(),
@@ -269,6 +271,7 @@ mod tests {
         Shell::new(
             vec![app("alpha"), app("beta"), app("gamma")],
             DesktopPanels::ALL,
+            true,
         )
     }
 
@@ -371,7 +374,7 @@ mod tests {
 
     #[test]
     fn an_empty_launcher_cannot_launch_anything() {
-        let mut s = Shell::new(vec![], DesktopPanels::ALL);
+        let mut s = Shell::new(vec![], DesktopPanels::ALL, true);
         s.handle(Intent::ToggleLauncher);
         assert_eq!(s.handle(Intent::Accept), None);
         // And it must stay open rather than silently dropping you back into the world, which

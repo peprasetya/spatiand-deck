@@ -191,14 +191,14 @@ mod tests {
     }
 
     fn hud_shell() -> Shell {
-        let mut shell = Shell::new(Vec::new(), DesktopPanels::ALL);
+        let mut shell = Shell::new(Vec::new(), DesktopPanels::ALL, true);
         shell.handle(Intent::ToggleHud);
         shell
     }
 
     #[test]
     fn the_world_has_no_menu() {
-        assert!(model(&Shell::new(Vec::new(), DesktopPanels::ALL)).is_none());
+        assert!(model(&Shell::new(Vec::new(), DesktopPanels::ALL, true)).is_none());
     }
 
     #[test]

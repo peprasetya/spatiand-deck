@@ -139,22 +139,35 @@ impl Hud {
     /// Build the HUD. `panels` hides the entries that shell out to the desktop's own settings
     /// on a system that does not have them, rather than offering a row that does nothing.
     pub fn new(panels: DesktopPanels) -> Self {
-        let mut items = vec![
-            HudItem {
-                label: "Recentre",
-                detail: "Make where you are looking the new forward",
-                action: HudAction::Recentre,
-            },
-            HudItem {
-                label: "Calibrate head tracking",
-                detail: "Three short movements, about half a minute",
-                action: HudAction::Calibrate,
-            },
-            HudItem {
-                label: "Environment",
-                detail: "Choose what surrounds you, or add an image",
-                action: HudAction::OpenEnvironments,
-            },
+        Self::with_calibration(panels, true)
+    }
+
+    /// Build the HUD. `panels` hides the entries that shell out to the desktop's own settings
+    /// on a system that does not have them, rather than offering a row that does nothing.
+    ///
+    /// `calibrated` moves one row. Calibration is the second thing in the list on a session
+    /// that has never been calibrated, because until it has been the world tilts when you look
+    /// down and nothing else in here will fix that. Once it is done it is something you might
+    /// need once a year, so it drops to the bottom where it cannot be chosen by accident —
+    /// choosing it by accident costs half a minute of head movements and the calibration you
+    /// already had.
+    pub fn with_calibration(panels: DesktopPanels, calibrated: bool) -> Self {
+        let calibrate = HudItem {
+            label: "Calibrate head tracking",
+            detail: "Three short movements, about half a minute",
+            action: HudAction::Calibrate,
+        };
+        let mut items = vec![HudItem {
+            label: "Recentre",
+            detail: "Make where you are looking the new forward",
+            action: HudAction::Recentre,
+        }];
+        if !calibrated {
+            // Cloned rather than moved because the compiler cannot see that the two branches
+            // are exclusive; only one of them ever runs.
+            items.push(calibrate.clone());
+        }
+        items.extend([
             HudItem {
                 label: "Keyboard",
                 detail: "Show a keyboard you can point at and click",
@@ -165,7 +178,19 @@ impl Hud {
                 detail: "Saves what you are looking at to your Pictures folder",
                 action: HudAction::Screenshot,
             },
-        ];
+            HudItem {
+                label: "Environment",
+                detail: "Choose what surrounds you, or add an image",
+                action: HudAction::OpenEnvironments,
+            },
+        ]);
+        if panels.bluetooth {
+            items.push(HudItem {
+                label: "Bluetooth",
+                detail: "Pair headphones or a controller, in a window in front of you",
+                action: HudAction::OpenSystemSettings("bluetooth"),
+            });
+        }
         if panels.network {
             items.push(HudItem {
                 label: "Wi-Fi",
@@ -173,12 +198,8 @@ impl Hud {
                 action: HudAction::OpenSystemSettings("wifi"),
             });
         }
-        if panels.bluetooth {
-            items.push(HudItem {
-                label: "Bluetooth",
-                detail: "Pair headphones or a controller, in a window in front of you",
-                action: HudAction::OpenSystemSettings("bluetooth"),
-            });
+        if calibrated {
+            items.push(calibrate);
         }
         items.push(HudItem {
             label: "Leave Spatiand",
@@ -228,19 +249,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recentre_and_calibrate_are_both_present_and_near_the_top() {
+    fn recentre_and_calibrate_are_both_present_and_reachable() {
         // These are the two controls that rescue a session, and the requirement was explicit
-        // that neither should need a terminal. Burying them defeats that as surely as
-        // removing them.
-        let hud = Hud::default();
-        let labels: Vec<_> = hud.items().iter().map(|i| i.action.clone()).collect();
-        let recentre = labels.iter().position(|a| *a == HudAction::Recentre);
-        let calibrate = labels.iter().position(|a| *a == HudAction::Calibrate);
-        assert_eq!(recentre, Some(0));
-        assert!(
-            calibrate.unwrap() <= 2,
-            "calibrate should be reachable at a glance"
-        );
+        // that neither should need a terminal. Removing either defeats that.
+        //
+        // Only recentre is pinned to the top now. Calibration used to be, and moved: a session
+        // that has already been calibrated needs it about once a year, and a row that ends
+        // half a minute of head movements is not one to leave under a thumb. On a session that
+        // has *never* been calibrated it is still second — see the test below.
+        for calibrated in [false, true] {
+            let hud = Hud::with_calibration(DesktopPanels::ALL, calibrated);
+            let actions: Vec<_> = hud.items().iter().map(|i| i.action.clone()).collect();
+            assert_eq!(
+                actions.iter().position(|a| *a == HudAction::Recentre),
+                Some(0)
+            );
+            assert!(
+                actions.iter().any(|a| *a == HudAction::Calibrate),
+                "calibration must always be reachable without a terminal"
+            );
+        }
     }
 
     #[test]
@@ -278,7 +306,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(modules, vec![("Wi-Fi", "wifi"), ("Bluetooth", "bluetooth")]);
+        assert_eq!(modules, vec![("Bluetooth", "bluetooth"), ("Wi-Fi", "wifi")]);
     }
 
     #[test]
@@ -352,7 +380,7 @@ mod tests {
         let mut hud = Hud::default();
         assert_eq!(hud.activate(), HudAction::Recentre);
         hud.step(Direction::Down);
-        assert_eq!(hud.activate(), HudAction::Calibrate);
+        assert_eq!(hud.activate(), HudAction::ToggleKeyboard);
     }
 
     #[test]
@@ -366,5 +394,75 @@ mod tests {
                 item.label
             );
         }
+    }
+
+    #[test]
+    fn the_rows_are_in_the_order_they_are_reached_for() {
+        // Written down because the order is a decision, not an accident: the things done often
+        // and the things done in a hurry are at the top, and the two that end something -- a
+        // recalibration, leaving -- are at the bottom where a thumb does not land by mistake.
+        let labels: Vec<&str> = Hud::with_calibration(DesktopPanels::ALL, true)
+            .items()
+            .iter()
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Recentre",
+                "Keyboard",
+                "Take a screenshot",
+                "Environment",
+                "Bluetooth",
+                "Wi-Fi",
+                "Calibrate head tracking",
+                "Leave Spatiand",
+            ]
+        );
+    }
+
+    #[test]
+    fn calibration_comes_second_until_it_has_been_done() {
+        // Until the head is calibrated the world tilts when you look down, and nothing else in
+        // this list will fix that -- so it sits where it will be found. Afterwards it is a
+        // thing you might need once a year, and choosing it by accident costs the calibration
+        // you already had.
+        let fresh = Hud::with_calibration(DesktopPanels::ALL, false);
+        assert_eq!(fresh.items()[1].label, "Calibrate head tracking");
+        assert_eq!(fresh.items().last().unwrap().label, "Leave Spatiand");
+
+        let settled = Hud::with_calibration(DesktopPanels::ALL, true);
+        assert_eq!(settled.items()[1].label, "Keyboard");
+        // Once, either way -- not moved by being listed twice.
+        for hud in [&fresh, &settled] {
+            let calibrations = hud
+                .items()
+                .iter()
+                .filter(|i| i.action == HudAction::Calibrate)
+                .count();
+            assert_eq!(calibrations, 1);
+        }
+    }
+
+    #[test]
+    fn bluetooth_sits_above_wifi() {
+        // Both are shelled out to the desktop, and either can be absent. Whichever are present
+        // keep their order relative to each other.
+        let only_bluetooth = Hud::with_calibration(
+            DesktopPanels {
+                network: false,
+                bluetooth: true,
+            },
+            true,
+        );
+        assert!(only_bluetooth
+            .items()
+            .iter()
+            .any(|i| i.label == "Bluetooth"));
+        assert!(!only_bluetooth.items().iter().any(|i| i.label == "Wi-Fi"));
+
+        let both = Hud::with_calibration(DesktopPanels::ALL, true);
+        let at = |label| both.items().iter().position(|i| i.label == label).unwrap();
+        assert!(at("Bluetooth") < at("Wi-Fi"));
     }
 }

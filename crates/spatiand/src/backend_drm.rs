@@ -103,8 +103,6 @@ pub fn run(
     display: &mut Display<Spatiand>,
     runtime: &mut Runtime,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    GLOBAL_DISPLAY_HANDLE.with(|h| *h.borrow_mut() = Some(runtime.display_handle.clone()));
-
     // --- session ---
     let (session, _notifier) = LibSeatSession::new()?;
     log::info!("seat: {}", session.seat());
@@ -278,7 +276,11 @@ pub fn run(
         panels.network,
         panels.bluetooth
     );
-    let mut shell = Shell::new(apps, panels);
+    // Whether head tracking has ever been calibrated, which decides where the calibration row
+    // sits: near the top while it is the thing most likely to be wrong, at the bottom once it
+    // is done and choosing it by accident would cost the calibration you already had.
+    let calibrated = spatiand_track::config::load_axes().is_some();
+    let mut shell = Shell::new(apps, panels, calibrated);
     let mut environments = Environments::discover();
     shell.set_environments(environments.entries(), environments.choice());
     let mut browser = crate::environment::Browser::new();
@@ -448,7 +450,13 @@ pub fn run(
             size: (w as i32, h as i32).into(),
             refresh: (mode.vrefresh() * 1000) as i32,
         };
-        let _global = output.create_global::<Spatiand>(&runtime.display_handle);
+        // Kept, because a `GlobalId` is a handle and not a guard: dropping it advertises the
+        // output forever. Without removing it explicitly, every rebuild left another display
+        // on offer -- and a session that started before the glasses were plugged in went on
+        // advertising the Deck's own 800x1280 portrait panel for the rest of its life. An
+        // application that sizes itself from a display picked that one, laid its interface out
+        // in portrait, and drew it into a landscape window.
+        let output_global = output.create_global::<Spatiand>(&runtime.display_handle);
         output.change_current_state(
             Some(output_mode),
             Some(Transform::Normal),
@@ -2262,8 +2270,12 @@ pub fn run(
             break;
         }
         // Fell out of the frame loop without quitting: the display situation changed, so
-        // go round and rebuild against whatever is there now.
+        // go round and rebuild against whatever is there now. The old output has to stop being
+        // advertised on the way, or clients accumulate displays that no longer show anything.
         runtime.state.space.unmap_output(&output);
+        runtime
+            .display_handle
+            .remove_global::<Spatiand>(output_global);
     }
 
     if let Some(x) = hmd.as_mut() {
@@ -2472,7 +2484,6 @@ struct SidecarSurface {
     failures: u32,
     /// Held so the wayland global lives as long as the surface.
     _output: Output,
-    _global: smithay::reexports::wayland_server::backend::GlobalId,
 }
 
 /// Bring up the sidecar on a connector the main output is not using.
@@ -2589,22 +2600,10 @@ fn build_sidecar(
             name,
             pending: false,
             failures: 0,
-            _global: output.create_global::<Spatiand>(&GLOBAL_DISPLAY_HANDLE.with(|h| {
-                h.borrow()
-                    .clone()
-                    .expect("display handle set before build_sidecar")
-            })),
             _output: output,
         }));
     }
     Ok(None)
-}
-
-thread_local! {
-    /// The display handle, so `build_sidecar` can create the output's global without threading
-    /// `runtime` through a function that has no other use for it.
-    static GLOBAL_DISPLAY_HANDLE: RefCell<Option<smithay::reexports::wayland_server::DisplayHandle>> =
-        const { RefCell::new(None) };
 }
 
 /// The least time between two output rebuilds.

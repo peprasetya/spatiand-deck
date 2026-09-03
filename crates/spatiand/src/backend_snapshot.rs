@@ -161,7 +161,10 @@ pub fn run(
         })
         .collect();
     log::info!("launcher: {} application(s)", apps.len());
-    let mut shell = Shell::new(apps, DesktopPanels::ALL);
+    // The snapshot always draws the settled arrangement, which is the one people will see for
+    // all but the first session.
+    let calibrated = true;
+    let mut shell = Shell::new(apps, DesktopPanels::ALL, calibrated);
 
     // Clients need an output to be told about, and frame callbacks need one to reference.
     let output = smithay::output::Output::new(

@@ -202,7 +202,11 @@ pub fn run(
         panels.network,
         panels.bluetooth
     );
-    let mut shell = Shell::new(apps, panels);
+    // Whether head tracking has ever been calibrated, which decides where the calibration row
+    // sits: near the top while it is the thing most likely to be wrong, at the bottom once it
+    // is done and choosing it by accident would cost the calibration you already had.
+    let calibrated = spatiand_track::config::load_axes().is_some();
+    let mut shell = Shell::new(apps, panels, calibrated);
     let mut environments = Environments::discover();
     shell.set_environments(environments.entries(), environments.choice());
     let mut browser = crate::environment::Browser::new();

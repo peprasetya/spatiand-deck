@@ -7,14 +7,28 @@
 //! distinction: the settings runner comes with Plasma, the Bluetooth pieces come with
 //! bluedevil, and a machine can easily have the first without the second.
 //!
-//! Two ways to open each, preferred in order:
+//! Three ways to open one, preferred in order:
 //!
-//! * **The panel applet, in its own window** (`plasmawindowed`). The same Wi-Fi and Bluetooth
-//!   controls as the desktop's task bar — a list you pick from, sized like a menu. This is
-//!   what someone means when they say they want the one from the tray.
+//! * **A standalone program**, where the panel has one. Named per panel rather than assumed,
+//!   because most do not.
+//! * **The panel applet, in its own window** (`plasmawindowed`). The same controls as the
+//!   desktop's task bar — a list you pick from, sized like a menu. This is what someone means
+//!   when they say they want the one from the tray.
 //! * **The settings module** (`kcmshell6`). The full configuration dialog. A fallback, not a
 //!   preference: it is a window full of options for a task that is usually "join this one",
 //!   and on a headset that is a lot of surface to read through a laser pointer.
+//!
+//! ## Why an applet is not always the answer
+//!
+//! An applet is a piece of a desktop shell, and this session is not running one. Whether that
+//! matters depends on where the applet gets its information. The network applet asks
+//! NetworkManager directly and works anywhere. **The Bluetooth applet does not**: its list of
+//! devices comes from KDE's `bluedevil` background module, which a Plasma session starts and
+//! this session does not — so it opened, looked exactly right, and listed nothing, on a
+//! machine whose adapter was powered, discovering, and had already found five devices.
+//!
+//! So an applet is offered only where it is known to stand on its own, and Bluetooth names a
+//! standalone program instead.
 //!
 //! The panel names are KDE's, but the mechanism is not special-cased anywhere else: the shell
 //! asks for "wifi", this decides what that means here, and on a system with neither the answer
@@ -32,15 +46,36 @@ const APPLET_DIRS: [&str; 2] = [
     "/usr/local/share/plasma/plasmoids",
 ];
 
-/// What the shell can ask for. Deliberately not KDE's names — those are this module's business.
-const PANELS: [(&str, &str, &str); 2] = [
-    // (what the shell asks for, the applet, the settings module)
-    (
-        "wifi",
-        "org.kde.plasma.networkmanagement",
-        "kcm_networkmanagement",
-    ),
-    ("bluetooth", "org.kde.plasma.bluetooth", "kcm_bluetooth"),
+/// One thing the shell can ask to open.
+struct Panel {
+    /// What the shell asks for. Deliberately not KDE's name — that is this module's business.
+    name: &'static str,
+    /// A program that opens this on its own, if one exists. Tried first.
+    tool: Option<&'static str>,
+    /// A desktop applet to run in its own window, if that applet works without a desktop shell.
+    applet: Option<&'static str>,
+    /// The settings module, as a last resort.
+    module: &'static str,
+}
+
+const PANELS: [Panel; 2] = [
+    Panel {
+        name: "wifi",
+        tool: None,
+        // Talks to NetworkManager itself, so it needs nothing a desktop session would start.
+        applet: Some("org.kde.plasma.networkmanagement"),
+        module: "kcm_networkmanagement",
+    },
+    Panel {
+        name: "bluetooth",
+        // The wizard is the pairing flow, it discovers devices itself, and it does not depend
+        // on anything a Plasma session would have started. It is what the row promises.
+        tool: Some("/usr/bin/bluedevil-wizard"),
+        // Deliberately none: this applet reads its devices from the `bluedevil` background
+        // module, which is not running here. See the note at the top of this file.
+        applet: None,
+        module: "kcm_bluetooth",
+    },
 ];
 
 /// Is there anything here that can open a settings panel at all?
@@ -53,15 +88,22 @@ pub fn has_desktop_settings() -> bool {
 /// The applet first. It is the control people already know from the task bar, and it is the
 /// right *size*: a list of networks rather than a configuration dialog.
 pub fn settings_command(panel: &str) -> Option<String> {
-    let (_, applet, module) = PANELS.iter().find(|(name, _, _)| *name == panel)?;
-    if Path::new(APPLET_RUNNER).exists() && applet_installed(applet) {
-        return Some(format!("{APPLET_RUNNER} {applet}"));
+    let panel = PANELS.iter().find(|p| p.name == panel)?;
+    if let Some(tool) = panel.tool {
+        if Path::new(tool).exists() {
+            return Some(tool.to_string());
+        }
+    }
+    if let Some(applet) = panel.applet {
+        if Path::new(APPLET_RUNNER).exists() && applet_installed(applet) {
+            return Some(format!("{APPLET_RUNNER} {applet}"));
+        }
     }
     let runner = KCM_RUNNERS.iter().find(|p| Path::new(p).exists())?;
-    if !module_installed(module) {
+    if !module_installed(panel.module) {
         return None;
     }
-    Some(format!("{runner} {module}"))
+    Some(format!("{runner} {}", panel.module))
 }
 
 /// Can this panel be opened at all?
@@ -125,27 +167,52 @@ mod tests {
     }
 
     #[test]
-    fn every_panel_the_shell_can_ask_for_has_both_a_way_to_open_it() {
-        // A panel with an applet but no module, or the reverse, would work on one machine and
-        // silently vanish on the next.
-        for (name, applet, module) in PANELS {
-            assert!(!name.is_empty());
+    fn every_panel_the_shell_can_ask_for_has_a_way_to_open_it() {
+        // A settings module is the floor: whatever else a panel names, there is always one
+        // more thing to fall back to, or the row works on one machine and vanishes on the next.
+        for panel in PANELS {
+            assert!(!panel.name.is_empty());
             assert!(
-                applet.starts_with("org.kde.plasma."),
-                "{applet} is not an applet id"
+                panel.module.starts_with("kcm_"),
+                "{} is not a settings module",
+                panel.module
             );
-            assert!(
-                module.starts_with("kcm_"),
-                "{module} is not a settings module"
-            );
+            if let Some(applet) = panel.applet {
+                assert!(
+                    applet.starts_with("org.kde.plasma."),
+                    "{applet} is not an applet id"
+                );
+            }
+            if let Some(tool) = panel.tool {
+                assert!(tool.starts_with('/'), "{tool} is not a program path");
+            }
         }
+    }
+
+    #[test]
+    fn bluetooth_does_not_offer_the_applet_that_needs_a_desktop_shell() {
+        // It looks right and lists nothing, because its devices come from a background module
+        // a Plasma session starts and this one does not. Found on a machine whose adapter was
+        // powered, discovering, and had already found five devices.
+        let bluetooth = PANELS
+            .iter()
+            .find(|p| p.name == "bluetooth")
+            .expect("bluetooth is a panel");
+        assert_eq!(bluetooth.applet, None);
+        assert!(
+            bluetooth.tool.is_some(),
+            "then it needs something standalone"
+        );
     }
 
     #[test]
     fn the_applet_is_preferred_to_the_settings_module() {
         // The whole point of the change: the task bar's own control, not a configuration
         // dialog. If both exist on this machine, the command must be the applet.
-        if !Path::new(APPLET_RUNNER).exists() || !applet_installed(PANELS[0].1) {
+        let Some(applet) = PANELS[0].applet else {
+            return; // this panel does not offer one
+        };
+        if !Path::new(APPLET_RUNNER).exists() || !applet_installed(applet) {
             return; // not a Plasma machine; nothing to assert
         }
         let command = settings_command("wifi").expect("wifi should be available here");
