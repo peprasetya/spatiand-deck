@@ -122,6 +122,13 @@ fn spa_position(channel: Channel) -> u32 {
     }
 }
 
+/// What a window's sink calls itself to anything listing audio devices.
+///
+/// Every window's sink shares it, deliberately: they are not devices anyone chooses between,
+/// and the one place they might be offered as such — the sidecar's output picker — filters
+/// them out by this exact string.
+pub const SINK_DESCRIPTION: &str = "Spatiand window";
+
 /// The name a window's sink is given in the audio graph.
 pub fn sink_name(slot: Slot) -> String {
     format!("spatiand.window.{slot}")
@@ -506,7 +513,7 @@ fn open_slot(
             *pw::keys::MEDIA_CATEGORY => "Capture",
             *pw::keys::MEDIA_CLASS => "Audio/Sink",
             *pw::keys::NODE_NAME => name.as_str(),
-            *pw::keys::NODE_DESCRIPTION => "Spatiand window",
+            *pw::keys::NODE_DESCRIPTION => SINK_DESCRIPTION,
             *pw::keys::NODE_VIRTUAL => "true",
             // The sink is as wide as the widest thing we can place, and an app narrower than
             // that must be left alone rather than spread to fill it. Without this PipeWire

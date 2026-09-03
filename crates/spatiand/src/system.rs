@@ -412,6 +412,12 @@ pub fn set_default_device(id: u32) {
 /// list is told from the `Filters:` block that follows it. That block matters: on this machine
 /// the *default source* is a loopback filter rather than anything under `Sources:`, and
 /// treating filters as devices would offer the wearer a list of plumbing.
+///
+/// Our own per-window sinks are dropped for the same reason. Each window that makes a sound
+/// has one — see [`crate::audio`] — and they are real sinks that a sound server will happily
+/// list, so without this the output picker fills up with a row per window, all of them named
+/// the same thing, none of them somewhere a person wants their sound to go. They are plumbing,
+/// and this is where the plumbing is hidden.
 pub fn parse_devices(text: &str, direction: Direction) -> Vec<AudioDevice> {
     let mut out = Vec::new();
     let mut inside = false;
@@ -431,9 +437,21 @@ pub fn parse_devices(text: &str, direction: Direction) -> Vec<AudioDevice> {
         let Some(device) = parse_device_line(trimmed) else {
             continue;
         };
+        if is_our_own_plumbing(&device.name) {
+            continue;
+        }
         out.push(device);
     }
     out
+}
+
+/// Is this one of the sinks Spatiand made for itself?
+///
+/// Matched on the description a window's sink is given, which is the only thing `wpctl status`
+/// prints. It is a fixed string set in one place — `spatiand_audio::server` — so this is a
+/// comparison against a constant rather than a guess about names.
+fn is_our_own_plumbing(name: &str) -> bool {
+    name.trim() == spatiand_audio::server::SINK_DESCRIPTION
 }
 
 /// One `  *   81. Air Analog Stereo   [vol: 0.32]` line.
@@ -616,5 +634,31 @@ Video
         let name = friendly_name("Air Analog Stereo");
         assert!(!name.contains("  "), "{name:?}");
         assert_eq!(name, "Glasses");
+    }
+
+    #[test]
+    fn a_windows_own_sink_is_not_offered_as_somewhere_to_send_sound() {
+        // Every window that makes a sound has one of these. They are real sinks and a sound
+        // server lists them, so without filtering the picker fills with a row per window, all
+        // named the same, none of them anywhere a person wants their sound to go.
+        let text = "\
+Audio
+ ├─ Sinks:
+ │  *   92. Air Analog Stereo                   [vol: 0.63]
+ │      96. ACP/ACP3X/ACP6x Audio Coprocessor Speaker [vol: 0.30]
+ │     166. Spatiand window                     [vol: 1.00]
+ │     201. Spatiand window                     [vol: 1.00]
+ │  
+ ├─ Sources:
+";
+        let devices = parse_devices(text, Direction::Output);
+        let names: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            !names.iter().any(|n| n.contains("Spatiand window")),
+            "our own plumbing was offered: {names:?}"
+        );
+        // And the real ones survive, which is the half that would be easy to break.
+        assert_eq!(devices.len(), 2, "{names:?}");
+        assert!(devices[0].is_default);
     }
 }
