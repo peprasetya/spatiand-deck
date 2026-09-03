@@ -812,13 +812,23 @@ pub fn run(
                             }
                             continue;
                         }
-                        // In the world the D-pad moves focus between windows. The shell has no
-                        // window list -- deliberately, it has no Wayland at all -- so this is
-                        // the one navigation case the compositor answers itself.
+                        // In the world, the D-pad belongs to whatever window has focus.
+                        //
+                        // It used to move focus between windows instead, which meant an
+                        // application that wants arrow keys -- a media centre, a file list,
+                        // anything driven from a sofa -- could not be driven at all. Cycling
+                        // windows moved to the bumpers, which is where every tabbed thing
+                        // puts "previous" and "next" anyway, and the D-pad now types.
+                        //
+                        // This is the small version of something bigger: eventually every
+                        // control should be remappable per application and forwarded without
+                        // the application knowing, the way Game Mode does it. What is here is
+                        // the fixed mapping that makes the common case work today, kept in
+                        // one table so that replacing it is replacing one table.
                         if !shell.menu_is_open() {
                             let step = match control {
-                                spatiand_input::Control::Left => -1i32,
-                                spatiand_input::Control::Right => 1,
+                                spatiand_input::Control::L1 => -1i32,
+                                spatiand_input::Control::R1 => 1,
                                 _ => 0,
                             };
                             if step != 0 {
@@ -837,10 +847,28 @@ pub fn run(
                                 }
                                 continue;
                             }
+                            // Pressed here and released below, so a held direction repeats in
+                            // the application exactly as a held arrow key does -- scrolling a
+                            // long list is one press, not forty.
+                            if let Some(code) = crate::input_map::key_for(*control) {
+                                let now = started.elapsed().as_millis() as u32;
+                                send_key_state(&mut runtime.state, code, true, now);
+                                continue;
+                            }
                         }
                         if let Some(intent) = intent_for(*control) {
                             if let Some(event) = shell.handle(intent) {
                                 shell_events.push(event);
+                            }
+                        }
+                    }
+                    // The other half of the D-pad mapping. Without it the key is never let
+                    // go, which a client reads as a direction held down forever.
+                    if !shell.menu_is_open() {
+                        for control in c.released() {
+                            if let Some(code) = crate::input_map::key_for(*control) {
+                                let now = started.elapsed().as_millis() as u32;
+                                send_key_state(&mut runtime.state, code, false, now);
                             }
                         }
                     }
@@ -874,10 +902,8 @@ pub fn run(
                         // knows which window it belongs to. Nothing here fails if spatial
                         // audio is off -- the app simply launches as it always did.
                         let claim = spatial_audio.prepare_launch();
-                        let env: Vec<(String, String)> = claim
-                            .as_ref()
-                            .map(|(_, e)| e.clone())
-                            .unwrap_or_default();
+                        let env: Vec<(String, String)> =
+                            claim.as_ref().map(|(_, e)| e.clone()).unwrap_or_default();
                         match spatiand_platform::launch(&app.exec, &runtime.state.socket_name, &env)
                         {
                             Ok(pid) => {
@@ -1448,8 +1474,25 @@ pub fn run(
                         p.left_trigger,
                         p.buttons.is_down(spatiand_input::Control::L2),
                     );
-                    let right_click = p.right_pad.clicked || r2;
-                    let left_click = p.left_pad.clicked || l2;
+                    // A click is the level *or* the edge, and the edge is what makes this
+                    // reliable. The controller is read at 250 Hz and drawn at 72: every frame
+                    // drains several reports and keeps the last one's state, so a click that
+                    // began and ended inside one frame's batch leaves no level behind at all.
+                    // It was reported as roughly a third of clicks doing nothing, worked
+                    // around by pressing twice -- which is exactly what you would do if the
+                    // first press had fallen between two samples.
+                    //
+                    // The edge is recorded per report as they are drained, so it survives.
+                    // Counting it here turns a press-and-release inside one frame into a
+                    // press this frame and a release the next, which is a click.
+                    let clicked_within_the_frame =
+                        |control| controller.as_ref().is_some_and(|c| c.just_pressed(control));
+                    let right_click = p.right_pad.clicked
+                        || r2
+                        || clicked_within_the_frame(spatiand_input::Control::RPadClick);
+                    let left_click = p.left_pad.clicked
+                        || l2
+                        || clicked_within_the_frame(spatiand_input::Control::LPadClick);
 
                     // Confirm the press under the thumb that made it. Without this the pads
                     // feel dead: the click registers, the world responds, and the hand is

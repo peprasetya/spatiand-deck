@@ -722,7 +722,10 @@ mod tests {
                 .map(|(_, v)| v.clone())
                 .unwrap_or_else(|| panic!("nothing set {k}"))
         };
-        assert_eq!(get("PIPEWIRE_PROPS"), "{ target.object = \"spatiand.window.42\" }");
+        assert_eq!(
+            get("PIPEWIRE_PROPS"),
+            "{ target.object = \"spatiand.window.42\" }"
+        );
         assert_eq!(get("PULSE_SINK"), "spatiand.window.42");
         assert_eq!(get("PULSE_SINK"), sink_name(42));
     }

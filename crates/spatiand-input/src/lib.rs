@@ -64,6 +64,7 @@ pub struct DeckController {
     /// polling batch is still reported — at 250 Hz a firm tap easily fits in one frame.
     last_buttons: Buttons,
     pressed_this_frame: Vec<Control>,
+    released_this_frame: Vec<Control>,
     warned_about_steam: bool,
 }
 
@@ -107,6 +108,7 @@ impl DeckController {
             state: ControllerState::default(),
             last_buttons: Buttons::default(),
             pressed_this_frame: Vec::new(),
+            released_this_frame: Vec::new(),
             warned_about_steam: false,
         })
     }
@@ -114,6 +116,7 @@ impl DeckController {
     /// Drain pending reports into the current state. Call once per frame.
     pub fn poll(&mut self) {
         self.pressed_this_frame.clear();
+        self.released_this_frame.clear();
         for _ in 0..MAX_REPORTS_PER_POLL {
             match self.device.read_report(&mut self.buf, Duration::ZERO) {
                 Ok(Some(n)) => {
@@ -125,6 +128,12 @@ impl DeckController {
                     };
                     for control in state.buttons.pressed_since(self.last_buttons) {
                         self.pressed_this_frame.push(control);
+                    }
+                    // Gathered the same way and for the same reason: a button that goes down
+                    // and up inside one frame's worth of reports leaves no trace in the level,
+                    // and something that forwards key presses has to let go of them.
+                    for control in state.buttons.released_since(self.last_buttons) {
+                        self.released_this_frame.push(control);
                     }
                     self.last_buttons = state.buttons;
                     self.state = state;
@@ -152,6 +161,11 @@ impl DeckController {
     /// Controls that went down since the last [`DeckController::poll`].
     pub fn pressed(&self) -> &[Control] {
         &self.pressed_this_frame
+    }
+
+    /// Controls that came back up since the last [`DeckController::poll`].
+    pub fn released(&self) -> &[Control] {
+        &self.released_this_frame
     }
 
     pub fn just_pressed(&self, control: Control) -> bool {
