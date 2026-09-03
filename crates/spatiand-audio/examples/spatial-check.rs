@@ -34,9 +34,10 @@ fn main() {
     engine.open(SLOT);
     std::thread::sleep(Duration::from_millis(500));
 
-    let (key, value) = routing_env(SLOT);
     println!("sink:  {}", sink_name(SLOT));
-    println!("route: {key}={value}");
+    for (key, value) in routing_env(SLOT) {
+        println!("route: {key}={value}");
+    }
     println!(
         "play:  pw-cat --playback --target {} <file>",
         sink_name(SLOT)

@@ -874,8 +874,10 @@ pub fn run(
                         // knows which window it belongs to. Nothing here fails if spatial
                         // audio is off -- the app simply launches as it always did.
                         let claim = spatial_audio.prepare_launch();
-                        let env: Vec<(String, String)> =
-                            claim.iter().map(|(_, e)| e.clone()).collect();
+                        let env: Vec<(String, String)> = claim
+                            .as_ref()
+                            .map(|(_, e)| e.clone())
+                            .unwrap_or_default();
                         match spatiand_platform::launch(&app.exec, &runtime.state.socket_name, &env)
                         {
                             Ok(pid) => {

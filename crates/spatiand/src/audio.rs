@@ -8,9 +8,14 @@
 //!
 //! An app is launched before its window exists, so the sink has to be decided first and the
 //! window attached to it afterwards. A slot is allocated at launch, its name goes into the
-//! app's environment where PipeWire will find it, and the process id is remembered. When a
-//! window appears, its client's process id is walked up the process tree until it meets one of
-//! those — which is what catches an app that forks before it opens a window.
+//! app's environment where the audio server will find it, and the process id is remembered.
+//! When a window appears, its client's process id is walked up the process tree until it meets
+//! one of those — which is what catches an app that forks before it opens a window.
+//!
+//! The environment is what does the routing, and it has to, because there is nothing to match
+//! on afterwards: a sandboxed app reports the process id it has inside its own sandbox, which
+//! bears no relation to anything on this side. The process walk only ties the *window* to the
+//! slot; the sound was already aimed before the app started.
 //!
 //! Where that fails the window simply has no slot, and its app's audio goes wherever it would
 //! have gone without any of this. That is the important property: a window whose sound cannot
@@ -90,7 +95,7 @@ impl Audio {
     ///
     /// Returns nothing when spatial audio is off, and the caller then launches the app exactly
     /// as it always did.
-    pub fn prepare_launch(&mut self) -> Option<(Slot, (String, String))> {
+    pub fn prepare_launch(&mut self) -> Option<(Slot, Vec<(String, String)>)> {
         let engine = self.engine.as_ref()?;
         let slot = self.next;
         self.next += 1;

@@ -52,12 +52,29 @@ use crate::render::{Binaural, Directness};
 use crate::ring::Ring;
 use crate::stage::{Channel, Layout, Speaker};
 
-/// The environment variable that tells an app's audio which window it belongs to.
+/// Tells a **native PipeWire** client which window its sound belongs to.
 ///
 /// PipeWire reads this when any stream is created and copies the properties onto the node, and
 /// a child process inherits it — which is what makes a browser's audio process land on the
 /// same sink as the tab that spawned it.
 pub const ROUTING_ENV: &str = "PIPEWIRE_PROPS";
+
+/// Tells a **PulseAudio** client the same thing.
+///
+/// Both are needed, and finding out why cost a debugging session. Most desktop applications do
+/// not speak PipeWire: Chrome, Firefox and anything built on the usual audio libraries speak
+/// the PulseAudio protocol, which PipeWire also serves — and such a client never looks at
+/// [`ROUTING_ENV`] at all. Its stream shows `client.api = pipewire-pulse`, and it went
+/// straight to the machine's default sink while a window's own sink sat idle beside it.
+///
+/// There is no identifying it after the fact either, which is why this has to be got right
+/// before the app starts. A sandboxed app reports the process id it has *inside* its sandbox —
+/// Chrome in a Flatpak said 271 — so there is nothing to match against a process we launched.
+///
+/// Verified on the hardware: it reaches inside a Flatpak sandbox, and it takes precedence over
+/// PulseAudio's memory of where that application's sound went last time, which otherwise
+/// quietly puts every stream back where it was.
+pub const PULSE_ROUTING_ENV: &str = "PULSE_SINK";
 
 /// How much audio the queue between the two callbacks can hold, in stereo frames.
 ///
@@ -112,14 +129,21 @@ pub fn sink_name(slot: Slot) -> String {
 
 /// What to put in the environment of an app so its audio finds its window.
 ///
-/// Set this on the process before it starts. Everything it and its children play is then
-/// stamped with the target, and lands on that window's sink without anything having to work
-/// out afterwards which process belonged to which window.
-pub fn routing_env(slot: Slot) -> (String, String) {
-    (
-        ROUTING_ENV.to_string(),
-        format!("{{ target.object = \"{}\" }}", sink_name(slot)),
-    )
+/// Set these on the process before it starts. Everything it and its children play is then
+/// aimed at that window's sink, without anything having to work out afterwards which process
+/// belonged to which window — which for a sandboxed app is not possible at all.
+///
+/// Two variables because there are two audio protocols in use on the same machine, and an
+/// application picks one without telling anybody. See [`PULSE_ROUTING_ENV`].
+pub fn routing_env(slot: Slot) -> Vec<(String, String)> {
+    let sink = sink_name(slot);
+    vec![
+        (
+            ROUTING_ENV.to_string(),
+            format!("{{ target.object = \"{sink}\" }}"),
+        ),
+        (PULSE_ROUTING_ENV.to_string(), sink),
+    ]
 }
 
 /// Everything one window's sound needs, shared between the loop and data threads.
@@ -682,14 +706,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_window_is_told_where_to_send_its_sound() {
+    fn a_window_is_told_where_to_send_its_sound_in_both_languages() {
         // The whole stream-to-window matching problem, solved by inheritance rather than by
-        // guessing afterwards. Worth a test because the format is a contract with PipeWire:
-        // a stray quote or brace here silently stops routing without failing anything.
-        let (key, value) = routing_env(42);
-        assert_eq!(key, "PIPEWIRE_PROPS");
-        assert_eq!(value, "{ target.object = \"spatiand.window.42\" }");
-        assert!(value.contains(&sink_name(42)));
+        // guessing afterwards. Worth a test because the format is a contract with an audio
+        // server: a stray quote or brace silently stops routing without failing anything.
+        //
+        // Both, because an application picks its audio protocol without telling anyone, and
+        // the one most desktop applications pick ignores the PipeWire variable entirely. This
+        // was found the hard way -- a browser's sound went to the machine's default sink
+        // while its window's own sink sat idle beside it.
+        let env = routing_env(42);
+        let get = |k: &str| {
+            env.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| panic!("nothing set {k}"))
+        };
+        assert_eq!(get("PIPEWIRE_PROPS"), "{ target.object = \"spatiand.window.42\" }");
+        assert_eq!(get("PULSE_SINK"), "spatiand.window.42");
+        assert_eq!(get("PULSE_SINK"), sink_name(42));
     }
 
     #[test]
