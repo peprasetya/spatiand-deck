@@ -52,4 +52,7 @@ features = [
     "wayland_frontend",
     "desktop",
     "use_system_lib",
+    # X11 applications. Many programs have no Wayland support and never will; without this
+    # they do not start at all. See `crate::xwayland`.
+    "xwayland",
 ]

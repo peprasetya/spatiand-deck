@@ -207,6 +207,11 @@ pub fn run(
     // session that never types -- or one where the wearer has turned the click off -- never
     // touches the sound device at all.
     let clicks = crate::click::Clicks::new();
+    // An X server for applications that cannot speak Wayland. Started before anything can be
+    // launched, so the first application already has a DISPLAY to find. `None` means there is
+    // no X server, which is a session where such applications do not start -- and everything
+    // else is untouched.
+    let x_display = crate::xwayland::start(&runtime.display_handle, &event_loop.handle());
     // Every window's sound, placed where the window is. Started here rather than lazily
     // because the connection to the audio server is what takes the time, and doing it on the
     // first launch would stall the launcher rather than the startup.
@@ -902,8 +907,10 @@ pub fn run(
                         // knows which window it belongs to. Nothing here fails if spatial
                         // audio is off -- the app simply launches as it always did.
                         let claim = spatial_audio.prepare_launch();
-                        let env: Vec<(String, String)> =
+                        let mut env: Vec<(String, String)> =
                             claim.as_ref().map(|(_, e)| e.clone()).unwrap_or_default();
+                        // Where the X server is, for anything that cannot speak Wayland.
+                        env.extend(crate::xwayland::client_environment(x_display));
                         match spatiand_platform::launch(&app.exec, &runtime.state.socket_name, &env)
                         {
                             Ok(pid) => {

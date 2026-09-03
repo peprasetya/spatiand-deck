@@ -36,6 +36,7 @@ mod status;
 mod system;
 mod waiting;
 mod window;
+mod xwayland;
 
 pub use state::Spatiand;
 

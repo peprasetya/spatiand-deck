@@ -177,15 +177,18 @@ pub fn launch(
         None => (Stdio::null(), Stdio::null()),
     };
     let mut command = Command::new(program);
+    // Whatever the session inherited is not what an application launched into *this* session
+    // should see. A DISPLAY from an outer session points at another machine's X server, and
+    // is exactly the kind of thing that works on a developer's desktop and not on a Deck.
+    // `extra` puts back a DISPLAY that means something, if there is one -- see
+    // `spatiand::xwayland::client_environment`.
+    command.env_remove("DISPLAY");
     for (key, value) in extra {
         command.env(key, value);
     }
     let child = command
         .args(&args)
         .env("WAYLAND_DISPLAY", wayland_display)
-        // Some toolkits prefer X11 when DISPLAY is set, and would then try to reach an X
-        // server that is not running. Removing it makes the Wayland path the only option.
-        .env_remove("DISPLAY")
         .env("XDG_SESSION_TYPE", "wayland")
         .stdin(Stdio::null())
         // Into the application log, not ours and not /dev/null. See `app_log_path`.

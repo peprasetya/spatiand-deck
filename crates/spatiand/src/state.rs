@@ -90,6 +90,13 @@ pub struct Spatiand {
     /// bookkeeping. Smithay's manager is what knows where each one sits relative to the window
     /// it belongs to, including submenus hanging off other popups.
     pub popups: PopupManager,
+    /// The X11 window manager, once the X server has finished starting.
+    ///
+    /// `None` before then, and for the whole session if no X server could be started — which
+    /// is a session where X11 applications do not run, and everything else is unaffected.
+    pub xwm: Option<smithay::xwayland::X11Wm>,
+    /// The protocol XWayland uses to tell us which surface belongs to which X11 window.
+    pub xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
     /// Yaw the wearer is currently facing, radians, refreshed once a frame by the backend.
     ///
     /// Lives here because `new_toplevel` needs it and has no access to the tracker: a window
@@ -120,6 +127,9 @@ impl Spatiand {
         seat.add_pointer();
 
         let socket_name = Self::init_socket(loop_handle);
+        // Built before the struct, because `dh` is moved into it.
+        let xwayland_shell_state =
+            smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(&dh);
 
         Self {
             display_handle: dh,
@@ -138,6 +148,8 @@ impl Spatiand {
             space: Space::default(),
             layout: WindowLayout::default(),
             popups: PopupManager::default(),
+            xwm: None,
+            xwayland_shell_state,
             spawn_yaw: 0.0,
         }
     }
@@ -389,9 +401,11 @@ impl XdgShellHandler for Spatiand {
             self.arrived_windows.push((id, pid));
         }
         log::info!(
-            "new toplevel at yaw {:.0} deg ({} windows)",
+            "new toplevel at yaw {:.0} deg ({} windows), offered {}x{}",
             self.spawn_yaw.to_degrees(),
-            self.space.elements().count()
+            self.space.elements().count(),
+            DEFAULT_WINDOW_SIZE.0,
+            DEFAULT_WINDOW_SIZE.1
         );
     }
 
@@ -452,6 +466,45 @@ impl XdgShellHandler for Spatiand {
 }
 
 impl Spatiand {
+    /// Put a newly mapped X11 window into the room.
+    ///
+    /// Deliberately the same three steps `new_toplevel` takes, and in the same order: a slot
+    /// in the `Space`, a place on the sphere, and focus. Everything downstream reads those and
+    /// nothing downstream asks which protocol the window came from.
+    pub fn adopt_x11_window(&mut self, surface: smithay::xwayland::X11Surface) {
+        let pid = surface.pid();
+        let window = smithay::desktop::Window::new_x11_window(surface);
+        let index = self.space.elements().count() as i32;
+        self.space
+            .map_element(window.clone(), (index * 32, index * 32), false);
+        self.layout.place(&window, self.spawn_yaw);
+        self.layout.focus(&window);
+        if let Some(id) = self.layout.id_of(&window) {
+            self.arrived_windows.push((id, pid));
+        }
+        log::info!(
+            "new X11 window at yaw {:.0} deg ({} windows)",
+            self.spawn_yaw.to_degrees(),
+            self.space.elements().count()
+        );
+    }
+
+    /// An X11 window has gone. Take it out of everything that was tracking it.
+    pub fn forget_x11_window(&mut self, surface: &smithay::xwayland::X11Surface) {
+        let window = self
+            .space
+            .elements()
+            .find(|w| w.x11_surface() == Some(surface))
+            .cloned();
+        if let Some(window) = window {
+            if let Some(id) = self.layout.id_of(&window) {
+                self.departed_windows.push(id);
+            }
+            self.layout.remove(&window);
+            self.space.unmap_elem(&window);
+        }
+    }
+
     /// xdg_surface requires a configure before the client may attach a buffer.
     fn ensure_initial_configure(&mut self, surface: &WlSurface) {
         // Popups first, and they need their own branch rather than falling through the
@@ -561,3 +614,4 @@ delegate_xdg_decoration!(Spatiand);
 delegate_seat!(Spatiand);
 delegate_output!(Spatiand);
 delegate_data_device!(Spatiand);
+smithay::delegate_xwayland_shell!(Spatiand);

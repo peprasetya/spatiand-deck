@@ -2503,6 +2503,16 @@ pub fn collect_windows(
             });
         }
 
+        // What the client actually committed, which need not be what it was offered: a
+        // fullscreen-shaped application sizes itself from the output it can see, and the
+        // difference between the two is exactly the kind of thing that shows up as a window
+        // whose contents do not fit it.
+        if note_surface_size(&surface, (width, height)) {
+            log::info!(
+                "window surface is {width}x{height} ({})",
+                state.title_of(&window).unwrap_or_else(|| "untitled".into())
+            );
+        }
         out.push(WindowQuad {
             window: window.clone(),
             surface: surface.clone(),
@@ -2522,6 +2532,25 @@ pub fn collect_windows(
         });
     }
     out
+}
+
+/// Remember a window's surface size, and say whether it has just changed.
+///
+/// A memo for the log and nothing else, which is why it lives here rather than in
+/// `WindowLayout`: nothing reads it, and putting it in the layout would suggest something does.
+/// Without it this logs seventy-two times a second.
+fn note_surface_size(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    pixels: (u32, u32),
+) -> bool {
+    use smithay::reexports::wayland_server::Resource;
+    thread_local! {
+        static SEEN: std::cell::RefCell<std::collections::HashMap<
+            smithay::reexports::wayland_server::backend::ObjectId,
+            (u32, u32),
+        >> = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    SEEN.with(|seen| seen.borrow_mut().insert(surface.id(), pixels) != Some(pixels))
 }
 
 /// A window's quad in the world, for ray-casting against.
