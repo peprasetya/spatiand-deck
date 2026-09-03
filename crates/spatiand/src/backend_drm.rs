@@ -788,10 +788,14 @@ pub fn run(
             };
 
             // Always `None`: the two-thumb move-and-scale gesture is computed below and then
-            // discarded, so the code that reads this never runs. Left in place rather than
-            // deleted because the geometry it feeds is correct and tested -- what is missing
-            // is the decision about when a two-thumb gesture should outrank the two cursors,
-            // which is a question for a headset and a pair of hands, not for a compiler.
+            // discarded, so the code that reads this never runs.
+            //
+            // **Kept on purpose, and not to be deleted.** It was tried on hardware for
+            // resizing windows and was not effective enough to leave switched on, but the
+            // geometry is correct and tested and the intent is to come back to it. What is
+            // missing is not the maths -- it is the decision about when a two-thumb gesture
+            // should outrank the two cursors, which is a question for a headset and a pair of
+            // hands, not for a compiler.
             let two_handed: Option<spatiand_input::GestureDelta> = None;
             let mut leaving = false;
             // Asked for from the HUD, or over a signal -- see `shutdown::picture_requested`.
