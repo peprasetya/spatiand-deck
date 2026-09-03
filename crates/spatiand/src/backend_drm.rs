@@ -2263,21 +2263,33 @@ pub fn run(
                         None,
                         Kind::Unspecified,
                     );
-                    let presented = side
-                        .compositor
-                        .render_frame(
-                            &mut renderer,
-                            &[element],
-                            Color32F::from([0.0, 0.0, 0.0, 1.0]),
-                            FrameFlags::DEFAULT,
-                        )
-                        .is_ok()
-                        && side.compositor.queue_frame(()).is_ok();
-                    if presented {
-                        side.pending = true;
-                        side.failures = 0;
-                    } else {
-                        side.failures += 1;
+                    // The reason is kept rather than reduced to a boolean. A black second
+                    // screen with `is_ok()` in front of it says only that something went
+                    // wrong, and the two causes -- a mode that cannot be set and a CRTC
+                    // somebody else is holding -- want opposite fixes.
+                    let presented = match side.compositor.render_frame(
+                        &mut renderer,
+                        &[element],
+                        Color32F::from([0.0, 0.0, 0.0, 1.0]),
+                        FrameFlags::DEFAULT,
+                    ) {
+                        Ok(_) => side.compositor.queue_frame(()).map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    match presented {
+                        Ok(()) => {
+                            side.pending = true;
+                            side.failures = 0;
+                        }
+                        Err(reason) => {
+                            // Said once per run of failures, not once per frame: the whole
+                            // reason this counter exists is that the noisy version produced a
+                            // 5.8 GB log for a screen that was simply black.
+                            if side.failures == 0 {
+                                log::warn!("the sidecar could not present: {reason}");
+                            }
+                            side.failures += 1;
+                        }
                     }
                 }
             }
