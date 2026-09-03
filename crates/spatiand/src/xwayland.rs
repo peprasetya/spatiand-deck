@@ -138,6 +138,17 @@ impl XWaylandShellHandler for Spatiand {
             "X11 window {:?} now has a surface to draw into",
             surface.title()
         );
+        // The first moment this window can be identified, and therefore the first moment it
+        // can be given a place. Until it has one the scene throws it away, however good its
+        // texture is.
+        let window = self
+            .space
+            .elements()
+            .find(|w| w.x11_surface() == Some(&surface))
+            .cloned();
+        if let Some(window) = window {
+            self.place_x11_window(&window);
+        }
     }
 }
 
@@ -149,6 +160,18 @@ impl XWaylandShellHandler for Spatiand {
 impl XWaylandShellHandler for Runtime {
     fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
         &mut self.state.xwayland_shell_state
+    }
+
+    /// Forwarded, and it matters: a surface can be associated through the window manager or
+    /// through the commit hook, and those two arrive on different types. Implementing only one
+    /// of them meant half the associations were silently not acted on.
+    fn surface_associated(
+        &mut self,
+        xwm: smithay::xwayland::xwm::XwmId,
+        wl_surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        surface: X11Surface,
+    ) {
+        self.state.surface_associated(xwm, wl_surface, surface)
     }
 }
 

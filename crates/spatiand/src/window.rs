@@ -239,8 +239,23 @@ impl WindowLayout {
     /// click cycling between them -- reported, exactly, as Wi-Fi and Bluetooth landing on the
     /// same 3D object and rotating. `ObjectId`'s own `Eq` is documented to compare equal only
     /// for the same object from the same client, which is the guarantee wanted here.
+    /// What identifies a window here.
+    ///
+    /// Its surface, not its xdg toplevel. An X11 window has no toplevel, so asking for one
+    /// gave it no key, no id and therefore no placement — and a window with no placement is
+    /// dropped by the scene *after* its texture has been imported. Every X11 window ran,
+    /// mapped, negotiated a surface, committed buffers we were holding, and was thrown away
+    /// one step from being drawn.
+    ///
+    /// It cost the same mistake four times in four places to learn the lesson: anything that
+    /// asks a window for its toplevel is asking "are you a Wayland window", and the answer is
+    /// only ever used to exclude X11 ones by accident.
+    ///
+    /// `None` before XWayland has associated a surface, which is why an X11 window is placed
+    /// when that happens rather than when it is mapped.
     fn key(window: &Window) -> Option<ObjectId> {
-        window.toplevel().map(|t| t.wl_surface().id())
+        use smithay::wayland::seat::WaylandFocus;
+        window.wl_surface().map(|s| s.id())
     }
 }
 
@@ -431,6 +446,30 @@ mod tests {
         assert!(
             facing.dot(to_window) > 0.99,
             "facing {facing:?} vs direction {to_window:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_here_asks_a_window_whether_it_is_a_wayland_one() {
+        // A guard against the mistake that cost four rounds. `toplevel()` answers "are you an
+        // xdg window", and every use of it as an identity check silently excluded X11 windows
+        // -- from the scene, from commits, from placement, and from everything keyed on
+        // placement: focus, audio, removal.
+        //
+        // The window's surface is the thing every window has, whatever protocol it speaks.
+        let source = include_str!("window.rs");
+        // Only the module itself: the tests below are allowed to name the thing they forbid.
+        let body = source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or("")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !body.contains("toplevel()"),
+            "identity in this module must not depend on a window being an xdg one"
         );
     }
 }

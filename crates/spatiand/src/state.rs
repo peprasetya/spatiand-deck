@@ -90,6 +90,11 @@ pub struct Spatiand {
     /// bookkeeping. Smithay's manager is what knows where each one sits relative to the window
     /// it belongs to, including submenus hanging off other popups.
     pub popups: PopupManager,
+    /// Which process each X11 window belongs to, remembered from when it mapped.
+    ///
+    /// Kept because a window cannot be identified until its surface arrives, and by then the
+    /// map request that carried the process id is long gone.
+    pub x11_pids: std::collections::HashMap<u32, Option<u32>>,
     /// The X11 window manager, once the X server has finished starting.
     ///
     /// `None` before then, and for the whole session if no X server could be started — which
@@ -148,6 +153,7 @@ impl Spatiand {
             space: Space::default(),
             layout: WindowLayout::default(),
             popups: PopupManager::default(),
+            x11_pids: std::collections::HashMap::new(),
             xwm: None,
             xwayland_shell_state,
             spawn_yaw: 0.0,
@@ -286,6 +292,7 @@ impl CompositorHandler for Spatiand {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        note_xwayland_commit(surface);
 
         // A sync subsurface's commit is not applied until its parent commits, so there is
         // nothing to do for it yet.
@@ -491,6 +498,62 @@ impl XdgShellHandler for Spatiand {
     }
 }
 
+/// Say, once per surface, when XWayland commits something.
+///
+/// An X11 window that runs, maps, associates a surface and still shows nothing leaves no trace
+/// anywhere in between. This is the missing half: whether the buffer ever arrives at all, and
+/// whether the compositor sees it when it does. Everything else about the path has been
+/// observed; this has not.
+fn note_xwayland_commit(surface: &WlSurface) {
+    use smithay::reexports::wayland_server::Resource;
+    /// How many of a surface's commits are worth reporting.
+    ///
+    /// Not one. The first commit of an XWayland surface carries no buffer by design — it is
+    /// the one that establishes the association — so seeing only that says nothing about
+    /// whether a buffer ever follows, which is the entire question.
+    const REPORT: usize = 8;
+
+    let Some(client) = surface.client() else {
+        return;
+    };
+    if client
+        .get_data::<smithay::xwayland::XWaylandClientData>()
+        .is_none()
+    {
+        return;
+    }
+    thread_local! {
+        static SEEN: std::cell::RefCell<std::collections::HashMap<
+            smithay::reexports::wayland_server::backend::ObjectId,
+            usize,
+        >> = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let nth = SEEN.with(|seen| {
+        let mut seen = seen.borrow_mut();
+        let count = seen.entry(surface.id()).or_insert(0);
+        *count += 1;
+        *count
+    });
+    if nth > REPORT {
+        return;
+    }
+    let has_buffer = smithay::wayland::compositor::with_states(surface, |states| {
+        states
+            .data_map
+            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>()
+            .map(|d| d.lock().unwrap().buffer().is_some())
+    });
+    log::info!(
+        "xwayland commit {nth} on surface {} (buffer: {})",
+        surface.id().protocol_id(),
+        match has_buffer {
+            Some(true) => "yes",
+            Some(false) => "none attached",
+            None => "no renderer state",
+        }
+    );
+}
+
 impl Spatiand {
     /// Put a newly mapped X11 window into the room.
     ///
@@ -500,6 +563,7 @@ impl Spatiand {
     pub fn adopt_x11_window(&mut self, surface: smithay::xwayland::X11Surface) {
         let pid = surface.pid();
         let title = surface.title();
+        self.x11_pids.insert(surface.window_id(), pid);
         // Whether XWayland has already told us which surface this window draws into. It can
         // arrive either side of the map request, and a window with none yet is invisible until
         // it does -- so this is the number to look at when a window runs and never appears.
@@ -508,11 +572,9 @@ impl Spatiand {
         let index = self.space.elements().count() as i32;
         self.space
             .map_element(window.clone(), (index * 32, index * 32), false);
-        self.layout.place(&window, self.spawn_yaw);
-        self.layout.focus(&window);
-        if let Some(id) = self.layout.id_of(&window) {
-            self.arrived_windows.push((id, pid));
-        }
+        // Placed only if it can be identified yet, which needs its surface. When that has not
+        // arrived, `place_x11_window` does it as soon as it does.
+        self.place_x11_window(&window);
         log::info!(
             "new X11 window {:?} at yaw {:.0} deg ({} windows), surface {}",
             title,
@@ -524,6 +586,38 @@ impl Spatiand {
                 "not attached yet"
             }
         );
+    }
+
+    /// Give an X11 window a place in the room, once it can be identified.
+    ///
+    /// Called both when the window maps and when its surface arrives, because either can come
+    /// first. Doing nothing the second time is the normal case.
+    pub fn place_x11_window(&mut self, window: &smithay::desktop::Window) {
+        if self.layout.get(window).is_some() {
+            return;
+        }
+        if self.layout.id_of(window).is_none() && Self::has_no_surface(window) {
+            return;
+        }
+        self.layout.place(window, self.spawn_yaw);
+        self.layout.focus(window);
+        if let Some(id) = self.layout.id_of(window) {
+            let pid = window
+                .x11_surface()
+                .and_then(|x| self.x11_pids.get(&x.window_id()).copied())
+                .flatten();
+            self.arrived_windows.push((id, pid));
+            log::info!(
+                "X11 window placed at yaw {:.0} deg ({} windows)",
+                self.spawn_yaw.to_degrees(),
+                self.space.elements().count()
+            );
+        }
+    }
+
+    fn has_no_surface(window: &smithay::desktop::Window) -> bool {
+        use smithay::wayland::seat::WaylandFocus;
+        window.wl_surface().is_none()
     }
 
     /// An X11 window has gone. Take it out of everything that was tracking it.
