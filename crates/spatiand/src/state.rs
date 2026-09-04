@@ -17,6 +17,7 @@ use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, is_sync_subsurface, CompositorClientState, CompositorHandler, CompositorState,
 };
+use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -31,8 +32,8 @@ use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_to
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
+    delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use crate::window::WindowLayout;
@@ -74,6 +75,15 @@ pub struct Spatiand {
     /// Advertised only so it can be answered with "server side" — see [`XdgDecorationHandler`].
     pub xdg_decoration_state: XdgDecorationState,
     pub shm_state: ShmState,
+    /// Handing us a picture rather than a copy of one — see [`crate::dmabuf`].
+    pub dmabuf_state: DmabufState,
+    /// `None` until a backend has a renderer whose import formats can be advertised.
+    pub dmabuf_global: Option<DmabufGlobal>,
+    /// Buffers a client has offered and is waiting to hear about.
+    ///
+    /// Answered from the frame loop, which is the only place with a renderer to test them
+    /// against. Same shape, and the same reason, as `arrived_windows`.
+    pub pending_dmabufs: Vec<(smithay::backend::allocator::dmabuf::Dmabuf, ImportNotifier)>,
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
@@ -144,6 +154,8 @@ impl Spatiand {
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, Vec::new());
+        // The global itself waits for a renderer; see `crate::dmabuf::advertise`.
+        let dmabuf_state = DmabufState::new();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -194,6 +206,9 @@ impl Spatiand {
             xdg_shell_state,
             xdg_decoration_state,
             shm_state,
+            dmabuf_state,
+            dmabuf_global: None,
+            pending_dmabufs: Vec::new(),
             output_manager_state,
             seat_state,
             data_device_state,
@@ -972,6 +987,31 @@ impl SeatHandler for Spatiand {
     ) {
     }
 }
+
+// --- dmabuf ---
+
+impl DmabufHandler for Spatiand {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    /// A client has offered us a buffer and wants to know whether we can use it.
+    ///
+    /// Parked rather than answered: the renderer that decides this is in the frame loop, and a
+    /// protocol callback cannot reach it. See [`crate::dmabuf::settle`], which answers it a
+    /// frame later — and the module note for why answering "yes" unconditionally, which is one
+    /// line and very tempting, is the wrong trade.
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        self.pending_dmabufs.push((dmabuf, notifier));
+    }
+}
+
+delegate_dmabuf!(Spatiand);
 
 // --- output ---
 

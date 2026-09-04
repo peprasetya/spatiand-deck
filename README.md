@@ -24,6 +24,11 @@ because a great many programs have no Wayland support and never will. They are
 being put in a room, every X11 window says so on its title bar, and
 [docs/x11.md](docs/x11.md) says exactly what breaks.
 
+**GPU buffers.** Clients can hand over decoded frames as dmabuf rather than
+copying them through shared memory — which is what a hardware video decoder
+produces natively, and the difference between a video player that works and one
+that spends its budget on memcpy.
+
 **Spatial audio.** Each window gets its own audio sink; its channels are placed
 around you and rendered to two ears through a measured head-related transfer
 function. Turn towards a window and its sound turns with you. Mono through
@@ -59,6 +64,9 @@ Listed because finding out by hitting them is worse.
     [docs/apps.md](docs/apps.md) and not built.
   * **VR video.** The environment can be 180° or 360°, mono or stereo, but only
     from an image file. An application cannot yet be the source.
+  * **OpenXR.** Spatiand is not an OpenXR runtime and does not pretend to be
+    one. [docs/openxr.md](docs/openxr.md) sets out what would have to be true
+    and which of the three possible routes is worth taking.
   * **Games.** The plan reserves a virtual gamepad and an escape gesture for
     this. Neither is built. A game will run and be unplayable.
   * **Per-application input mapping.** The controller mapping is one fixed

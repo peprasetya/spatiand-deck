@@ -683,6 +683,9 @@ pub fn run(
             }
         }
         log::info!("presenting at {w}x{h}, stereo: {on_glasses}");
+        // Now that there is a renderer, clients can be offered dmabuf -- the formats come from
+        // it, and there is nothing truthful to advertise before it exists.
+        crate::dmabuf::advertise(&mut runtime.state, &renderer);
         // Read the panel's brightness *after* the mode switch, not before it.
         //
         // It is read once when the headset opens, which is early enough to have something to
@@ -1342,6 +1345,9 @@ pub fn run(
                 (stereo.h_fov_deg, stereo.v_fov_deg()),
             )?;
 
+            // Answer any dmabuf a client offered since the last frame, before importing:
+            // a buffer nobody has said yes to yet is one the client has not committed.
+            crate::dmabuf::settle(&mut runtime.state, &mut renderer);
             // Import client buffers before the draw closure takes the context.
             let mut windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
             for quad in windows.iter_mut() {

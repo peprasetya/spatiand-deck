@@ -219,6 +219,7 @@ pub fn run(
 
     // --- gpu resources ---
     let mut scene = Scene::new(backend.renderer(), &sky_image)?;
+    crate::dmabuf::advertise(&mut runtime.state, backend.renderer());
     let mut text = TextRenderer::new();
     let mut panel: Option<PanelTexture> = None;
     let mut last_prompt = String::new();
@@ -442,6 +443,9 @@ pub fn run(
         };
 
         let (renderer, framebuffer) = backend.bind()?;
+        // Answered here because this is where a renderer exists. Advertising dmabuf without
+        // answering for it would leave a client waiting on every buffer it ever offered.
+        crate::dmabuf::settle(&mut runtime.state, renderer);
 
         let ppd = TextRenderer::px_per_degree(eye_w.max(1) as u32, stereo.h_fov_deg);
         if sky_dirty {

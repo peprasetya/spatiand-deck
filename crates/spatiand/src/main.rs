@@ -21,6 +21,7 @@ mod backend_winit;
 mod calib;
 mod click;
 mod desk;
+mod dmabuf;
 mod environment;
 mod gl;
 mod icon;

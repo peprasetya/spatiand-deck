@@ -190,6 +190,7 @@ pub fn run(
     output.change_current_state(Some(output_mode), None, None, Some((0, 0).into()));
     output.set_preferred(output_mode);
     runtime.state.set_screen_refresh(output_mode.refresh);
+    crate::dmabuf::advertise(&mut runtime.state, &renderer);
     let environments = Environments::discover();
     let sky_image = environments.current();
     let mut scene = Scene::new(&mut renderer, &sky_image)?;
@@ -263,6 +264,7 @@ pub fn run(
                     display.flush_clients()?;
                     event_loop.dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
 
+                    crate::dmabuf::settle(&mut runtime.state, &mut renderer);
                     windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
                     if !windows.is_empty() {
                         // The first buffer a toolkit commits is usually blank -- it has the
@@ -281,6 +283,7 @@ pub fn run(
                             display.flush_clients()?;
                             event_loop
                                 .dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
+                            crate::dmabuf::settle(&mut runtime.state, &mut renderer);
                         }
                         windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
                         // A click, if one was asked for, and then time to answer it. A menu
