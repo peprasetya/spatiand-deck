@@ -164,6 +164,7 @@ on purpose — it is shown precisely when there is no headset to ask.
 |---|---|
 | [docs/apps.md](docs/apps.md) | Writing an application for Spatiand: window sizing, audio layouts, and the stereo and immersive-video protocols as they are specified so far |
 | [docs/x11.md](docs/x11.md) | Why X11 runs and is not supported |
+| [docs/openxr.md](docs/openxr.md) | Why Spatiand is not an OpenXR runtime, what it would take, and the order to do it in |
 | [docs/install.md](docs/install.md) | Installing a release, and what to check when it goes wrong |
 | [docs/xreal-air.md](docs/xreal-air.md) | The glasses' protocol, verified against hardware. Probably the most reusable thing here |
 | [docs/steam-deck-controller.md](docs/steam-deck-controller.md) | The controller's HID reports |
