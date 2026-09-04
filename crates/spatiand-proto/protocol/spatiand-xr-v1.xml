@@ -1,0 +1,306 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="spatiand_xr_v1">
+
+  <copyright>
+    Copyright (c) 2026 Spatiand contributors
+    SPDX-License-Identifier: MIT
+  </copyright>
+
+  <description summary="stereoscopic and head-tracked surfaces">
+    This is a protocol about applications, not about video. Any application may
+    want to be stereoscopic -- a modelling tool, a map, a game, a terminal with
+    depth to it -- and the compositor's job is to let it appear the way it means
+    to appear, whatever it draws. A media player is only the first client.
+
+    Three things a Wayland client needs in order to draw for a head, and cannot
+    get any other way:
+
+    1. a way to say how the two eyes' views are packed into its buffer,
+    2. a way to say what the surface *is* in the world -- a panel, something
+       pinned to the view, a pair of eye views, or the sky itself,
+    3. the head and eye poses, before it renders.
+
+    Everything else it already has. A wl_buffer is the swapchain, a frame
+    callback is the frame loop, a wl_surface is the layer. This protocol
+    deliberately adds nothing that Wayland already carries.
+
+    HYBRID CLIENTS
+
+    A client that binds nothing here is an ordinary window, and an ordinary
+    window is what it stays. Every request below is opt-in and every one has a
+    defined meaning on a compositor that is showing the surface flat. The
+    intended shape is one application that runs on a normal desktop, runs as a
+    flat window here, and turns itself stereoscopic or immersive when it finds
+    this global -- not three applications, and not a mode switch.
+
+    COORDINATES
+
+    This protocol's frame is **OpenXR's**, not the compositor's: +X right,
+    +Y up, -Z forward, right-handed, metres, and quaternions in (x, y, z, w)
+    order. The compositor's own frame is different and is not exposed here.
+
+    That is a deliberate choice at the boundary. It makes an OpenXR adapter a
+    memcpy rather than a translation layer, and it means every convention a VR
+    developer already has in their fingers is the right one. The structures in
+    the pose channel are field-compatible with XrPosef and XrFovf for the same
+    reason.
+
+    UNITS ON THE WIRE
+
+    Wayland has no floating point. The rarely-sent values here are signed
+    integers in micro-units: micrometres for distance, microradians for angle.
+    The per-frame values are not on the wire at all -- see the pose channel.
+  </description>
+
+  <interface name="spatiand_xr_v1" version="1">
+    <description summary="stereoscopic and head-tracked surfaces">
+      The factory. Binding it says nothing and changes nothing.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the factory">
+        Objects already created stay valid.
+      </description>
+    </request>
+
+    <request name="get_xr_surface">
+      <description summary="extend a surface with stereo and layer state">
+        One per wl_surface for its lifetime. Requesting a second is a protocol
+        error, because two objects setting the layout of one surface have no
+        defined resolution.
+      </description>
+      <arg name="id" type="new_id" interface="spatiand_xr_surface_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <request name="get_pose_channel">
+      <description summary="ask for the shared-memory pose channel">
+        See spatiand_xr_pose_channel_v1. A client that only shows pre-packed
+        stereo -- a side-by-side film, say -- does not need this and should not
+        ask for it: it is the compositor's head tracking, and asking for it
+        while not using it is the difference between a player and a headset
+        application.
+      </description>
+      <arg name="id" type="new_id" interface="spatiand_xr_pose_channel_v1"/>
+    </request>
+
+    <enum name="error">
+      <entry name="surface_exists" value="0" summary="the surface already has an xr object"/>
+      <entry name="bad_layer" value="1" summary="layer value not in the enum"/>
+      <entry name="bad_layout" value="2" summary="eye layout value not in the enum"/>
+    </enum>
+  </interface>
+
+  <interface name="spatiand_xr_surface_v1" version="1">
+    <description summary="how a surface is drawn for two eyes">
+      All state here is double-buffered: it takes effect on the next
+      wl_surface.commit, like everything else about a surface. Changing layout
+      between frames is expected and costs nothing -- a player showing a
+      side-by-side film with a flat menu over it changes it twice a second.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="stop treating this surface specially">
+        The surface reverts to mono, layer "window", on the next commit.
+      </description>
+    </request>
+
+    <request name="set_eye_layout">
+      <description summary="how the two eyes are packed into the buffer">
+        With "mono" both eyes are shown the same pixels; this is the default
+        and is what a surface that never calls this does.
+
+        For the split layouts the two eyes sample opposite halves of the SAME
+        buffer while the surface keeps ONE position in the world. Full-width
+        and half-width side-by-side are not distinguished, because they are not
+        different: each eye is given its half stretched across the surface, and
+        only the sharpness differs. Send the source as it is.
+      </description>
+      <arg name="layout" type="uint" enum="eye_layout"/>
+    </request>
+
+    <enum name="eye_layout">
+      <entry name="mono" value="0" summary="both eyes see the whole buffer"/>
+      <entry name="side_by_side" value="1" summary="left eye in the left half"/>
+      <entry name="top_bottom" value="2" summary="left eye in the top half"/>
+    </enum>
+
+    <request name="set_eye_swapped">
+      <description summary="the halves are the other way round">
+        Some sources are packed right-eye-first and nothing in the file says
+        so. A viewer needs a control for that which does not mean re-encoding.
+      </description>
+      <arg name="swapped" type="uint" summary="0 or 1"/>
+    </request>
+
+    <request name="set_layer">
+      <description summary="what this surface is in the world">
+        See the layer enum. A compositor that cannot honour a layer -- the sky
+        is already taken, say -- answers with layer_refused and keeps drawing
+        the surface as a window, which is always a valid thing to be.
+      </description>
+      <arg name="layer" type="uint" enum="layer"/>
+    </request>
+
+    <enum name="layer">
+      <entry name="window" value="0">
+        <description summary="an ordinary panel in the room">
+          The default. Moved and resized by the wearer, stays where it is put.
+          The OpenXR quad layer is this.
+        </description>
+      </entry>
+      <entry name="head_locked" value="1">
+        <description summary="a panel that follows the view">
+          Keeps its angular size and position relative to the head. For content
+          that must stay in front of you, and for a client doing its own head
+          tracking -- a nested runtime, say -- where the compositor moving the
+          surface as well would apply tracking twice.
+        </description>
+      </entry>
+      <entry name="projection" value="2">
+        <description summary="the client has rendered the two eye views itself">
+          The buffer is what the eyes should see, drawn by the client from the
+          poses in the pose channel, and is presented filling the view rather
+          than as a panel in it. Requires an eye layout other than mono.
+          The OpenXR projection layer is this.
+        </description>
+      </entry>
+      <entry name="equirect_180" value="3">
+        <description summary="the client is the sky, front hemisphere">
+          Equirectangular, covering 180 degrees of longitude in front of the
+          wearer. Behind them there is no image and the compositor says so
+          rather than smearing the edge.
+        </description>
+      </entry>
+      <entry name="equirect_360" value="4">
+        <description summary="the client is the sky, all of it"/>
+      </entry>
+    </enum>
+
+    <request name="set_yaw_offset">
+      <description summary="turn an immersive image about the vertical axis">
+        Microradians. Only meaningful for the equirect layers, where it brings
+        the interesting part of a panorama round to face the wearer's forward.
+        Ignored otherwise.
+      </description>
+      <arg name="microradians" type="int"/>
+    </request>
+
+    <event name="layer_refused">
+      <description summary="the compositor will not do that">
+        The surface keeps whatever layer it had. Carries the layer that was
+        asked for, so a client that asked for two things knows which failed,
+        and a human-readable reason which is for a log and not for a user.
+      </description>
+      <arg name="layer" type="uint" enum="layer"/>
+      <arg name="reason" type="string"/>
+    </event>
+
+    <event name="layer_lost">
+      <description summary="an exclusive layer has been taken away">
+        Sent when the wearer or another client takes back something only one
+        surface can have -- the sky. The surface is a window again from the
+        next frame. A client that crashes cannot leave the wearer inside a
+        frozen image, because the same thing happens when its surface dies.
+      </description>
+      <arg name="layer" type="uint" enum="layer"/>
+    </event>
+  </interface>
+
+  <interface name="spatiand_xr_pose_channel_v1" version="1">
+    <description summary="head and eye poses, in shared memory">
+      Poses are NOT sent as events, and that is the central decision in this
+      protocol.
+
+      A head-tracked client has to know where the head is at the last possible
+      moment before it renders -- that is what makes the world stay still. An
+      event carrying the pose is already stale when it arrives: it costs a
+      round trip, it arrives when the compositor got round to sending it rather
+      than when the client needs it, and it cannot be re-read a millisecond
+      later without another round trip.
+
+      So the compositor writes poses into a small ring in shared memory and
+      hands over a read-only file descriptor. The client maps it once and reads
+      the newest sample whenever it likes, including immediately before
+      submitting a frame. No round trips, no per-frame protocol traffic, and
+      late-latching becomes a memory read.
+
+      The ring also carries a short history, so a client can interpolate to an
+      arbitrary time -- which is exactly what an OpenXR adapter needs to answer
+      xrLocateViews for a predicted display time.
+
+      MEMORY FORMAT
+
+      Little-endian, naturally aligned, and stable for the life of this
+      interface version. All floats are IEEE-754 binary32. Times are
+      CLOCK_MONOTONIC nanoseconds, the same clock a frame callback's time
+      comes from.
+
+        struct spatiand_xr_channel {          // offset 0
+            uint32_t version;                 // 1
+            uint32_t slot_count;              // power of two
+            uint32_t slot_stride;             // bytes
+            uint32_t slots_offset;            // bytes from the start
+            uint64_t write_index;             // total slots ever written
+            uint64_t _reserved;
+        };
+
+        struct spatiand_xr_slot {             // slots_offset + (i * slot_stride)
+            uint64_t seq;                     // odd while being written
+            int64_t  sample_ns;               // when this pose was measured
+            int64_t  predicted_ns;            // when a frame submitted now is expected to be shown
+            int64_t  _reserved;
+            float    head_orientation[4];     // x, y, z, w  -- XrQuaternionf
+            float    head_position[3];        // metres      -- XrVector3f
+            float    _pad0;
+            struct {
+                float orientation[4];         // x, y, z, w
+                float position[3];            // metres, relative to the tracking origin
+                float _pad;
+                float fov[4];                 // angleLeft, angleRight, angleUp, angleDown
+                                              // radians, signed -- XrFovf exactly
+            } eye[2];                         // 0 = left
+        };
+
+      READING IT
+
+      Read `write_index`, take slot `(write_index - 1) modulo slot_count`
+      (the count is a power of two, so this is a mask), read `seq`, read the
+      body, read `seq` again. If either `seq` read is odd
+      or the two differ, the writer was in that slot: step back one slot or try
+      again. This is an ordinary seqlock and it never blocks the compositor.
+
+      The compositor writes at its own rate, which is the display rate. A
+      client that reads faster will see repeats; one that reads slower will
+      miss samples. Neither is an error.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="stop receiving poses">
+        The mapping stays valid until the client unmaps it, but stops being
+        updated.
+      </description>
+    </request>
+
+    <event name="channel">
+      <description summary="here is the shared memory">
+        Sent once, immediately. The descriptor is read-only and sealed; map it
+        with MAP_SHARED and PROT_READ.
+      </description>
+      <arg name="fd" type="fd"/>
+      <arg name="size" type="uint" summary="bytes to map"/>
+    </event>
+
+    <event name="unavailable">
+      <description summary="there are no poses to give">
+        Sent instead of `channel` when the session has no head tracking at all
+        -- no headset plugged in, or a nested session on a desktop. A client
+        should carry on as a flat window rather than wait. It is not an error
+        and the object stays alive; `channel` may arrive later if a headset
+        appears.
+      </description>
+      <arg name="reason" type="string"/>
+    </event>
+  </interface>
+
+</protocol>

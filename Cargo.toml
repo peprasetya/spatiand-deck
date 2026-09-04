@@ -8,12 +8,13 @@ members = [
     "crates/spatiand-audio",
     "crates/spatiand-shell",
     "crates/spatiand-platform",
+    "crates/spatiand-proto",
     "crates/spatiand",
 ]
 
 # Crates scaffolded but not yet implemented are deliberately left out of `members`
 # until they compile, so `cargo build` at the root always means something.
-#   spatiand-media     spatiand-proto
+#   spatiand-media
 
 [workspace.package]
 version = "0.1.0"

@@ -136,6 +136,23 @@ pub struct Spatiand {
     /// The scanout outputs are deliberately *not* advertised. They exist for the DRM
     /// compositor's mode source and nothing else.
     pub screen: Output,
+    /// Surfaces a client has extended with `spatiand_xr_v1`, and the object that did it.
+    ///
+    /// Kept as a list rather than a map because it is walked once per commit and is never
+    /// more than a handful long — a client extends the surfaces it draws stereoscopically,
+    /// not every surface it has.
+    pub xr_surfaces: Vec<(
+        WlSurface,
+        spatiand_proto::server::spatiand_xr_surface_v1::SpatiandXrSurfaceV1,
+    )>,
+    /// Clients waiting to be handed the shared-memory pose channel.
+    pub pose_clients:
+        Vec<spatiand_proto::server::spatiand_xr_pose_channel_v1::SpatiandXrPoseChannelV1>,
+    /// A client has asked for poses and has not been answered yet.
+    ///
+    /// Answered from the frame loop, because only the backend knows whether there is a head
+    /// being tracked — the same reason dmabuf imports are answered there.
+    pub pose_channels_to_open: bool,
     /// Yaw the wearer is currently facing, radians, refreshed once a frame by the backend.
     ///
     /// Lives here because `new_toplevel` needs it and has no access to the tracker: a window
@@ -166,6 +183,11 @@ impl Spatiand {
         seat.add_keyboard(Default::default(), 200, 25)
             .expect("failed to create keyboard");
         seat.add_pointer();
+
+        // Stereo, head-locked and immersive surfaces. Binding it says nothing and changes
+        // nothing: an application that ignores it is an ordinary window, which is the whole
+        // design. See `crate::xr` and the protocol XML.
+        dh.create_global::<Self, spatiand_proto::server::spatiand_xr_v1::SpatiandXrV1, _>(1, ());
 
         // The screen clients see. Refresh is a placeholder until a backend reports the real
         // one; the size is the size every toplevel is offered.
@@ -224,6 +246,9 @@ impl Spatiand {
             x11_popups: Vec::new(),
             xwm: None,
             xwayland_shell_state,
+            xr_surfaces: Vec::new(),
+            pose_clients: Vec::new(),
+            pose_channels_to_open: false,
             screen,
             spawn_yaw: 0.0,
         }
@@ -490,6 +515,13 @@ impl CompositorHandler for Spatiand {
             {
                 window.on_commit();
             }
+        }
+
+        // Whatever the client asked `spatiand_xr_v1` for since its last commit takes effect
+        // now, which is what makes every request in that protocol double-buffered like the
+        // rest of a surface's state.
+        if let Some((_, object)) = self.xr_surfaces.iter().find(|(s, _)| s == surface) {
+            crate::xr::commit(surface, &object.clone());
         }
 
         // Popup bookkeeping is keyed on the popup's own surface, not on the root found above:

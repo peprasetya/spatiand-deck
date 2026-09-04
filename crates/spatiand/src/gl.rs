@@ -41,7 +41,13 @@ uniform sampler2D u_tex;
 uniform vec4 u_tint;
 // Left/right halves of a side-by-side source, so one texture can feed both eyes with
 // different content. (0,1) means "use the whole thing", which is the mono case.
-uniform vec2 u_uv_range;
+// Which rectangle of the texture to sample: (u0, u1, v0, v1).
+//
+// A vec4 rather than the horizontal span it used to be, because a stereo surface can be
+// packed top-and-bottom as well as side-by-side -- and over-under is the layout almost every
+// stereo 360 photograph and VR180 video actually uses, because it keeps full horizontal
+// resolution. See `spatiand_xr_v1`.
+uniform vec4 u_uv_range;
 // 1.0 to ignore whatever is in the texture's alpha channel.
 //
 // Needed because a buffer can carry an alpha channel that means nothing. An XRGB buffer --
@@ -52,7 +58,10 @@ uniform vec2 u_uv_range;
 uniform float u_opaque;
 out vec4 f_color;
 void main() {
-    vec2 uv = vec2(u_uv_range.x + v_uv.x * (u_uv_range.y - u_uv_range.x), v_uv.y);
+    vec2 uv = vec2(
+        u_uv_range.x + v_uv.x * (u_uv_range.y - u_uv_range.x),
+        u_uv_range.z + v_uv.y * (u_uv_range.w - u_uv_range.z)
+    );
     f_color = texture(u_tex, uv) * u_tint;
     f_color.a = mix(f_color.a, u_tint.a, u_opaque);
 }
@@ -348,6 +357,11 @@ pub struct QuadPipeline {
     loc_opaque: i32,
 }
 
+/// A horizontal span over the whole height, which is what every non-stereo caller means.
+fn whole_height(range: (f32, f32)) -> [f32; 4] {
+    [range.0, range.1, 0.0, 1.0]
+}
+
 impl QuadPipeline {
     pub fn new(renderer: &mut GlesRenderer) -> Result<Self, String> {
         renderer
@@ -382,7 +396,26 @@ impl QuadPipeline {
         tint: [f32; 4],
         uv_range: (f32, f32),
     ) {
-        self.draw_inner(gl, texture, mvp, tint, uv_range, 0.0);
+        self.draw_inner(gl, texture, mvp, tint, whole_height(uv_range), 0.0);
+    }
+
+    /// Draw one eye's half of a stereoscopic surface.
+    ///
+    /// `rect` is `(u0, u1, v0, v1)` and comes from [`crate::xr::XrState::eye_rect`]. The quad
+    /// and its transform are identical for both eyes; only this differs. That is the entire
+    /// rendering consequence of the stereo protocol.
+    ///
+    /// # Safety
+    /// Must be called with the GL context current.
+    pub unsafe fn draw_opaque_rect(
+        &self,
+        gl: &ffi::Gles2,
+        texture: u32,
+        mvp: &Mat4,
+        tint: [f32; 4],
+        rect: [f32; 4],
+    ) {
+        self.draw_inner(gl, texture, mvp, tint, rect, 1.0);
     }
 
     /// The same, ignoring whatever the texture's alpha channel says.
@@ -401,7 +434,7 @@ impl QuadPipeline {
         tint: [f32; 4],
         uv_range: (f32, f32),
     ) {
-        self.draw_inner(gl, texture, mvp, tint, uv_range, 1.0);
+        self.draw_inner(gl, texture, mvp, tint, whole_height(uv_range), 1.0);
     }
 
     unsafe fn draw_inner(
@@ -410,7 +443,7 @@ impl QuadPipeline {
         texture: u32,
         mvp: &Mat4,
         tint: [f32; 4],
-        uv_range: (f32, f32),
+        uv_range: [f32; 4],
         opaque: f32,
     ) {
         gl.UseProgram(self.program);
@@ -425,7 +458,13 @@ impl QuadPipeline {
         gl.Uniform1i(self.loc_tex, 0);
         gl.UniformMatrix4fv(self.loc_mvp, 1, ffi::FALSE, mvp.to_cols_array().as_ptr());
         gl.Uniform4f(self.loc_tint, tint[0], tint[1], tint[2], tint[3]);
-        gl.Uniform2f(self.loc_uv_range, uv_range.0, uv_range.1);
+        gl.Uniform4f(
+            self.loc_uv_range,
+            uv_range[0],
+            uv_range[1],
+            uv_range[2],
+            uv_range[3],
+        );
         gl.Uniform1f(self.loc_opaque, opaque);
 
         gl.DrawArrays(ffi::TRIANGLES, 0, 6);

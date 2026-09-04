@@ -134,6 +134,9 @@ pub struct WindowQuad {
     pub mute_hot: bool,
     /// Menus and dropdowns this window has open, innermost last.
     pub popups: Vec<PopupQuad>,
+    /// What the client said this surface is: mono or stereo, and how packed. Default for a
+    /// client that never asked, which is a mono window. See `spatiand_xr_v1`.
+    pub xr: crate::xr::XrState,
 }
 
 /// What a window is playing, as far as its title bar is concerned.
@@ -1488,8 +1491,17 @@ impl Scene {
             // whose alpha bytes were zero -- an XRGB buffer, which is what XWayland posts --
             // came out invisible however opaque the tint was. That is the whole of the "VLC
             // plays the sound and you can see the room through the video" bug.
-            self.quads
-                .draw_opaque(gl, window.texture, &mvp, [1.0, 1.0, 1.0, 1.0], (0.0, 1.0));
+            //
+            // And each eye samples its own part of the buffer. For a mono surface -- which is
+            // every surface that has not said otherwise -- that is the whole of it, and this
+            // is the same draw it always was.
+            self.quads.draw_opaque_rect(
+                gl,
+                window.texture,
+                &mvp,
+                [1.0, 1.0, 1.0, 1.0],
+                window.xr.eye_rect(matches!(eye.side, EyeSide::Left)),
+            );
 
             // Menus and dropdowns, on the window's own plane and a hair in front of it.
             //
@@ -2682,6 +2694,7 @@ pub fn collect_windows(
             sound: None,
             mute_hot: false,
             popups,
+            xr: crate::xr::state_of(&surface),
         });
     }
     out

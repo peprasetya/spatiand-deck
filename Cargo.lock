@@ -2464,6 +2464,7 @@ dependencies = [
  "spatiand-hmd",
  "spatiand-input",
  "spatiand-platform",
+ "spatiand-proto",
  "spatiand-render",
  "spatiand-shell",
  "spatiand-track",
@@ -2512,6 +2513,15 @@ name = "spatiand-platform"
 version = "0.1.0"
 dependencies = [
  "log",
+]
+
+[[package]]
+name = "spatiand-proto"
+version = "0.1.0"
+dependencies = [
+ "wayland-backend",
+ "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]

@@ -1,0 +1,20 @@
+[package]
+name = "spatiand-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Spatiand's private Wayland protocols"
+
+[dependencies]
+# Pinned to the versions smithay already brings in: two copies of wayland-server in one
+# process is not a compile error, it is a runtime one -- objects created through one are
+# unrecognised by the other, and the symptom is a client that binds a global successfully and
+# then has every request ignored.
+wayland-server = "0.31"
+wayland-scanner = "0.31"
+# Not used by name in this crate's own source: the generated code refers to it. Leaving it out
+# gives "cannot find module or crate `wayland_backend`" from inside a macro expansion, which
+# points at the macro rather than at the missing dependency.
+wayland-backend = "0.3"
