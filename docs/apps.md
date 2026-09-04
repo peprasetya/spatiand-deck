@@ -24,9 +24,9 @@ document:
 | GPU buffers (`zwp_linux_dmabuf_v1`) | **Works** |
 | Menus, popups, X11 compatibility | **Works** |
 | Environment from image files | **Interim** |
-| `spatiand_xr_v1` — stereoscopic and head-locked surfaces | **Works** |
-| `spatiand_xr_v1` — projection and equirect layers | Refused, not built |
-| `spatiand_xr_v1` — the shared-memory pose channel | Accepted, not yet filled |
+| `spatiand_xr_v1` — stereo layouts, head-locked, equirect | **Works** |
+| `spatiand_xr_v1` — the shared-memory pose channel | **Works** |
+| `spatiand_xr_v1` — the `projection` layer | Refused, not built |
 | OpenXR | Not a runtime — see [openxr.md](openxr.md) |
 
 ---
@@ -133,184 +133,99 @@ Three things worth knowing:
     running flat out; if you see tearing inside a window, say so, because that
     is the shape it would take.
 
-## 4. Stereoscopic windows — one surface, two eyes
+## 4. Being stereoscopic, head-locked, or the room itself
 
-**Specified.** The renderer already samples a sub-rectangle of a window's
-texture per eye; what does not exist is the protocol for saying which
-sub-rectangle. Until it does, every window is drawn identically to both eyes.
+**Works.** `spatiand_xr_v1`, defined in
+`crates/spatiand-proto/protocol/spatiand-xr-v1.xml` — that file is the
+specification and this is the summary. `tools/stereo-probe.c` is a ~150-line
+client that does all of it.
 
-### The model
+Bind the global, get an object for your surface, and set two things. Both are
+double-buffered against `wl_surface.commit`, like everything else about a
+surface, so layout and buffer land on the same frame and never one without the
+other.
 
-Your window is a single Wayland surface with a single buffer, exactly as any
-other window. A layout says how the two eyes' views are packed into it:
+### Eye layout
 
-| Layout | Left eye samples | Right eye samples | Buffer aspect |
-|---|---|---|---|
-| `mono` | the whole buffer | the whole buffer | natural |
-| `side_by_side` | `u ∈ [0, 0.5]` | `u ∈ [0.5, 1]` | double-wide |
-| `top_bottom` | `v ∈ [0, 0.5]` | `v ∈ [0.5, 1]` | double-tall |
+`set_eye_layout(mono | side_by_side | top_bottom)` and `set_eye_swapped(0|1)`.
 
-The quad's **3D transform does not change**. One window, one place in the room,
-each eye seeing its own half of it. This is the whole feature: a 3D film in a
-window looks like a window with depth in it, not like two windows.
+The two eyes sample opposite halves of the **same buffer** while the surface
+keeps one position, size and orientation in the world. That is the whole
+feature: one window with depth in it, not two windows.
 
-Half-width and full-width SBS are the same thing here. A 1920×1080 `side_by_side`
-buffer gives each eye 960×1080 stretched across the quad, and a 3840×1080 one
-gives each eye 1920×1080; the sampling is identical and only the sharpness
-differs. Send whatever your source is; do not unsqueeze it yourself.
+Half-width and full-width side-by-side are not distinguished, because they are
+not different — each eye gets its half stretched across the surface and only
+the sharpness changes. Send the source as it is; do not unsqueeze it yourself.
 
-### The protocol
+Verified per eye rather than by eye: a probe paints one buffer red-left,
+blue-right, the compositor renders each eye separately, and the centre pixel
+reads (224, 32, 32) and (32, 64, 224) — the probe's own two colours.
 
-```xml
-<interface name="spatiand_stereo_v1" version="1">
-  <request name="destroy" type="destructor"/>
+### Layer
 
-  <!-- Get a stereo object for a surface. One per surface. -->
-  <request name="get_stereo">
-    <arg name="id" type="new_id" interface="spatiand_stereo_surface_v1"/>
-    <arg name="surface" type="object" interface="wl_surface"/>
-  </request>
-</interface>
+`set_layer(...)` says what the surface *is*:
 
-<interface name="spatiand_stereo_surface_v1" version="1">
-  <request name="destroy" type="destructor"/>
+| Layer | Meaning | State |
+|---|---|---|
+| `window` | An ordinary panel the wearer moves and keeps. The default. | Works |
+| `head_locked` | Follows the view, keeping its angular size and position. | Works |
+| `equirect_180` / `equirect_360` | The surface **is the room**. | Works |
+| `projection` | You have rendered the two eye views to fill the view. | Refused |
 
-  <!-- Takes effect on the next wl_surface.commit, like everything else. -->
-  <request name="set_layout">
-    <arg name="layout" type="uint" enum="layout"/>
-  </request>
+`head_locked` moves the window in the *layout*, not just the drawing — so the
+pointer, a drag and the pixels all agree. It is also what makes a client doing
+its own head tracking possible: without it the compositor would track as well
+and apply it twice.
 
-  <enum name="layout">
-    <entry name="mono" value="0"/>
-    <entry name="side_by_side" value="1"/>
-    <entry name="top_bottom" value="2"/>
-  </enum>
+The equirect layers are **exclusive** — there is one room. A second client
+asking gets `layer_refused` with a reason. Ownership is claimed when the
+request arrives rather than when it commits, because two clients asking in the
+same frame have to get different answers. Post frames to the surface and they
+become the sky; `set_yaw_offset` (microradians) turns a panorama to face
+forward. Stereo works here too, so a VR180 over-under video is `equirect_180`
+plus `top_bottom` and nothing else.
 
-  <!-- Which half is the left eye. Some sources are swapped, and a viewer
-       needs a control for it that does not mean re-encoding. -->
-  <request name="set_swapped">
-    <arg name="swapped" type="uint"/>
-  </request>
-</interface>
-```
+Nothing is remembered: the compositor looks for the environment surface every
+frame. A client that crashes, stops posting, or gives the layer up cannot leave
+the wearer inside a frozen image — the wearer's own environment simply comes
+back on the next frame.
 
-Double-buffered against `wl_surface.commit`, so the frame you change the layout
-on is the first frame drawn with it. Switching layout mid-playback — a menu in
-mono over a side-by-side film — is a supported thing to do and costs nothing.
+**A layer is either honoured or refused out loud.** A layer accepted and then
+drawn as something else would be worse than one declined, because you would lay
+yourself out for something you are not getting. There is a test asserting that.
 
-### What to do today
+## 5. Where the head is
 
-**Nothing — none of this exists yet.** There is no `spatiand-proto` crate
-contents, no global advertised, and nothing in the compositor that would answer
-`set_layout`. What follows above is a design, not an interface.
+**Works**, and it is the part to read carefully if you draw your own views.
 
-That is deliberate. Rendering both eyes' views into your window
-yourself would produce a squashed picture in *both* eyes, and unpicking that
-later is worse than waiting. Ship mono until the protocol lands.
+`get_pose_channel` hands you a read-only file descriptor. Map it once, and the
+head and per-eye poses are a memory read from then on — no round trips, no
+per-frame protocol traffic. Read it as late as you can before submitting a
+frame; that is late-latching, and it is most of what makes a head-tracked world
+stay still.
 
-## 5. Immersive video — replacing the room
+The layout is in the XML and in `spatiand_proto::pose` if you are writing Rust.
+It is a seqlock ring: read `write_index`, take the newest slot, read `seq`,
+read the body, read `seq` again; if either read is odd or they differ, the
+writer was in that slot — step back or retry. The short history is there so you
+can interpolate to a predicted display time, which is exactly what
+`xrLocateViews` needs.
 
-**Interim for files, specified for video.**
+Each slot carries `sample_ns`, a `predicted_ns` for the frame you are about to
+draw, the head pose, and for each eye a pose and an `XrFovf`.
 
-Spatiand's environment — the 360° image around the windows — is already
-described by exactly the model a VR video needs:
+**The frame here is OpenXR's, not the compositor's**: +X right, +Y up, −Z
+forward, quaternions in (x, y, z, w). The structures are field-compatible with
+`XrPosef` and `XrFovf` on purpose, so an adapter is a memcpy. Spatiand's own
+frame is different and is converted once, at this boundary.
 
-  * **Projection:** `equirect_360` (full wrap) or `equirect_180` (front
-    hemisphere; behind you there is no image, and the renderer says so rather
-    than smearing the edge pixel round).
-  * **Stereo packing:** `mono`, `over_under` (left eye on top — what almost
-    every stereo 360 photograph and VR180 video uses, because it keeps full
-    horizontal resolution), or `side_by_side`.
-  * **Yaw offset:** rotate the panorama so its interesting part faces the
-    wearer's forward.
+If the session has no head tracking — no headset plugged in, or a nested
+development session — you get `unavailable` with a reason instead of a channel.
+Carry on as a flat window; do not wait.
 
-Head tracking, per-eye sampling and the 180° edge handling are all working code
-today. What is missing is a way for an application to be the source.
-
-### What works today: files
-
-Drop an image in `~/.local/share/spatiand/environments`, or point
-`SPATIAND_ENVIRONMENTS` at a folder of your own, and it appears in the
-environment picker. The projection and packing are guessed from the filename
-first and the aspect ratio second:
-
-| In the filename | Meaning |
-|---|---|
-| `180`, `vr180` | front hemisphere |
-| `_ou`, `_tb`, `over-under`, `top_bottom` | left eye on top |
-| `_sbs`, `side-by-side` | left eye on the left |
-
-Failing a hint: an image near square is read as over-under, wider than 3:1 as
-side-by-side, and anything between as mono. Name your files and you never have
-to think about it.
-
-This is enough to *test* a VR180 pipeline — decode a frame, write it out, look
-at it — and nowhere near enough to play video with.
-
-### The protocol
-
-```xml
-<interface name="spatiand_environment_v1" version="1">
-  <request name="destroy" type="destructor"/>
-
-  <!-- Ask to become the environment. The compositor answers with granted or
-       denied; another application may already hold it. -->
-  <request name="take">
-    <arg name="id" type="new_id" interface="spatiand_environment_surface_v1"/>
-    <arg name="surface" type="object" interface="wl_surface"/>
-  </request>
-</interface>
-
-<interface name="spatiand_environment_surface_v1" version="1">
-  <!-- Give the room back. Also happens automatically if the surface is
-       destroyed, so a crash cannot leave the wearer inside a frozen frame. -->
-  <request name="release" type="destructor"/>
-
-  <request name="set_projection">
-    <arg name="projection" type="uint" enum="projection"/>
-  </request>
-  <request name="set_stereo">
-    <arg name="stereo" type="uint" enum="stereo"/>
-  </request>
-  <!-- Millidegrees, so a panorama can be turned to face forward without a
-       floating-point argument in a protocol that has no floats. -->
-  <request name="set_yaw_offset">
-    <arg name="millidegrees" type="int"/>
-  </request>
-
-  <enum name="projection">
-    <entry name="equirect_360" value="0"/>
-    <entry name="equirect_180" value="1"/>
-  </enum>
-  <enum name="stereo">
-    <entry name="mono" value="0"/>
-    <entry name="over_under" value="1"/>
-    <entry name="side_by_side" value="2"/>
-  </enum>
-
-  <event name="granted"/>
-  <event name="denied">
-    <arg name="reason" type="string"/>
-  </event>
-  <!-- The wearer took the room back through the HUD, or another application
-       was granted it. Stop drawing to it; your window is still yours. -->
-  <event name="revoked"/>
-</interface>
-```
-
-The surface you hand over is an ordinary surface with ordinary buffers: post
-frames to it and they become the sky. Your *window* stays where it is — the
-common shape is a player whose window becomes the transport controls while the
-film is all around, and hiding it is your decision, not the compositor's.
-
-Two rules that are not negotiable, because they are what keeps a headset
-comfortable:
-
-  * **Frames are late-latched against head pose, not against your commit.** You
-    supply a sphere; where the wearer is looking is not your business and must
-    not be sampled by you.
-  * **The environment is restored when you release it.** The wearer's previous
-    choice comes back exactly as it was.
+You do **not** need this to show pre-packed stereo video, or to be the
+environment. Those are the compositor's tracking, not yours. This is for
+drawing your own geometry.
 
 ## 6. Audio
 

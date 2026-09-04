@@ -145,6 +145,12 @@ pub struct Spatiand {
         WlSurface,
         spatiand_proto::server::spatiand_xr_surface_v1::SpatiandXrSurfaceV1,
     )>,
+    /// The surface that has taken the environment, if any.
+    ///
+    /// There is one room and it can only be one thing, so this is exclusive and first come
+    /// first served. Claimed when the request arrives rather than when it commits, because
+    /// two clients asking in the same frame have to get different answers.
+    pub sky_owner: Option<WlSurface>,
     /// Clients waiting to be handed the shared-memory pose channel.
     pub pose_clients:
         Vec<spatiand_proto::server::spatiand_xr_pose_channel_v1::SpatiandXrPoseChannelV1>,
@@ -247,6 +253,7 @@ impl Spatiand {
             xwm: None,
             xwayland_shell_state,
             xr_surfaces: Vec::new(),
+            sky_owner: None,
             pose_clients: Vec::new(),
             pose_channels_to_open: false,
             screen,

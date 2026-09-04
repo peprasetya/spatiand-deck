@@ -16,6 +16,11 @@
 // SPATIAND_STEREO=tb makes it top-and-bottom instead, and SPATIAND_STEREO=swap swaps the eyes,
 // which is how the two remaining branches of the layout arithmetic get exercised against a
 // real client rather than only in a unit test.
+//
+// SPATIAND_LAYER=equirect360 (or equirect180, or head_locked, or projection) asks for that
+// layer instead of being an ordinary window. With an equirect layer the two halves become the
+// sky rather than a panel, so the whole view goes red or blue depending on the eye -- which is
+// a crude picture and an unambiguous test.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,6 +85,17 @@ static void surface_configure(void *d, struct xdg_surface *s, uint32_t serial) {
     if (xr) {
         struct spatiand_xr_surface_v1 *x = spatiand_xr_v1_get_xr_surface(xr, surface);
         spatiand_xr_surface_v1_add_listener(x, &xr_surface_events, NULL);
+
+        const char *want = getenv("SPATIAND_LAYER");
+        if (want) {
+            uint32_t layer = SPATIAND_XR_SURFACE_V1_LAYER_WINDOW;
+            if (!strcmp(want, "head_locked")) layer = SPATIAND_XR_SURFACE_V1_LAYER_HEAD_LOCKED;
+            else if (!strcmp(want, "projection")) layer = SPATIAND_XR_SURFACE_V1_LAYER_PROJECTION;
+            else if (!strcmp(want, "equirect180")) layer = SPATIAND_XR_SURFACE_V1_LAYER_EQUIRECT_180;
+            else if (!strcmp(want, "equirect360")) layer = SPATIAND_XR_SURFACE_V1_LAYER_EQUIRECT_360;
+            spatiand_xr_surface_v1_set_layer(x, layer);
+            fprintf(stderr, "probe: asked for layer %s (%u)\n", want, layer);
+        }
         spatiand_xr_surface_v1_set_eye_layout(x,
             top_bottom ? SPATIAND_XR_SURFACE_V1_EYE_LAYOUT_TOP_BOTTOM
                        : SPATIAND_XR_SURFACE_V1_EYE_LAYOUT_SIDE_BY_SIDE);

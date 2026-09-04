@@ -24,6 +24,13 @@ because a great many programs have no Wayland support and never will. They are
 being put in a room, every X11 window says so on its title bar, and
 [docs/x11.md](docs/x11.md) says exactly what breaks.
 
+**3D applications.** `spatiand_xr_v1` lets an application say how its two eye
+views are packed into one buffer, whether it follows the view, and whether it is
+the room itself — 180° or 360°, mono or stereo. It also hands over head and eye
+poses through shared memory, so an application drawing its own views can read
+them at the last moment before it draws. An application that ignores all of it
+is an ordinary window and stays one. See [docs/apps.md](docs/apps.md).
+
 **GPU buffers.** Clients can hand over decoded frames as dmabuf rather than
 copying them through shared memory — which is what a hardware video decoder
 produces natively, and the difference between a video player that works and one
@@ -58,12 +65,9 @@ Listed because finding out by hitting them is worse.
 
   * **Two-handed window gestures.** The geometry is written and tested; nothing
     consumes it, so moving and scaling with both thumbs does nothing.
-  * **Stereoscopic windows.** A 3D film in a window is drawn to both eyes
-    identically. The renderer can already sample half a buffer per eye; the
-    protocol for an application to ask for it is specified in
-    [docs/apps.md](docs/apps.md) and not built.
-  * **VR video.** The environment can be 180° or 360°, mono or stereo, but only
-    from an image file. An application cannot yet be the source.
+  * **OpenXR projection layers.** An application can render its own two eye
+    views and be shown them as a window; what it cannot yet do is have them
+    presented filling the view. The layer is refused rather than ignored.
   * **OpenXR.** Spatiand is not an OpenXR runtime and does not pretend to be
     one. [docs/openxr.md](docs/openxr.md) sets out what would have to be true
     and which of the three possible routes is worth taking.

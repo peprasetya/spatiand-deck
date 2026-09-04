@@ -686,6 +686,15 @@ pub fn run(
         // Now that there is a renderer, clients can be offered dmabuf -- the formats come from
         // it, and there is nothing truthful to advertise before it exists.
         crate::dmabuf::advertise(&mut runtime.state, &renderer);
+        // Where head poses are published for clients that draw their own eye views. Created on
+        // demand: a session where nothing asks for poses never makes it.
+        let mut pose_channel: Option<crate::pose::Channel> = None;
+        // How long one frame is, for the predicted display time. Read from the mode rather
+        // than assumed, because it is 72 Hz on the glasses and something else on a panel.
+        let frame_ns: i64 = output
+            .current_mode()
+            .map(|m| 1_000_000_000_000i64 / m.refresh.max(1) as i64)
+            .unwrap_or(1_000_000_000 / 60);
         // Read the panel's brightness *after* the mode switch, not before it.
         //
         // It is read once when the headset opens, which is early enough to have something to
@@ -1287,6 +1296,47 @@ pub fn run(
                 spatiand_track::DEFAULT_PREDICTION_SECONDS,
                 spatiand_track::DEFAULT_PREDICTION_MAX_DEGREES,
             );
+
+            // --- poses, for clients that draw their own eye views ---
+            //
+            // Answered here rather than in the protocol callback for the same reason dmabuf
+            // imports are: only this loop knows whether there is a head being tracked, and
+            // telling a client "yes" and then never writing a pose would be worse than
+            // telling it "no".
+            if !runtime.state.pose_clients.is_empty() {
+                if hmd.is_none() {
+                    for client in runtime.state.pose_clients.drain(..) {
+                        client.unavailable("no headset is being tracked in this session".into());
+                    }
+                } else {
+                    if pose_channel.is_none() {
+                        match crate::pose::Channel::new() {
+                            Ok(channel) => pose_channel = Some(channel),
+                            Err(e) => log::warn!("could not make a pose channel: {e}"),
+                        }
+                    }
+                    match pose_channel.as_ref() {
+                        Some(channel) => {
+                            for client in runtime.state.pose_clients.drain(..) {
+                                client.channel(channel.fd(), channel.size());
+                            }
+                            log::info!("a client is reading head poses");
+                        }
+                        None => {
+                            for client in runtime.state.pose_clients.drain(..) {
+                                client.unavailable("the pose channel could not be created".into());
+                            }
+                        }
+                    }
+                }
+                runtime.state.pose_channels_to_open = false;
+            }
+            if let Some(channel) = pose_channel.as_mut() {
+                // The pose that is about to be drawn with, so a client reading now and the
+                // compositor drawing now agree about where the head is.
+                let sample = crate::pose::now_ns();
+                channel.write(orientation, DVec3::ZERO, &stereo, sample, sample + frame_ns);
+            }
             let prompt_text = match calibration.as_ref() {
                 _ if missing.is_some() => {
                     // Follow HoloFrame here: with no glasses, say so plainly on whatever screen
@@ -1382,6 +1432,11 @@ pub fn run(
             // Answer any dmabuf a client offered since the last frame, before importing:
             // a buffer nobody has said yes to yet is one the client has not committed.
             crate::dmabuf::settle(&mut runtime.state, &mut renderer);
+            // And find out whether an application is the environment this frame. Asked every
+            // frame rather than remembered: a client that crashes or stops posting simply
+            // stops being found, and the wearer's own environment comes back by itself.
+            let sky_from_client = crate::scene::sky_surface(&mut renderer, &runtime.state);
+            scene.set_sky_override(sky_from_client);
             // Import client buffers before the draw closure takes the context.
             let mut windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
             for quad in windows.iter_mut() {

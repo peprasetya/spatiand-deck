@@ -318,6 +318,13 @@ pub fn run(
             Err(e) => log::warn!("could not launch {command:?}: {e}"),
         }
     }
+    // Whether an application has taken the environment. Asked once here, because a snapshot
+    // is one frame -- in the session this is asked every frame. See `scene::sky_surface`.
+    let sky_from_client = crate::scene::sky_surface(&mut renderer, &runtime.state);
+    if sky_from_client.is_some() {
+        log::info!("an application is the environment for this frame");
+    }
+    scene.set_sky_override(sky_from_client);
     {
         let ppd_now = TextRenderer::px_per_degree(width, 40.0);
         for quad in windows.iter_mut() {

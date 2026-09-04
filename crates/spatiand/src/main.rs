@@ -29,6 +29,7 @@ mod input_map;
 mod keyboard_face;
 mod menu;
 mod pointer;
+mod pose;
 mod prefs;
 mod scene;
 mod shutdown;

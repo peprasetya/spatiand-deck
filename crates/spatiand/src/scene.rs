@@ -23,7 +23,7 @@
 //! what every VR headset does, while the aiming maths is untouched.
 
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
-use spatiand_render::sky::{SkyEye, SkyProjection, SkySource};
+use spatiand_render::sky::{SkyEye, SkyProjection, SkySource, SkyStereo};
 use spatiand_render::{Eye, EyeSide, Hit, Quad, Ray, TextImage, TextRenderer};
 use spatiand_shell::{Mode, Shell};
 
@@ -296,6 +296,8 @@ pub struct Scene {
 
     sky: u32,
     sky_source: SkySource,
+    /// A client's surface standing in for the environment this frame. See `set_sky_override`.
+    sky_override: Option<SkyOverride>,
     white: u32,
     reticle: u32,
     /// A double-headed arrow, turned in the plane to suit whichever edge is under the pointer.
@@ -460,6 +462,7 @@ impl Scene {
             bubbles,
             sky,
             sky_source: sky_image.source,
+            sky_override: None,
             white,
             reticle,
             reticle_left,
@@ -571,10 +574,37 @@ impl Scene {
     }
 
     fn eye_rect(&self, side: EyeSide) -> (f32, f32, f32, f32) {
-        self.sky_source.eye_rect(match side {
-            EyeSide::Left => SkyEye::Left,
-            EyeSide::Right => SkyEye::Right,
-        })
+        // A client may say its halves are the other way round, which `SkySource` has no way
+        // to express -- so the swap is applied by asking for the other eye, which is the same
+        // thing and costs nothing.
+        let swapped = self.sky_override.map(|o| o.swapped).unwrap_or(false);
+        let asked = match (side, swapped) {
+            (EyeSide::Left, false) | (EyeSide::Right, true) => SkyEye::Left,
+            _ => SkyEye::Right,
+        };
+        self.sky_now().1.eye_rect(asked)
+    }
+
+    /// The texture and description to wrap around the wearer this frame.
+    ///
+    /// An application that has taken the `equirect` layer replaces the environment for as
+    /// long as it holds it — see `spatiand_xr_v1`. Read through one accessor rather than
+    /// branched at each of the three draw sites, because a sky drawn from one source and
+    /// sampled with another's projection is a picture that is subtly and inexplicably wrong.
+    fn sky_now(&self) -> (u32, SkySource) {
+        match self.sky_override {
+            Some(over) => (over.texture, over.source),
+            None => (self.sky, self.sky_source),
+        }
+    }
+
+    /// Hand the environment over to a client's surface for this frame, or take it back.
+    ///
+    /// Set every frame by the backend rather than remembered, so a client that stops posting
+    /// frames, crashes, or has the layer taken away cannot leave the wearer inside a frozen
+    /// image: the next frame simply does not set it.
+    pub fn set_sky_override(&mut self, over: Option<SkyOverride>) {
+        self.sky_override = over;
     }
 
     /// Draw the environment behind everything else.
@@ -588,13 +618,14 @@ impl Scene {
         let mut view = eye.view;
         view.w_axis = Vec4::new(0.0, 0.0, 0.0, 1.0);
         let inv = (eye.projection * view).inverse();
+        let (texture, source) = self.sky_now();
         self.sky_pipeline.draw(
             gl,
-            self.sky,
+            texture,
             &inv,
             self.eye_rect(eye.side),
-            self.sky_source.yaw_offset_radians(),
-            self.sky_source.projection == SkyProjection::Equirect180,
+            source.yaw_offset_radians(),
+            source.projection == SkyProjection::Equirect180,
             1.0,
         );
     }
@@ -1763,12 +1794,13 @@ impl Scene {
             return;
         }
 
+        let (sky, source) = self.sky_now();
         self.bubbles.begin(
             gl,
-            self.sky,
+            sky,
             self.eye_rect(eye.side),
-            self.sky_source.yaw_offset_radians(),
-            self.sky_source.projection == SkyProjection::Equirect180,
+            source.yaw_offset_radians(),
+            source.projection == SkyProjection::Equirect180,
         );
 
         for (index, placement) in launcher.placements() {
@@ -2556,6 +2588,15 @@ pub fn collect_windows(
             }
             continue;
         };
+        // A surface that has become the environment is not also a panel in it.
+        if !crate::xr::state_of(&surface).is_window()
+            && matches!(
+                crate::xr::state_of(&surface).layer,
+                crate::xr::Layer::Equirect180 | crate::xr::Layer::Equirect360
+            )
+        {
+            continue;
+        }
         let Some(placement) = state.layout.get(&window) else {
             // In the space but with nowhere to be. An X11 window adopted before its placement
             // existed would sit here silently for the rest of the session.
@@ -2725,6 +2766,93 @@ fn has_no_alpha(texture: &smithay::backend::renderer::gles::GlesTexture) -> bool
                 | Fourcc::Rgb565
         )
     )
+}
+
+/// A client's surface standing in for the environment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkyOverride {
+    pub texture: u32,
+    pub source: SkySource,
+    /// The client's halves are the other way round.
+    pub swapped: bool,
+}
+
+/// The surface that has taken the environment, if one has and has drawn something.
+///
+/// Looked for every frame rather than remembered. A client that crashes, stops posting, or
+/// has the layer taken away simply stops being found here, and the wearer's own environment
+/// comes back on the next frame — which is the difference between handing the room over and
+/// losing it.
+pub fn sky_surface(
+    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    state: &crate::state::Spatiand,
+) -> Option<SkyOverride> {
+    use smithay::backend::renderer::utils::{import_surface_tree, with_renderer_surface_state};
+    use smithay::backend::renderer::Renderer;
+    use smithay::wayland::seat::WaylandFocus;
+    for window in state.space.elements() {
+        let Some(surface) = window.wl_surface().map(|s| s.into_owned()) else {
+            continue;
+        };
+        let xr = crate::xr::state_of(&surface);
+        let projection = match xr.layer {
+            crate::xr::Layer::Equirect180 => SkyProjection::Equirect180,
+            crate::xr::Layer::Equirect360 => SkyProjection::Equirect360,
+            _ => continue,
+        };
+        if import_surface_tree(renderer, &surface).is_err() {
+            continue;
+        }
+        let context = renderer.context_id();
+        // Nothing committed yet is not a reason to abandon the environment: the wearer's own
+        // one stays until the client actually draws.
+        let Some(texture) = with_renderer_surface_state(&surface, |st| {
+            st.texture::<smithay::backend::renderer::gles::GlesTexture>(context)
+                .map(|t| t.tex_id())
+        })
+        .flatten() else {
+            continue;
+        };
+        // Client textures arrive with GL's *default* sampler state, which is
+        // NEAREST_MIPMAP_LINEAR. A texture with no mipmaps and a mipmap filter is incomplete,
+        // and an incomplete texture samples as opaque black -- so the room goes black while
+        // the import is entirely correct. The window path has set this for a long time and
+        // says so; the sky path never had to, because its own texture is uploaded with its
+        // filters already on it.
+        //
+        // Wrapping horizontally rather than clamping, because a 360 panorama's left edge is
+        // its right edge, and clamping there smears the last column across the seam.
+        let _ = renderer.with_context(|gl| unsafe {
+            gl.BindTexture(ffi::TEXTURE_2D, texture);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::REPEAT as i32);
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_T,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+        });
+
+        return Some(SkyOverride {
+            texture,
+            source: SkySource {
+                projection,
+                stereo: match xr.layout {
+                    crate::xr::EyeLayout::Mono => SkyStereo::Mono,
+                    crate::xr::EyeLayout::SideBySide => SkyStereo::SideBySide,
+                    crate::xr::EyeLayout::TopBottom => SkyStereo::OverUnder,
+                },
+                // Microradians on the wire, millidegrees in the renderer. Converted here so
+                // neither side has to know about the other's unit.
+                yaw_offset_millideg: (xr.yaw_offset_urad as f64 * 1e-6).to_degrees() as i32
+                    * 1000,
+            },
+            swapped: xr.swapped,
+        });
+    }
+    None
 }
 
 /// Say whether this surface's failure to draw is worth mentioning yet.

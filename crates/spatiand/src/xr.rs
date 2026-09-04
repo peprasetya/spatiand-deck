@@ -209,7 +209,7 @@ impl Dispatch<SpatiandXrV1, ()> for Spatiand {
 
 impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for Spatiand {
     fn request(
-        _state: &mut Self,
+        state: &mut Self,
         _client: &Client,
         resource: &spatiand_xr_surface_v1::SpatiandXrSurfaceV1,
         request: spatiand_xr_surface_v1::Request,
@@ -267,6 +267,29 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
                     resource.layer_refused(wire, reason.into());
                     return;
                 }
+                // The environment is exclusive: there is one room and it can only be one
+                // thing. Claimed here rather than on commit, because two clients asking in
+                // the same frame must get different answers and a commit is too late to be
+                // one of them.
+                let surface = pending.surface.clone();
+                if matches!(wanted, Layer::Equirect180 | Layer::Equirect360) {
+                    match (&state.sky_owner, &surface) {
+                        (Some(owner), Some(mine)) if owner != mine => {
+                            resource.layer_refused(
+                                wire,
+                                "another application is already the environment".into(),
+                            );
+                            return;
+                        }
+                        (_, Some(mine)) => state.sky_owner = Some(mine.clone()),
+                        (_, None) => {}
+                    }
+                } else if let (Some(owner), Some(mine)) = (&state.sky_owner, &surface) {
+                    // Leaving the sky for something else gives it back.
+                    if owner == mine {
+                        state.sky_owner = None;
+                    }
+                }
                 pending.next.layer = wanted;
             }
             spatiand_xr_surface_v1::Request::SetYawOffset { microradians } => {
@@ -274,6 +297,9 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
             }
             spatiand_xr_surface_v1::Request::Destroy => {
                 if let Some(surface) = pending.surface.take() {
+                    if state.sky_owner.as_ref() == Some(&surface) {
+                        state.sky_owner = None;
+                    }
                     reset(&surface);
                 }
             }
@@ -320,11 +346,11 @@ impl Dispatch<SpatiandXrPoseChannelV1, ()> for Spatiand {
 /// a window has no way to find that out.
 fn refusal(layer: Layer) -> Option<&'static str> {
     match layer {
-        Layer::Window | Layer::HeadLocked => None,
+        Layer::Window | Layer::HeadLocked | Layer::Equirect180 | Layer::Equirect360 => None,
+        // The one layer still missing. A client that renders its own two eye views can have
+        // them shown as a window today -- what it cannot yet have is them presented filling
+        // the view, which is what this layer means.
         Layer::Projection => Some("projection layers are not implemented yet"),
-        Layer::Equirect180 | Layer::Equirect360 => {
-            Some("an application cannot be the environment yet")
-        }
     }
 }
 
@@ -395,10 +421,27 @@ mod tests {
     fn the_layers_that_are_not_built_say_so() {
         // The rule this holds: a layer is either honoured or refused out loud. Silently
         // drawing a client's sky as a window is the failure mode worth a test.
-        assert!(refusal(Layer::Window).is_none());
-        assert!(refusal(Layer::HeadLocked).is_none());
-        for unbuilt in [Layer::Projection, Layer::Equirect180, Layer::Equirect360] {
-            assert!(refusal(unbuilt).is_some(), "{unbuilt:?} is silently ignored");
+        for built in [
+            Layer::Window,
+            Layer::HeadLocked,
+            Layer::Equirect180,
+            Layer::Equirect360,
+        ] {
+            assert!(refusal(built).is_none(), "{built:?} is refused");
+        }
+        assert!(refusal(Layer::Projection).is_some());
+    }
+
+    #[test]
+    fn an_equirect_surface_is_not_also_a_window() {
+        // It is the room, not a panel in it. `is_window` is what the backend and the window
+        // collector both read to decide that.
+        for sky in [Layer::Equirect180, Layer::Equirect360] {
+            let state = XrState {
+                layer: sky,
+                ..Default::default()
+            };
+            assert!(!state.is_window(), "{sky:?} would be drawn as a panel too");
         }
     }
 }
