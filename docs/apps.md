@@ -10,9 +10,23 @@ Every section is marked:
   * **Works** — shipped, on hardware, today.
   * **Interim** — there is a way to do it, but it is not the way it will be
     done.
-  * **Specified** — designed and written down here, not built. Do not code
-    against it yet; do tell me if the shape is wrong, because nothing has been
-    committed to.
+  * **Specified** — designed and written down here, **not built**. There is no
+    code behind it. Do not write against it yet; do tell me if the shape is
+    wrong, because nothing has been committed to.
+
+At a glance, because the difference matters more than anything else in this
+document:
+
+| | State |
+|---|---|
+| Window sizing, fullscreen, no-fullscreen semantics | **Works** |
+| Launching, audio routing, per-window sinks, mono→7.1.4 | **Works** |
+| GPU buffers (`zwp_linux_dmabuf_v1`) | **Works** |
+| Menus, popups, X11 compatibility | **Works** |
+| Environment from image files | **Interim** |
+| `spatiand_stereo_v1` — stereoscopic windows | **Specified. Not built.** |
+| `spatiand_environment_v1` — application as the sky | **Specified. Not built.** |
+| OpenXR | Not a runtime — see [openxr.md](openxr.md) |
 
 ---
 
@@ -79,7 +93,46 @@ Consequences worth designing around:
 set, so a toolkit prefers Wayland and falls back to X11 rather than the other way
 round. See [x11.md](x11.md) for why you should want the Wayland path.
 
-## 3. Stereoscopic windows — one surface, two eyes
+## 3. Frames on the GPU
+
+**Works.**
+
+`zwp_linux_dmabuf_v1` is offered, version 3, in whatever formats the renderer
+can import — 321 format/modifier pairs on the Deck's Van Gogh. Use it. It is the
+single largest thing you can do for a player's frame budget here.
+
+The alternative is `wl_shm`, which means every decoded frame is copied by the
+CPU into shared memory and then uploaded to a texture by us: about four
+megabytes per frame at 1080p, sixty times a second, on eight compute units that
+are already drawing the world twice. A hardware decoder produces a dmabuf
+natively, so going through shm is not a fallback so much as a detour with a
+copy at each end.
+
+Nothing special is needed on your side beyond using it: EGL with
+`EGL_WL_bind_wayland_display`, Vulkan WSI, GStreamer's `waylandsink`, mpv's
+`gpu` output with a Wayland context, or VA-API surfaces exported with
+`vaExportSurfaceHandle` all end up here. Verified with a Vulkan client
+(`vkcube`) whose frames reach a quad in the room without a copy.
+
+Three things worth knowing:
+
+  * **Version 3, not 4.** Version 4's per-surface feedback exists to tell a
+    client which formats would let its buffer go straight to the display
+    controller without compositing. Nothing here can ever do that — every window
+    is a texture on a quad sampled by a shader — so there is no feedback to give
+    that would not be a lie. Your buffer is always composited.
+  * **The import is tested before it is accepted.** If we cannot import a
+    format you will be told `failed` rather than silently shown nothing, so a
+    fallback path in your player will actually be reached. The answer comes one
+    frame later than the request, because the renderer that decides it lives in
+    the frame loop.
+  * **Implicit sync only.** There is no `linux-drm-syncobj-v1` (explicit sync)
+    yet, so the usual implicit fences on amdgpu are what order your rendering
+    against our sampling. This has not been stress-tested against a decoder
+    running flat out; if you see tearing inside a window, say so, because that
+    is the shape it would take.
+
+## 4. Stereoscopic windows — one surface, two eyes
 
 **Specified.** The renderer already samples a sub-rectangle of a window's
 texture per eye; what does not exist is the protocol for saying which
@@ -146,11 +199,15 @@ mono over a side-by-side film — is a supported thing to do and costs nothing.
 
 ### What to do today
 
-Nothing, and that is deliberate. Rendering both eyes' views into your window
+**Nothing — none of this exists yet.** There is no `spatiand-proto` crate
+contents, no global advertised, and nothing in the compositor that would answer
+`set_layout`. What follows above is a design, not an interface.
+
+That is deliberate. Rendering both eyes' views into your window
 yourself would produce a squashed picture in *both* eyes, and unpicking that
 later is worse than waiting. Ship mono until the protocol lands.
 
-## 4. Immersive video — replacing the room
+## 5. Immersive video — replacing the room
 
 **Interim for files, specified for video.**
 
@@ -254,7 +311,7 @@ comfortable:
   * **The environment is restored when you release it.** The wearer's previous
     choice comes back exactly as it was.
 
-## 5. Audio
+## 6. Audio
 
 **Works**, and it is the part most likely to already do what you want.
 
@@ -324,7 +381,7 @@ little and a centred window sounds hollow; too much and nothing moves when you
 turn your head. This is a matter of taste and of which headphones, and it is not
 solved.
 
-## 6. Things that will bite you
+## 7. Things that will bite you
 
   * **A window that never commits a buffer is invisible and counted.** It
     appears in the window count and the switcher and draws nothing. If your
@@ -345,7 +402,7 @@ solved.
     unplugged, calibration never run). Nothing about your application should
     depend on the wearer being able to turn their head to find something.
 
-## 7. Asking for changes
+## 8. Asking for changes
 
 The two protocols above are drafts, and the person most likely to find out that
 they are wrong is whoever writes the first player against them. That is the
