@@ -78,7 +78,12 @@ impl XrState {
         }
     }
 
-    /// Whether this surface is drawn as an ordinary panel the wearer can move.
+    /// Whether this surface stays where the wearer put it.
+    ///
+    /// False only for `head_locked` today, which is the one layer that moves itself. The
+    /// backend reads this every frame; the distinction has to be about *placement* rather
+    /// than drawing, because a window that follows the head must follow it for the pointer
+    /// and for a drag as well as for the pixels.
     pub fn is_window(&self) -> bool {
         matches!(self.layer, Layer::Window)
     }
@@ -231,12 +236,22 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
                 pending.next.swapped = swapped != 0;
             }
             spatiand_xr_surface_v1::Request::SetLayer { layer } => {
-                let wanted = match layer.into_result() {
-                    Ok(WireLayer::Window) => Layer::Window,
-                    Ok(WireLayer::HeadLocked) => Layer::HeadLocked,
-                    Ok(WireLayer::Projection) => Layer::Projection,
-                    Ok(WireLayer::Equirect180) => Layer::Equirect180,
-                    Ok(WireLayer::Equirect360) => Layer::Equirect360,
+                // Kept in the protocol's own type as well as ours: `layer_refused` has to
+                // name what was asked for, and a client that asked for two things needs to
+                // know which one came back.
+                let Ok(wire) = layer.into_result() else {
+                    resource.post_error(
+                        spatiand_xr_v1::Error::BadLayer,
+                        "not a layer this version knows",
+                    );
+                    return;
+                };
+                let wanted = match wire {
+                    WireLayer::Window => Layer::Window,
+                    WireLayer::HeadLocked => Layer::HeadLocked,
+                    WireLayer::Projection => Layer::Projection,
+                    WireLayer::Equirect180 => Layer::Equirect180,
+                    WireLayer::Equirect360 => Layer::Equirect360,
                     _ => {
                         resource.post_error(
                             spatiand_xr_v1::Error::BadLayer,
@@ -249,7 +264,7 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
                 // as something else is worse than one that is declined: the client believes
                 // it is immersive and lays itself out accordingly.
                 if let Some(reason) = refusal(wanted) {
-                    resource.layer_refused(layer, reason.into());
+                    resource.layer_refused(wire, reason.into());
                     return;
                 }
                 pending.next.layer = wanted;

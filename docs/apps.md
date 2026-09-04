@@ -24,8 +24,9 @@ document:
 | GPU buffers (`zwp_linux_dmabuf_v1`) | **Works** |
 | Menus, popups, X11 compatibility | **Works** |
 | Environment from image files | **Interim** |
-| `spatiand_stereo_v1` — stereoscopic windows | **Specified. Not built.** |
-| `spatiand_environment_v1` — application as the sky | **Specified. Not built.** |
+| `spatiand_xr_v1` — stereoscopic and head-locked surfaces | **Works** |
+| `spatiand_xr_v1` — projection and equirect layers | Refused, not built |
+| `spatiand_xr_v1` — the shared-memory pose channel | Accepted, not yet filled |
 | OpenXR | Not a runtime — see [openxr.md](openxr.md) |
 
 ---

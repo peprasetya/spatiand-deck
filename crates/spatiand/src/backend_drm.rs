@@ -1249,6 +1249,40 @@ pub fn run(
             // head turn appears in front of the wearer rather than at world zero.
             runtime.state.spawn_yaw = tracker.euler_degrees().yaw.to_radians();
 
+            // Surfaces that asked to be head-locked follow the view, every frame.
+            //
+            // Kept here rather than in the scene because it is a change to where a window
+            // *is*, not to how it is drawn: it has to be true for the pointer, for a drag, and
+            // for anything else that reads the layout, not only for the pixels.
+            //
+            // This is also what makes a client that does its own head tracking possible. If
+            // the compositor moved such a window as well, tracking would be applied twice and
+            // the result is unusable -- see the `head_locked` layer in `spatiand_xr_v1`.
+            {
+                let view_yaw = runtime.state.spawn_yaw;
+                let locked: Vec<smithay::desktop::Window> = runtime
+                    .state
+                    .space
+                    .elements()
+                    .filter(|w| {
+                        use smithay::wayland::seat::WaylandFocus;
+                        w.wl_surface()
+                            .map(|s| !crate::xr::state_of(&s).is_window())
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+                for window in locked {
+                    if let Some(mut placement) = runtime.state.layout.get(&window) {
+                        // Distance and size stay the wearer's business; only the direction
+                        // is taken over.
+                        placement.yaw = view_yaw;
+                        placement.pitch = 0.0;
+                        runtime.state.layout.set(&window, placement);
+                    }
+                }
+            }
+
             let orientation = tracker.predicted_orientation(
                 spatiand_track::DEFAULT_PREDICTION_SECONDS,
                 spatiand_track::DEFAULT_PREDICTION_MAX_DEGREES,

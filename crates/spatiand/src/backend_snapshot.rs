@@ -32,6 +32,9 @@
 //! USB with no display behind them. Both are states that need broken hardware to reach, which
 //! is exactly why they are worth being able to look at without it.
 //!
+//! `SPATIAND_SNAPSHOT_EYE=right` draws the right eye instead of the left. Rendering both and
+//! comparing them is how a stereoscopic surface is checked without a headset on.
+//!
 //! `SPATIAND_CLICK=u,v` clicks the client's window at that fraction across it once it has
 //! painted, and `SPATIAND_CLICK_BUTTON=right` uses the other button. This is how a menu gets
 //! opened without a person: a menu is opened *by* a click, so a harness that cannot click can
@@ -508,7 +511,14 @@ pub fn run(
 
         // No flip: the readback below does it, so the PNG comes out the right way up while
         // the geometry stays in GL's own convention.
-        let eye = spatiand_render::eye_for(EyeSide::Left, orientation, DVec3::ZERO, &stereo);
+        // Which eye to draw. Left unless asked otherwise -- and being able to ask is the whole
+        // way a stereoscopic surface gets checked without a headset: render both, and the two
+        // pictures either differ in the right way or they do not.
+        let side = match std::env::var("SPATIAND_SNAPSHOT_EYE").as_deref() {
+            Ok("right") => EyeSide::Right,
+            _ => EyeSide::Left,
+        };
+        let eye = spatiand_render::eye_for(side, orientation, DVec3::ZERO, &stereo);
         // The waiting screen is not a place, so it gets the same bare backdrop the DRM backend
         // gives it. Drawing a world behind it here would make this view a picture of something
         // that never ships -- and the whole reason for the view is to see what does.
