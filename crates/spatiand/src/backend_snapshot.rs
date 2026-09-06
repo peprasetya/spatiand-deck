@@ -283,6 +283,9 @@ pub fn run(
                     event_loop.dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
 
                     crate::dmabuf::settle(&mut runtime.state, &mut renderer);
+                    // Noticing a shape change needs to have seen the shape before, so this runs
+                    // on every pump here exactly as it does every frame in a session.
+                    crate::window::apply_resize_anchors(&mut runtime.state);
                     windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
                     if !windows.is_empty() {
                         // The first buffer a toolkit commits is usually blank -- it has the
@@ -302,6 +305,9 @@ pub fn run(
                             event_loop
                                 .dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
                             crate::dmabuf::settle(&mut runtime.state, &mut renderer);
+                            // Noticing a shape change needs to have seen the shape before, so this runs
+                            // on every pump here exactly as it does every frame in a session.
+                            crate::window::apply_resize_anchors(&mut runtime.state);
                         }
                         windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
                         // A click, if one was asked for, and then time to answer it. A menu
@@ -350,11 +356,17 @@ pub fn run(
                 .tick(Some(glam::DQuat::IDENTITY), dt);
             left -= dt;
         }
-        let alpha = runtime.state.attention.alpha();
-        log::info!("idle for {seconds}s: a fading surface is at alpha {alpha:.2}");
         for quad in windows.iter_mut() {
+            quad.fade = crate::xr::fade_of(&quad.surface, &runtime.state.attention);
+            // Per surface, because the threshold is per surface: reporting the default here
+            // said nothing about a window that had asked for its own, which is exactly the
+            // case worth looking at.
             if quad.xr.idle_fade {
-                quad.fade = alpha;
+                log::info!(
+                    "idle for {seconds}s: a surface asking to fade after {}ms is at alpha {:.2}",
+                    crate::attention::idle_after(quad.xr.idle_after_ms).as_millis(),
+                    quad.fade
+                );
             }
         }
     }

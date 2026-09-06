@@ -1324,6 +1324,11 @@ pub fn run(
                 runtime.state.attention.tick(head, dt);
             }
 
+            // Surfaces that named an edge keep it still when their shape changes. Here rather
+            // than in the scene for the same reason the head-locked pass is: it changes where
+            // a window *is*, which the pointer and a drag read as well as the pixels.
+            crate::window::apply_resize_anchors(&mut runtime.state);
+
             // --- poses, for clients that draw their own eye views ---
             //
             // Answered here rather than in the protocol callback for the same reason dmabuf

@@ -22,6 +22,12 @@
 // sky rather than a panel, so the whole view goes red or blue depending on the eye -- which is
 // a crude picture and an unambiguous test.
 //
+// SPATIAND_PROBE_SHRINK=1280x264 commits that shape three seconds in, which is what a media
+// player does when its window becomes a transport bar. With SPATIAND_ANCHOR=bottom the
+// compositor should keep the bottom edge where it was instead of shrinking about the middle.
+//
+// SPATIAND_IDLE_MS=800 asks for that idle threshold instead of the compositor's default.
+//
 // SPATIAND_IDLE_FADE=1 asks the compositor to fade this surface out when the wearer stops
 // paying attention to it, which is what a transport bar over a film wants. Paired with the
 // harness's SPATIAND_IDLE_SECONDS it is the whole of that feature, end to end: the client says
@@ -31,6 +37,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/mman.h>
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
@@ -57,7 +64,25 @@ static struct xdg_wm_base *wm_base;
 static struct spatiand_xr_v1 *xr;
 static struct wl_surface *surface;
 static struct xdg_surface *xdg_surface_;
+static struct spatiand_xr_surface_v1 *xr_surface;
 static int painted = 0;
+static int top_bottom_now = 0;
+static int frames = 0;
+
+// Counting frame callbacks, which is the only reliable way for this client to know the
+// compositor has actually *drawn* its first shape. A wall clock does not work: the harness can
+// take longer than any delay worth waiting to get round to its first frame -- XWayland starts
+// first -- and a client that changes shape before the first shape was ever seen looks exactly
+// like a compositor ignoring the change.
+static void frame_done(void *d, struct wl_callback *cb, uint32_t t);
+static const struct wl_callback_listener frame_listener = { .done = frame_done };
+static void frame_done(void *d, struct wl_callback *cb, uint32_t t) {
+    wl_callback_destroy(cb);
+    frames++;
+    struct wl_callback *next = wl_surface_frame(surface);
+    wl_callback_add_listener(next, &frame_listener, NULL);
+    wl_surface_commit(surface);
+}
 
 // Two halves of one buffer, in whichever packing was asked for.
 static struct wl_buffer *make_split(int top_bottom) {
@@ -97,10 +122,12 @@ static void surface_configure(void *d, struct xdg_surface *s, uint32_t serial) {
 
     const char *mode = getenv("SPATIAND_STEREO");
     int top_bottom = mode && !strcmp(mode, "tb");
+    top_bottom_now = top_bottom;
     int swap = mode && !strcmp(mode, "swap");
 
     if (xr) {
         struct spatiand_xr_surface_v1 *x = spatiand_xr_v1_get_xr_surface(xr, surface);
+        xr_surface = x;
         spatiand_xr_surface_v1_add_listener(x, &xr_surface_events, NULL);
 
         const char *want = getenv("SPATIAND_LAYER");
@@ -120,6 +147,21 @@ static void surface_configure(void *d, struct xdg_surface *s, uint32_t serial) {
         // Version 2. A compositor that only offers version 1 has the request but not this
         // one, and calling it there is a protocol error -- so it is guarded by what the
         // registry actually bound rather than by what the headers happen to declare.
+        const char *anchor = getenv("SPATIAND_ANCHOR");
+        if (anchor && wl_proxy_get_version((struct wl_proxy *) x) >=
+                SPATIAND_XR_SURFACE_V1_SET_RESIZE_ANCHOR_SINCE_VERSION) {
+            uint32_t which = SPATIAND_XR_SURFACE_V1_RESIZE_ANCHOR_CENTRE;
+            if (!strcmp(anchor, "top")) which = SPATIAND_XR_SURFACE_V1_RESIZE_ANCHOR_TOP;
+            else if (!strcmp(anchor, "bottom")) which = SPATIAND_XR_SURFACE_V1_RESIZE_ANCHOR_BOTTOM;
+            spatiand_xr_surface_v1_set_resize_anchor(x, which);
+            fprintf(stderr, "probe: anchored to %s\n", anchor);
+        }
+        const char *after = getenv("SPATIAND_IDLE_MS");
+        if (after && wl_proxy_get_version((struct wl_proxy *) x) >=
+                SPATIAND_XR_SURFACE_V1_SET_IDLE_AFTER_SINCE_VERSION) {
+            spatiand_xr_surface_v1_set_idle_after(x, (uint32_t) atoi(after));
+            fprintf(stderr, "probe: fade me after %sms\n", after);
+        }
         if (getenv("SPATIAND_IDLE_FADE")) {
             if (wl_proxy_get_version((struct wl_proxy *) x) >=
                 SPATIAND_XR_SURFACE_V1_SET_IDLE_FADE_SINCE_VERSION) {
@@ -137,6 +179,8 @@ static void surface_configure(void *d, struct xdg_surface *s, uint32_t serial) {
 
     // The buffer and the layout in one commit, which is the point of the layout being
     // double-buffered: there is never a frame of one without the other.
+    struct wl_callback *cb = wl_surface_frame(surface);
+    wl_callback_add_listener(cb, &frame_listener, NULL);
     wl_surface_attach(surface, make_split(top_bottom), 0, 0);
     wl_surface_damage(surface, 0, 0, W, H);
     wl_surface_commit(surface);
@@ -179,6 +223,30 @@ int main(void) {
     struct xdg_toplevel *toplevel = xdg_surface_get_toplevel(xdg_surface_);
     xdg_toplevel_set_title(toplevel, "stereo probe");
     wl_surface_commit(surface);
+    // Become a different shape part way through, which is what a media player does when its
+    // window turns into a transport bar. This is the only way to exercise a resize anchor:
+    // the anchor is about what happens *between* two shapes, so one shape proves nothing.
+    //
+    // Gated on frame callbacks rather than on elapsed time, for a reason worth writing down:
+    // the first version slept, and the compositor's first frame came later than the sleep, so
+    // the only shape it ever saw was the second one. From outside that is indistinguishable
+    // from the anchor not working.
+    const char *shrink = getenv("SPATIAND_PROBE_SHRINK");
+    if (shrink) {
+        // Wait until the first shape has been drawn a few times, not until a clock says so.
+        while (frames < 3 && wl_display_dispatch(display) != -1) {
+        }
+        int w, h;
+        if (sscanf(shrink, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+            W = w;
+            H = h;
+            wl_surface_attach(surface, make_split(top_bottom_now), 0, 0);
+            wl_surface_damage(surface, 0, 0, W, H);
+            wl_surface_commit(surface);
+            wl_display_flush(display);
+            fprintf(stderr, "probe: became %dx%d\n", W, H);
+        }
+    }
     while (wl_display_dispatch(display) != -1) {}
     return 0;
 }

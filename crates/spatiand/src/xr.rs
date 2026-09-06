@@ -24,7 +24,7 @@ use smithay::reexports::wayland_server::{
 use smithay::wayland::compositor::with_states;
 
 use spatiand_proto::server::spatiand_xr_surface_v1::{
-    self, EyeLayout as WireLayout, Layer as WireLayer,
+    self, EyeLayout as WireLayout, Layer as WireLayer, ResizeAnchor as WireAnchor,
 };
 use spatiand_proto::server::spatiand_xr_v1::{self, SpatiandXrV1};
 use spatiand_proto::server::spatiand_xr_pose_channel_v1::{self, SpatiandXrPoseChannelV1};
@@ -38,6 +38,29 @@ pub enum EyeLayout {
     Mono,
     SideBySide,
     TopBottom,
+}
+
+/// Which edge of a surface stays put when its shape changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResizeAnchor {
+    #[default]
+    Centre,
+    Top,
+    Bottom,
+}
+
+impl ResizeAnchor {
+    /// Which way the centre moves, per unit of height gained.
+    ///
+    /// Gaining height h with the bottom pinned means the centre rises by h/2; with the top
+    /// pinned it falls by the same. Centre pins neither and moves nothing.
+    pub fn drift(&self) -> f64 {
+        match self {
+            ResizeAnchor::Centre => 0.0,
+            ResizeAnchor::Bottom => 0.5,
+            ResizeAnchor::Top => -0.5,
+        }
+    }
 }
 
 /// What a surface is in the world.
@@ -67,6 +90,11 @@ pub struct XrState {
     pub anchor_yaw_urad: i32,
     /// The client has handed its visibility to the compositor — see [`crate::attention`].
     pub idle_fade: bool,
+    /// How long the wearer must be idle before this surface fades, in milliseconds. Zero for
+    /// the compositor's own idea, which is what a surface that never said gets.
+    pub idle_after_ms: u32,
+    /// Which edge stays put when the surface's shape changes.
+    pub resize_anchor: ResizeAnchor,
 }
 
 impl XrState {
@@ -172,6 +200,19 @@ pub fn commit(surface: &WlSurface, object: &spatiand_xr_surface_v1::SpatiandXrSu
             }
         }
     });
+}
+
+/// How visible this surface should be drawn, 0..1.
+///
+/// One line, because [`crate::attention`] keeps no per-surface state: the answer is a pure
+/// function of the shared clock and this surface's own threshold. A surface that never asked
+/// to fade is always fully visible, whatever the wearer is doing.
+pub fn fade_of(surface: &WlSurface, attention: &crate::attention::Attention) -> f32 {
+    let state = state_of(surface);
+    if !state.idle_fade {
+        return 1.0;
+    }
+    attention.alpha(crate::attention::idle_after(state.idle_after_ms))
 }
 
 /// Forget a surface's stereo state, as though it had never been configured.
@@ -361,6 +402,23 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
             }
             spatiand_xr_surface_v1::Request::SetIdleFade { enable } => {
                 pending.next.idle_fade = enable != 0;
+            }
+            spatiand_xr_surface_v1::Request::SetIdleAfter { milliseconds } => {
+                // Held as the client said it and clamped where it is used, so that a
+                // compositor changing its mind about what is sensible does not need every
+                // client to ask again.
+                pending.next.idle_after_ms = milliseconds;
+            }
+            spatiand_xr_surface_v1::Request::SetResizeAnchor { anchor } => {
+                match anchor.into_result() {
+                    Ok(WireAnchor::Centre) => pending.next.resize_anchor = ResizeAnchor::Centre,
+                    Ok(WireAnchor::Top) => pending.next.resize_anchor = ResizeAnchor::Top,
+                    Ok(WireAnchor::Bottom) => pending.next.resize_anchor = ResizeAnchor::Bottom,
+                    _ => resource.post_error(
+                        spatiand_xr_v1::Error::BadAnchor,
+                        "not a resize anchor this version knows",
+                    ),
+                }
             }
             spatiand_xr_surface_v1::Request::Destroy => release(state, &mut pending),
             _ => {}

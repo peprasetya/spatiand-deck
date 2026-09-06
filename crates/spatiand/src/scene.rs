@@ -2765,11 +2765,7 @@ pub fn collect_windows(
             mute_hot: false,
             popups,
             xr,
-            fade: if xr.idle_fade {
-                state.attention.alpha()
-            } else {
-                1.0
-            },
+            fade: crate::xr::fade_of(&surface, &state.attention),
         });
     }
     out

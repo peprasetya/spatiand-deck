@@ -27,7 +27,8 @@ document:
 | Environment from image files | **Interim** |
 | `spatiand_xr_v1` — stereo layouts, head-locked, equirect | **Works** |
 | `spatiand_xr_v1` — the shared-memory pose channel | **Works** |
-| `spatiand_xr_v1` — `set_idle_fade` | **Works** |
+| `spatiand_xr_v1` — `set_idle_fade`, `set_idle_after` | **Works** |
+| `spatiand_xr_v1` — `set_resize_anchor` | **Works** |
 | `spatiand_xr_v1` — the `projection` layer | Refused, not built |
 | OpenXR | Not a runtime — see [openxr.md](openxr.md) |
 
@@ -209,8 +210,8 @@ double-buffered against `wl_surface.commit`, like everything else about a
 surface, so layout and buffer land on the same frame and never one without the
 other.
 
-**The global is at version 2**, and `set_idle_fade` is the request that needs
-it. Bind `MIN(interface version you built against, version the registry
+**The global is at version 3.** `set_idle_fade` needs 2; `set_idle_after` and
+`set_resize_anchor` need 3. Bind `MIN(interface version you built against, version the registry
 advertises)` rather than a hard-coded number — a client that binds 1 on a
 version 2 compositor loses the request silently, which is the ordinary Wayland
 way to lose a feature without noticing. Everything else here is version 1 and
@@ -316,12 +317,41 @@ so in practice the wearer sees it before they press it. Nothing about your
 buffers, frame callbacks or size changes; you never need to know whether you are
 currently faded, and there is no event telling you.
 
-One clock for the whole session, so every surface that asked fades in step. A
-toolbar still lit beside a faded transport bar would read as a fault rather than
-a design.
+One clock for the whole session — but not one threshold. How long is too long
+is a property of what your surface *is*, not of the session: a toolbar over a
+model wants to stay while you think, and a transport bar over a film wants to be
+gone the moment you stop touching it. `set_idle_after(milliseconds)` says which
+you are; zero, or never calling it, takes the compositor's default of two
+seconds. Values under about a second are clamped, because the ramps alone are
+two thirds of a second and what you would actually get is a flicker.
+
+Only the threshold is yours. The animation, and what counts as the wearer doing
+something, stay on this side: both are properties of the room and of the input
+hardware, and a client can see neither.
 
 If you were shrinking a bar to a line to approximate this — delete that. It is
 what this replaces.
+
+### Keeping an edge still when you change shape
+
+Your surface has one position in the room and its height follows from its
+buffer's aspect, so committing a shorter buffer shrinks it about its middle. A
+window that becomes a transport bar — same width, a fifth the height — ends up
+floating in the centre of the view with film above it *and* below it, where what
+a person expects is the bar where the bottom of the window was.
+
+`set_resize_anchor(centre | top | bottom)` says which edge means something.
+`bottom` keeps the bottom edge where it was and takes the height off the top;
+`centre` is the old behaviour and the default. At the usual 1.1 m width and
+2.2 m radius, a 1280×800 window becoming 1280×264 moves about 6° down.
+
+This is an anchor rather than a way to move yourself, for the same reason the
+fade is one bit: a client that can set its own position will set its own
+position, and then the wearer moves a window and the application puts it back.
+State the intent and leave the geometry here.
+
+It applies to your content. The glass around it is the compositor's and may
+change thickness on its own — see below.
 
 ## 5. Where the head is
 
@@ -443,6 +473,12 @@ solved.
     that trap the pointer until dismissed.
   * **Popups are drawn on your window's own plane**, a millimetre in front. A
     menu that hangs off the edge of its window is fine and normal.
+  * **Your chrome is not proportional to your buffer.** The title bar and frame
+    are a share of the surface's height, floored at an angular size so they stay
+    aimable: a surface a fifth of a window's height gets proportionally thicker
+    glass, not a close button too small to hit. Your surface keeps exactly the
+    size you asked for; only the chrome around it grows. Do not compute your
+    layout from an assumed chrome height.
   * **Text has to survive optics.** A window a third of the view wide has about
     640 display pixels across it. Interfaces designed for a monitor at arm's
     length are unreadable here; ones designed for a television across a room are

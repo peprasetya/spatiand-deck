@@ -52,7 +52,7 @@
     The per-frame values are not on the wire at all -- see the pose channel.
   </description>
 
-  <interface name="spatiand_xr_v1" version="2">
+  <interface name="spatiand_xr_v1" version="3">
     <description summary="stereoscopic and head-tracked surfaces">
       The factory. Binding it says nothing and changes nothing.
     </description>
@@ -88,10 +88,11 @@
       <entry name="surface_exists" value="0" summary="the surface already has an xr object"/>
       <entry name="bad_layer" value="1" summary="layer value not in the enum"/>
       <entry name="bad_layout" value="2" summary="eye layout value not in the enum"/>
+      <entry name="bad_anchor" value="3" summary="resize anchor value not in the enum"/>
     </enum>
   </interface>
 
-  <interface name="spatiand_xr_surface_v1" version="2">
+  <interface name="spatiand_xr_surface_v1" version="3">
     <description summary="how a surface is drawn for two eyes">
       All state here is double-buffered: it takes effect on the next
       wl_surface.commit, like everything else about a surface. Changing layout
@@ -256,6 +257,63 @@
       </description>
       <arg name="enable" type="uint" summary="0 or 1"/>
     </request>
+
+    <request name="set_idle_after" since="3">
+      <description summary="how long unattended is long enough">
+        Milliseconds of the wearer doing nothing before this surface starts to
+        fade. Zero means the compositor's own idea, which is also what a surface
+        that never calls this gets.
+
+        The right answer is a property of what the surface IS, not of the
+        session: a toolbar over a model wants to stay while you think, and a
+        transport bar over a film wants to be gone the moment you stop touching
+        it. No single number serves both, which is why this is here rather than
+        being something the compositor decides for everybody.
+
+        Only the threshold is yours. The animation, and what counts as the
+        wearer doing something, stay the compositor's — those are properties of
+        the room and of the input hardware, and a client cannot see either.
+
+        The compositor may clamp this. Below about a second the ramps are longer
+        than the wait, so the surface never reaches full brightness before
+        starting back down, and what a client asking for 200 ms actually gets is
+        a flicker. Ask for what you mean and expect something sensible.
+
+        No effect without set_idle_fade.
+      </description>
+      <arg name="milliseconds" type="uint" summary="0 for the compositor's default"/>
+    </request>
+
+    <request name="set_resize_anchor" since="3">
+      <description summary="which edge stays put when this surface changes shape">
+        A surface has one position in the room and its height follows from its
+        buffer's aspect, so committing a shorter buffer makes it shrink about
+        its middle. For a window becoming a transport bar -- same width, a fifth
+        the height -- that leaves the bar floating in the centre of the view
+        with film above it AND below it, where what was wanted was the bar
+        sitting where the bottom of the window used to be.
+
+        This says which edge means something. "bottom" keeps the bottom edge
+        where it was and takes the height off the top, "top" the other way
+        round, and "centre" is the old behaviour and the default.
+
+        Deliberately an anchor rather than a way to move yourself. A client that
+        can set its own position will set its own position, and then placement
+        stops being one thing the compositor decides -- the wearer moves a
+        window and the application puts it back. An anchor states the intent and
+        leaves the geometry here.
+
+        Applies to the surface's own content. The chrome around it is the
+        compositor's business and may change thickness independently.
+      </description>
+      <arg name="anchor" type="uint" enum="resize_anchor"/>
+    </request>
+
+    <enum name="resize_anchor" since="3">
+      <entry name="centre" value="0" summary="shrink about the middle; the default"/>
+      <entry name="top" value="1" summary="the top edge stays where it is"/>
+      <entry name="bottom" value="2" summary="the bottom edge stays where it is"/>
+    </enum>
   </interface>
 
   <interface name="spatiand_xr_pose_channel_v1" version="1">

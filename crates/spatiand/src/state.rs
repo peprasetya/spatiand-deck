@@ -217,7 +217,7 @@ impl Spatiand {
         // Stereo, head-locked and immersive surfaces. Binding it says nothing and changes
         // nothing: an application that ignores it is an ordinary window, which is the whole
         // design. See `crate::xr` and the protocol XML.
-        dh.create_global::<Self, spatiand_proto::server::spatiand_xr_v1::SpatiandXrV1, _>(2, ());
+        dh.create_global::<Self, spatiand_proto::server::spatiand_xr_v1::SpatiandXrV1, _>(3, ());
 
         // The screen clients see. Refresh is a placeholder until a backend reports the real
         // one; the size is the size every toplevel is offered.

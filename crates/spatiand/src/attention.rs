@@ -10,12 +10,19 @@
 //! whatever they are aimed at, so the idle timer belongs here and `set_idle_fade` is one bit
 //! saying "you hold it".
 //!
-//! ## One clock, not one per surface
+//! ## One clock, many thresholds, and no per-surface state
 //!
-//! There is one wearer, so there is one idea of whether they are busy. Every surface that has
-//! asked for idle fading fades on the same clock and in step. Per-surface timers would mean a
-//! toolbar that is still visible while the transport bar beside it is not, which reads as a
-//! fault rather than as a design.
+//! There is one wearer, so there is one idea of *how long they have been idle*. There is not
+//! one idea of how long is too long: a toolbar over a model wants to stay while you think and
+//! a transport bar over a film wants to be gone the moment you stop touching it, and no single
+//! constant serves both. So the clock is shared and the threshold is the surface's, through
+//! `set_idle_after`.
+//!
+//! That could have meant a fade value per surface, ticked every frame. It does not, because
+//! [`Attention::alpha`] is a pure function of two shared durations and the surface's own
+//! threshold — see its note. Nothing is stored per surface, nothing has to be ticked, and a
+//! surface that appears mid-fade computes the same answer as one that has been there all
+//! along.
 //!
 //! ## What counts as attention
 //!
@@ -28,11 +35,23 @@ use std::time::Duration;
 
 use glam::DQuat;
 
-/// How long the wearer must be still and idle before anything fades.
+/// How long the wearer must be still and idle before a surface that said nothing fades.
 ///
-/// Long enough not to fight someone who is reading a bar and deciding, short enough that it
-/// is out of the way by the time the film has your attention again.
-pub const IDLE_AFTER: Duration = Duration::from_secs(4);
+/// Two seconds. It was four, and the first person to watch a film through this said so: "the
+/// window fade off too long". Four seconds of a lit bar in the middle of a film, every time
+/// you touch anything, is a long time to look at something you are finished with.
+///
+/// A surface that wants otherwise says so with `set_idle_after`, which is the real answer —
+/// this is only what a client gets for not having an opinion.
+pub const IDLE_AFTER: Duration = Duration::from_secs(2);
+
+/// The shortest idle a client may ask for, and the longest.
+///
+/// Below about a second the bar is strobing rather than fading: the ramps alone are two thirds
+/// of a second, so a threshold under that never reaches full brightness before starting back
+/// down. A client asking for 200 ms is asking for a flicker and should not get one.
+pub const MIN_IDLE_AFTER: Duration = Duration::from_millis(1000);
+pub const MAX_IDLE_AFTER: Duration = Duration::from_secs(60);
 
 /// Seconds to fade out. Slow: something vanishing quickly reads as a glitch.
 const FADE_OUT_SECS: f32 = 0.55;
@@ -53,32 +72,24 @@ const GLANCE_RADIANS: f64 = 0.035;
 /// that moves at all was moved on purpose.
 const REACH_RADIANS: f64 = 0.008;
 
-/// The one idle clock, and the alpha it produces.
-#[derive(Debug)]
+/// The one idle clock.
+#[derive(Debug, Default)]
 pub struct Attention {
     /// How long since the wearer last did anything.
     idle_for: Duration,
-    /// Where the head was pointing when they last did. Movement is measured from here rather
-    /// than from the previous frame, so that a slow deliberate turn accumulates and wakes
-    /// things, while sitting still never does however long you sit.
+    /// How long they had been idle at the moment before that — which is what says how faded
+    /// everything was when they came back, and so where each fade resumes from.
+    before_wake: Duration,
+    /// Where the head was pointing when they last did something. Movement is measured from
+    /// here rather than from the previous frame, so that a slow deliberate turn accumulates
+    /// and wakes things, while sitting still never does however long you sit.
     anchor: Option<DQuat>,
-    /// The current alpha, ramped rather than switched.
-    alpha: f32,
-}
-
-impl Default for Attention {
-    fn default() -> Self {
-        Self {
-            idle_for: Duration::ZERO,
-            anchor: None,
-            alpha: 1.0,
-        }
-    }
 }
 
 impl Attention {
     /// The wearer did something. Restarts the clock.
     pub fn stir(&mut self) {
+        self.before_wake = self.idle_for;
         self.idle_for = Duration::ZERO;
         // The anchor is dropped rather than set, because the caller usually has no head pose
         // in its hand -- a button press does not know where you are looking. The next tick
@@ -86,7 +97,7 @@ impl Attention {
         self.anchor = None;
     }
 
-    /// True if the pointer has moved far enough to count, remembering where it was.
+    /// True if the pointer has moved far enough to count.
     ///
     /// Separate from [`Attention::stir`] because the pointer is sampled every frame whether it
     /// moved or not, so "the pointer was serviced" is not the same claim as "the wearer moved
@@ -95,15 +106,16 @@ impl Attention {
         from.angle_between(to) > REACH_RADIANS
     }
 
-    /// Advance one frame and return the alpha an idle-fading surface should be drawn at.
+    /// Advance one frame.
     ///
     /// `head` is the current head orientation, or `None` where there is no headset — in which
     /// case nothing ever fades, because a desktop window that dims itself for no visible
     /// reason is a bug report.
-    pub fn tick(&mut self, head: Option<DQuat>, dt: Duration) -> f32 {
+    pub fn tick(&mut self, head: Option<DQuat>, dt: Duration) {
         let Some(head) = head else {
-            self.alpha = 1.0;
-            return 1.0;
+            self.idle_for = Duration::ZERO;
+            self.before_wake = Duration::ZERO;
+            return;
         };
         match self.anchor {
             None => self.anchor = Some(head),
@@ -112,28 +124,56 @@ impl Attention {
                 // which is exactly "how far the head turned" and is what a dot product of
                 // forward vectors would only approximate.
                 if anchor.angle_between(head) > GLANCE_RADIANS {
-                    self.idle_for = Duration::ZERO;
+                    self.stir();
                     self.anchor = Some(head);
                 }
             }
         }
         self.idle_for = self.idle_for.saturating_add(dt);
+    }
 
-        let target = if self.idle_for >= IDLE_AFTER { 0.0 } else { 1.0 };
-        let seconds = if target > self.alpha {
-            FADE_IN_SECS
-        } else {
-            FADE_OUT_SECS
+    /// How visible a surface with this idle threshold should currently be, 0..1.
+    ///
+    /// Computed rather than accumulated, which is what lets one clock serve every threshold
+    /// without storing a fade per surface. Two cases:
+    ///
+    /// * **Past the threshold**, the surface is on its way out, and how far it has got is how
+    ///   long it has been past it.
+    /// * **Before the threshold**, it is on its way back in — from wherever it had faded to
+    ///   when the wearer last did something, which is what `before_wake` remembers. That value
+    ///   is shared, but the alpha it implies is not: each threshold reads a different fade out
+    ///   of the same number.
+    ///
+    /// The result is that a surface which appears halfway through a fade, or changes its
+    /// threshold mid-fade, gets the same answer as one that has been there all along — no
+    /// state to be stale, and none to initialise.
+    pub fn alpha(&self, after: Duration) -> f32 {
+        let faded_by = |idle: Duration| {
+            let past = idle.saturating_sub(after).as_secs_f32();
+            (1.0 - past / FADE_OUT_SECS).clamp(0.0, 1.0)
         };
-        let step = dt.as_secs_f32() / seconds.max(1e-3);
-        self.alpha = (self.alpha + (target - self.alpha).clamp(-step, step)).clamp(0.0, 1.0);
-        self.alpha
+        if self.idle_for >= after {
+            return faded_by(self.idle_for);
+        }
+        // Coming back, from where it had got to.
+        let from = faded_by(self.before_wake);
+        (from + self.idle_for.as_secs_f32() / FADE_IN_SECS).clamp(0.0, 1.0)
     }
 
-    /// The alpha as it stands, without advancing anything.
-    pub fn alpha(&self) -> f32 {
-        self.alpha
+    /// The alpha for a surface that expressed no preference.
+    pub fn default_alpha(&self) -> f32 {
+        self.alpha(IDLE_AFTER)
     }
+}
+
+/// What a client asked for, held to something sensible.
+///
+/// Zero means "your idea, not mine", which is the documented way to take the default back.
+pub fn idle_after(milliseconds: u32) -> Duration {
+    if milliseconds == 0 {
+        return IDLE_AFTER;
+    }
+    Duration::from_millis(milliseconds as u64).clamp(MIN_IDLE_AFTER, MAX_IDLE_AFTER)
 }
 
 #[cfg(test)]
@@ -146,55 +186,50 @@ mod tests {
         DQuat::IDENTITY
     }
 
+    /// Run the clock forward with a perfectly still head.
+    fn idle(a: &mut Attention, seconds: f32) {
+        let mut left = Duration::from_secs_f32(seconds);
+        while !left.is_zero() {
+            let dt = FRAME.min(left);
+            a.tick(Some(still()), dt);
+            left -= dt;
+        }
+    }
+
     #[test]
     fn nothing_fades_while_the_wearer_is_moving() {
         let mut a = Attention::default();
         for step in 0..600 {
             // A slow continuous turn, well past the idle threshold in wall time.
-            let head = DQuat::from_rotation_y(step as f64 * 0.01);
-            assert_eq!(a.tick(Some(head), FRAME), 1.0);
+            a.tick(Some(DQuat::from_rotation_y(step as f64 * 0.01)), FRAME);
+            assert_eq!(a.default_alpha(), 1.0);
         }
     }
 
     #[test]
     fn a_still_head_fades_away_and_stays_away() {
         let mut a = Attention::default();
-        let mut elapsed = Duration::ZERO;
-        // Up to the frame that *reaches* the threshold, not past it: on that frame the clock
-        // has arrived and the ramp starts, which is the behaviour being asserted rather than
-        // an off-by-one to paper over.
-        while elapsed + FRAME < IDLE_AFTER {
-            assert_eq!(a.tick(Some(still()), FRAME), 1.0, "faded before the threshold");
-            elapsed += FRAME;
-        }
-        // Ramp down.
-        for _ in 0..200 {
-            a.tick(Some(still()), FRAME);
-        }
-        assert_eq!(a.alpha(), 0.0);
-        // And it does not come back on its own.
-        for _ in 0..200 {
-            a.tick(Some(still()), FRAME);
-        }
-        assert_eq!(a.alpha(), 0.0);
+        idle(&mut a, IDLE_AFTER.as_secs_f32() - 0.05);
+        assert_eq!(a.default_alpha(), 1.0, "faded before the threshold");
+        idle(&mut a, 2.0);
+        assert_eq!(a.default_alpha(), 0.0);
+        idle(&mut a, 30.0);
+        assert_eq!(a.default_alpha(), 0.0, "came back on its own");
     }
 
     #[test]
     fn a_glance_brings_it_back_faster_than_it_left() {
-        let mut faded = Attention::default();
-        for _ in 0..1000 {
-            faded.tick(Some(still()), FRAME);
-        }
-        assert_eq!(faded.alpha(), 0.0);
+        let mut a = Attention::default();
+        idle(&mut a, 10.0);
+        assert_eq!(a.default_alpha(), 0.0);
         // Look at it: three degrees, which is past the threshold.
         let glance = DQuat::from_rotation_y(0.05);
         let mut frames = 0;
-        while faded.alpha() < 1.0 && frames < 200 {
-            faded.tick(Some(glance), FRAME);
+        while a.default_alpha() < 1.0 && frames < 200 {
+            a.tick(Some(glance), FRAME);
             frames += 1;
         }
-        assert!(faded.alpha() >= 1.0, "never came back");
-        // The whole point of the asymmetry: coming back is quicker than going away.
+        assert!(a.default_alpha() >= 1.0, "never came back");
         let coming_back = frames as f32 * FRAME.as_secs_f32();
         assert!(
             coming_back < FADE_OUT_SECS,
@@ -203,15 +238,34 @@ mod tests {
     }
 
     #[test]
+    fn coming_back_resumes_from_where_it_faded_to() {
+        // The failure this guards against is a bar that snaps to black and then ramps up from
+        // there, because the wake threw away how visible it still was. Interrupt a fade
+        // halfway and it must come back from halfway, not from nothing.
+        let mut a = Attention::default();
+        idle(&mut a, IDLE_AFTER.as_secs_f32() + FADE_OUT_SECS * 0.5);
+        let midway = a.default_alpha();
+        assert!(
+            (0.3..0.7).contains(&midway),
+            "meant to interrupt mid-fade, got {midway}"
+        );
+        a.stir();
+        a.tick(Some(still()), Duration::ZERO);
+        let resumed = a.default_alpha();
+        assert!(
+            (resumed - midway).abs() < 0.05,
+            "resumed at {resumed} after fading to {midway}"
+        );
+    }
+
+    #[test]
     fn a_press_counts_even_though_it_has_no_direction() {
         let mut a = Attention::default();
-        for _ in 0..1000 {
-            a.tick(Some(still()), FRAME);
-        }
-        assert_eq!(a.alpha(), 0.0);
+        idle(&mut a, 10.0);
+        assert_eq!(a.default_alpha(), 0.0);
         a.stir();
         a.tick(Some(still()), FRAME);
-        assert!(a.alpha() > 0.0, "a button press did not wake it");
+        assert!(a.default_alpha() > 0.0, "a button press did not wake it");
     }
 
     #[test]
@@ -219,24 +273,45 @@ mod tests {
         // The failure this guards against is a bar that never fades because the tracker is
         // never perfectly still -- which is indistinguishable from the feature not working.
         let mut a = Attention::default();
-        let mut elapsed = Duration::ZERO;
         let mut step = 0.0f64;
-        while elapsed < IDLE_AFTER * 3 {
+        for _ in 0..1200 {
             step += 1.0;
             // Half a degree, oscillating: real residual noise, and much larger than the
             // tracker's.
-            let head = DQuat::from_rotation_y((step * 0.7).sin() * 0.008);
-            a.tick(Some(head), FRAME);
-            elapsed += FRAME;
+            a.tick(Some(DQuat::from_rotation_y((step * 0.7).sin() * 0.008)), FRAME);
         }
-        assert_eq!(a.alpha(), 0.0, "noise kept it awake");
+        assert_eq!(a.default_alpha(), 0.0, "noise kept it awake");
     }
 
     #[test]
     fn without_a_headset_nothing_fades() {
         let mut a = Attention::default();
         for _ in 0..2000 {
-            assert_eq!(a.tick(None, FRAME), 1.0);
+            a.tick(None, FRAME);
+            assert_eq!(a.default_alpha(), 1.0);
         }
+    }
+
+    #[test]
+    fn two_surfaces_with_different_thresholds_fade_at_different_times() {
+        // The whole reason the threshold is the surface's rather than the session's: a
+        // transport bar over a film and a toolbar over a model want opposite things, and one
+        // clock has to be able to answer both.
+        let mut a = Attention::default();
+        let quick = Duration::from_secs(2);
+        let patient = Duration::from_secs(20);
+        idle(&mut a, 4.0);
+        assert_eq!(a.alpha(quick), 0.0, "the quick one should be gone");
+        assert_eq!(a.alpha(patient), 1.0, "the patient one should be untouched");
+        idle(&mut a, 20.0);
+        assert_eq!(a.alpha(patient), 0.0);
+    }
+
+    #[test]
+    fn a_client_cannot_ask_for_a_flicker() {
+        assert_eq!(idle_after(0), IDLE_AFTER, "zero means the default");
+        assert_eq!(idle_after(50), MIN_IDLE_AFTER);
+        assert_eq!(idle_after(9_999_999), MAX_IDLE_AFTER);
+        assert_eq!(idle_after(3_000), Duration::from_secs(3));
     }
 }

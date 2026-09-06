@@ -88,6 +88,12 @@ pub struct WindowLayout {
     focused: Option<usize>,
     next_id: usize,
     ids: HashMap<ObjectId, usize>,
+    /// How tall each window's content was last time anyone looked, in metres.
+    ///
+    /// Only for [`apply_resize_anchors`], which needs to know that a shape *changed* rather
+    /// than what it is now. Kept here rather than derived because the previous value is gone
+    /// by the time the new buffer has been committed.
+    heights: HashMap<usize, f64>,
 }
 
 impl WindowLayout {
@@ -256,6 +262,76 @@ impl WindowLayout {
     fn key(window: &Window) -> Option<ObjectId> {
         use smithay::wayland::seat::WaylandFocus;
         window.wl_surface().map(|s| s.id())
+    }
+}
+
+/// Keep a nominated edge still when a surface changes shape.
+///
+/// A surface has one position and its height follows from its buffer's aspect, so a client
+/// that commits a shorter buffer shrinks about its middle. For a media player's window
+/// becoming a transport bar -- same width, a fifth the height -- that leaves the bar floating
+/// in the centre of the view with film above it and below it, where what a person expects is
+/// the bar where the bottom of the window was, the way it works on a screen.
+///
+/// `spatiand_xr_surface_v1.set_resize_anchor` says which edge means something, and this moves
+/// the placement so that edge does not move. Deliberately a change to where the window *is*,
+/// like the head-locked pass: the pointer, a drag and the pixels all have to agree about it.
+///
+/// Run every frame from the backend, because the only way to notice a shape change is to have
+/// seen the shape before.
+pub fn apply_resize_anchors(state: &mut crate::state::Spatiand) {
+    use smithay::backend::renderer::utils::with_renderer_surface_state;
+    use smithay::wayland::seat::WaylandFocus;
+
+    // Collected first: the loop reads `state.space` and the adjustment writes `state.layout`.
+    let mut moves: Vec<(Window, Placement, f64)> = Vec::new();
+    for window in state.space.elements() {
+        let Some(surface) = window.wl_surface() else {
+            continue;
+        };
+        let anchor = crate::xr::state_of(&surface).resize_anchor;
+        let Some(size) = with_renderer_surface_state(&surface, |s| s.surface_size()).flatten()
+        else {
+            continue;
+        };
+        let Some(placement) = state.layout.get(window) else {
+            continue;
+        };
+        let aspect = size.w as f64 / size.h.max(1) as f64;
+        let now = placement.width / aspect.max(0.01);
+        let id = match state.layout.id_of(window) {
+            Some(id) => id,
+            None => continue,
+        };
+        let was = state.layout.heights.get(&id).copied();
+        let mut placement = placement;
+        // The first sighting only records. There is no previous shape to hold an edge of, and
+        // guessing one would move a window the moment it appeared.
+        if let Some(was) = was {
+            let grew = now - was;
+            if grew.abs() > 1e-6 && anchor != crate::xr::ResizeAnchor::Centre {
+                // Small-angle: the quad faces the wearer at a fixed radius, so a rise of d
+                // metres is d/radius radians of pitch. At the sizes involved -- a few degrees
+                // -- the error against the exact answer is far below what anyone can see.
+                placement.pitch += anchor.drift() * grew / placement.radius.max(0.01);
+                log::info!(
+                    "a surface changed height {was:.3} -> {now:.3} m with a {anchor:?} anchor; \
+                     moved it {:.1} deg",
+                    (anchor.drift() * grew / placement.radius.max(0.01)).to_degrees()
+                );
+                moves.push((window.clone(), placement, now));
+                continue;
+            }
+        }
+        if was != Some(now) {
+            moves.push((window.clone(), placement, now));
+        }
+    }
+    for (window, placement, height) in moves {
+        if let Some(id) = state.layout.id_of(&window) {
+            state.layout.heights.insert(id, height);
+        }
+        state.layout.set(&window, placement);
     }
 }
 
