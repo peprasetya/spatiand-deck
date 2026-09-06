@@ -177,6 +177,11 @@
           Equirectangular, covering 180 degrees of longitude in front of the
           wearer. Behind them there is no image and the compositor says so
           rather than smearing the edge.
+
+          "In front of the wearer" is where they were facing when the layer was
+          claimed, and the image then stays put. This matters far more here than
+          for equirect_360, where turning the wrong way merely shows a different
+          part of the picture rather than the absence of one.
         </description>
       </entry>
       <entry name="equirect_360" value="4">
@@ -186,9 +191,21 @@
 
     <request name="set_yaw_offset">
       <description summary="turn an immersive image about the vertical axis">
-        Microradians. Only meaningful for the equirect layers, where it brings
-        the interesting part of a panorama round to face the wearer's forward.
-        Ignored otherwise.
+        Microradians, positive to the left. Only meaningful for the equirect
+        layers, where it brings the interesting part of a panorama round to face
+        the wearer's forward. Ignored otherwise.
+
+        This is a statement about the IMAGE, not about where the image goes. An
+        immersive layer already arrives centred on the wearer -- the compositor
+        notes which way they are facing when the layer is claimed, exactly as it
+        does when placing a new window, and the image stays there afterwards
+        however they turn. So a client wanting its content in front of the
+        person watching should send nothing at all; this is for the separate
+        case of a panorama whose interesting part is not at its centre.
+
+        Do not compensate for head position here. A client that reads the pose
+        channel and sends the negated heading will find its two rotations adding
+        up against a compositor that is already doing it.
       </description>
       <arg name="microradians" type="int"/>
     </request>

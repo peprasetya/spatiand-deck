@@ -248,6 +248,15 @@ pointer, a drag and the pixels all agree. It is also what makes a client doing
 its own head tracking possible: without it the compositor would track as well
 and apply it twice.
 
+An immersive layer **arrives centred on the wearer** — the compositor notes
+which way they are facing at the moment it is claimed, exactly as it does when
+placing a new window, and the image stays there afterwards however they turn.
+Send no `set_yaw_offset` unless your image's interesting part is genuinely not
+at its centre, and never send a compensation computed from the pose channel:
+the two rotations would add. (Until 2026-09-06 the sky was anchored to world
+zero while every window was anchored to the wearer, so pressing play while
+facing away from world zero put a VR180 film squarely behind you.)
+
 The equirect layers are **exclusive** — there is one room. A second client
 asking gets `layer_refused` with a reason. Ownership is claimed when the
 request arrives rather than when it commits, because two clients asking in the

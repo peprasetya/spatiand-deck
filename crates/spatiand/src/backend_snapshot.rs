@@ -35,6 +35,10 @@
 //! `SPATIAND_SNAPSHOT_EYE=right` draws the right eye instead of the left. Rendering both and
 //! comparing them is how a stereoscopic surface is checked without a headset on.
 //!
+//! `SPATIAND_SNAPSHOT_YAW=150` looks 150 degrees round, and tells the compositor the wearer
+//! is facing that way — so windows open there and an immersive layer is centred there, which
+//! is what makes "the film arrived behind me" reproducible without a headset.
+//!
 //! `SPATIAND_IDLE_SECONDS=n` winds the idle-fade clock forward by n seconds of a still head,
 //! which is how a surface that asked for `set_idle_fade` is seen fading without a wearer.
 //!
@@ -148,6 +152,14 @@ pub fn run(
     // exactly the case where panel sizing has gone wrong before.
     let portrait = std::env::var("SPATIAND_SNAPSHOT_PORTRAIT").is_ok();
     log::info!("snapshot: {view:?} at {width}x{height}, yaw {yaw_deg}, pitch {pitch_deg}, portrait {portrait} -> {}", out.display());
+    // Where the wearer is looking, as far as everything that places things is concerned. The
+    // session refreshes this from the tracker every frame; here it is the one number the
+    // harness was given, set before any client can connect.
+    //
+    // Without it a snapshot at yaw 150 drew the world from over there while every window and
+    // every immersive layer was still placed at world zero -- which is not a picture of
+    // anything the session would ever show, and hid exactly the fault this exists to catch.
+    runtime.state.spawn_yaw = yaw_deg.to_radians();
 
     // --- a GL context with no display attached ---
     let node =

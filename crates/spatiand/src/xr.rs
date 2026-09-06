@@ -58,6 +58,13 @@ pub struct XrState {
     pub swapped: bool,
     pub layer: Layer,
     pub yaw_offset_urad: i32,
+    /// Which way the wearer was facing when this surface became the room, in microradians.
+    ///
+    /// Not something a client sets or sees. An immersive layer arrives centred on the wearer,
+    /// the way a new window does, and then stays where it was put — so this is captured once
+    /// at the moment the layer is claimed and never touched again. See
+    /// [`crate::xr::XrState::sky_yaw_urad`].
+    pub anchor_yaw_urad: i32,
     /// The client has handed its visibility to the compositor — see [`crate::attention`].
     pub idle_fade: bool,
 }
@@ -100,6 +107,23 @@ impl XrState {
     /// rather than an odd one.
     pub fn is_environment(&self) -> bool {
         matches!(self.layer, Layer::Equirect180 | Layer::Equirect360)
+    }
+
+    /// Where the image's centre goes, in radians of world yaw.
+    ///
+    /// The anchor plus whatever the client asked for on top. Two different things are being
+    /// added here and keeping them apart is the point:
+    ///
+    /// * the **anchor** is where the wearer was looking when the layer was claimed, and it
+    ///   exists because an immersive layer should arrive in front of the person watching. A
+    ///   window does; the sky did not, and a VR180 film has nothing behind you, so facing away
+    ///   from world zero when you pressed play put the whole film at your back.
+    /// * `set_yaw_offset` is a statement about the *image* — which part of a panorama is the
+    ///   interesting part — and presupposes that "forward" already points at image centre.
+    ///
+    /// Once claimed neither moves. A film that follows the head is not a film.
+    pub fn sky_yaw_urad(&self) -> i32 {
+        self.anchor_yaw_urad.wrapping_add(self.yaw_offset_urad)
     }
 }
 
@@ -294,7 +318,23 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
                                 refused =
                                     Some("another application is already the environment".into());
                             }
-                            (_, Some(mine)) => state.sky_owner = Some(mine.clone()),
+                            (_, Some(mine)) => {
+                                // A *fresh* claim faces the wearer. Re-anchoring on every
+                                // request would be wrong twice over: a client switching
+                                // between 180 and 360 would have its film jump, and one that
+                                // resends the layer each frame -- which nothing forbids --
+                                // would have the sky follow its head.
+                                if state.sky_owner.as_ref() != Some(mine) {
+                                    pending.next.anchor_yaw_urad =
+                                        (state.spawn_yaw * 1e6) as i32;
+                                    log::info!(
+                                        "an application became the environment, centred at \
+                                         {:.0} deg",
+                                        state.spawn_yaw.to_degrees()
+                                    );
+                                }
+                                state.sky_owner = Some(mine.clone());
+                            }
                             (_, None) => {}
                         }
                     } else if let (Some(owner), Some(mine)) = (&state.sky_owner, &surface) {

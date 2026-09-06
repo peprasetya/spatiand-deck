@@ -2876,8 +2876,13 @@ pub fn sky_surface(
                 },
                 // Microradians on the wire, millidegrees in the renderer. Converted here so
                 // neither side has to know about the other's unit.
-                yaw_offset_millideg: (xr.yaw_offset_urad as f64 * 1e-6).to_degrees() as i32
-                    * 1000,
+                //
+                // The anchor is in this number as well as the client's own offset -- see
+                // `XrState::sky_yaw`. Negated because the two turn opposite ways: a window at
+                // yaw t sits in direction (cos t, sin t), which the sky shader reads as
+                // azimuth -t.
+                yaw_offset_millideg: -((xr.sky_yaw_urad() as f64 * 1e-6).to_degrees()
+                    * 1000.0) as i32,
             },
             swapped: xr.swapped,
         });
