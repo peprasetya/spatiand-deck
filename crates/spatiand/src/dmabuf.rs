@@ -12,12 +12,44 @@
 //! It is also what a hardware video decoder produces natively, so this is less an optimisation
 //! than the removal of a detour.
 //!
-//! **Version 3, deliberately.** Version 4 adds per-surface *feedback* — telling each client
-//! which device and formats would let its buffer be scanned out directly, without
-//! compositing. That is worth having on a desktop, where a fullscreen video can be handed
-//! straight to the display controller. It is worth nothing here: every window is a texture on
-//! a quad in a 3D scene, sampled by a shader, so nothing a client sends can ever go direct to
-//! scanout. Version 3 says "here are the formats I can import", which is the entire truth.
+//! ## Version 4, and why version 3 was the wrong call
+//!
+//! This global used to be created at version 3, on the reasoning that version 4's per-surface
+//! *feedback* exists to tell a client its buffer could go straight to scanout — and nothing
+//! here can ever go straight to scanout, because every window is a texture on a quad in a 3D
+//! scene. That reasoning is correct and it is beside the point.
+//!
+//! The thing version 4 also carries is `main_device`, and `main_device` is one of exactly two
+//! ways a client can find out **which GPU to render on**. Mesa's Wayland EGL learns the render
+//! node from the `wl_drm` global or from dmabuf feedback at version 4 or later. Spatiand has
+//! never offered `wl_drm` — it is a Mesa-specific relic — so at version 3 it offered neither,
+//! and Mesa did the thing that costs the most and says the least: it printed
+//!
+//! ```text
+//! libEGL warning: failed to get driver name for fd -1
+//! libEGL warning: MESA-LOADER: failed to retrieve device information
+//! ```
+//!
+//! to the client's stderr and returned a perfectly working **software** context. Every
+//! capability query then answers the way a real GPU would, because answering that way is what
+//! a software rasteriser is for. Nothing in the client can see it coming.
+//!
+//! Measured, by the first application written against this compositor: a 3840x1920 immersive
+//! film took **550% of a core** — five and a half of the Deck's eight threads — and stuttered.
+//! The same client, same film, same session, on the GPU: **20%**. The author spent a day
+//! looking for the fault in their own renderer, which is exactly where the symptom points and
+//! exactly the wrong place.
+//!
+//! So the global is built with a default feedback naming the renderer's own device, which is
+//! what makes it a version 4-or-later global — smithay advertises 5, and 4 is the version that
+//! matters because 4 is where `main_device` arrives. Clients that bind at version 3 or lower
+//! still get the format list from the main tranche and behave as before; nothing that worked
+//! stops working. The scanout tranches that feedback also allows are still not offered,
+//! because that part of the original reasoning stands: there is nothing here to scan out.
+//!
+//! Verified rather than assumed. Under the snapshot harness, `eglinfo` run as a client reports
+//! `radeonsi` with the global as built here, and `llvmpipe` preceded by both of those warnings
+//! when the device is withheld and the global falls back to version 3.
 //!
 //! ## Why the import is not tested here
 //!
@@ -33,8 +65,11 @@
 //! already chased more than once from the wrong end.
 
 use smithay::backend::allocator::Format;
+use smithay::backend::drm::DrmNode;
+use smithay::backend::egl::EGLDevice;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::ImportDma;
+use smithay::wayland::dmabuf::DmabufFeedbackBuilder;
 
 use crate::state::Spatiand;
 
@@ -51,14 +86,79 @@ pub fn advertise(state: &mut Spatiand, renderer: &GlesRenderer) {
         log::warn!("this renderer imports no dmabuf formats; clients will fall back to shm");
         return;
     }
-    let global = state
-        .dmabuf_state
-        .create_global::<Spatiand>(&state.display_handle, formats.clone());
+
+    // The device is asked of the renderer rather than passed in by the backend. Every backend
+    // has one to give -- the DRM backend knows its GPU, the others could ask EGL themselves --
+    // but the number that matters is the device the *renderer* is on, and asking the renderer
+    // is the only way to be sure those are the same thing.
+    let node = render_node(renderer);
+    let global = node.and_then(|node| {
+        match DmabufFeedbackBuilder::new(node.dev_id(), formats.clone()).build() {
+            Ok(feedback) => {
+                log::info!(
+                    "offering dmabuf v4 to clients, main device {:?}, {} format/modifier pair(s)",
+                    node.dev_path().unwrap_or_else(|| "?".into()),
+                    formats.len()
+                );
+                Some(
+                    state
+                        .dmabuf_state
+                        .create_global_with_default_feedback::<Spatiand>(
+                            &state.display_handle,
+                            &feedback,
+                        ),
+                )
+            }
+            Err(e) => {
+                log::warn!("could not build dmabuf feedback ({e})");
+                None
+            }
+        }
+    });
+
+    let global = match global {
+        Some(global) => global,
+        None => {
+            // Worth shouting about. Without the device name every GL client on the session
+            // silently runs on llvmpipe -- see the module docs -- and the only side that can
+            // see it happening is this one.
+            log::warn!(
+                "no render node for the dmabuf global; falling back to version 3. GL clients \
+                 will have no way to find the GPU and will render in software"
+            );
+            state
+                .dmabuf_state
+                .create_global::<Spatiand>(&state.display_handle, formats.clone())
+        }
+    };
     state.dmabuf_global = Some(global);
-    log::info!(
-        "offering dmabuf to clients in {} format/modifier pair(s)",
-        formats.len()
-    );
+}
+
+/// Which DRM render node this renderer is drawing on.
+///
+/// Via EGL rather than via the backend's own device handle, because a backend's handle is a
+/// *primary* node and clients need the *render* node — and because the nested and headless
+/// backends have no device handle at all.
+fn render_node(renderer: &GlesRenderer) -> Option<DrmNode> {
+    let display = renderer.egl_context().display();
+    match EGLDevice::device_for_display(display) {
+        Ok(device) => match device.try_get_render_node() {
+            Ok(node) => {
+                if node.is_none() {
+                    log::warn!("EGL knows this display's device but names no render node for it");
+                }
+                node
+            }
+            Err(e) => {
+                log::warn!("could not get a render node from EGL ({e})");
+                None
+            }
+        },
+        Err(e) => {
+            log::warn!("could not identify this renderer's EGL device ({e})");
+            None
+        }
+    }
 }
 
 /// Answer the buffers a client offered since the last frame.
