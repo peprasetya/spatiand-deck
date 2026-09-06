@@ -471,6 +471,37 @@ impl Dispatch<SpatiandXrPoseChannelV1, ()> for Spatiand {
     }
 }
 
+/// Turn the environment with the rest of the room.
+///
+/// Recentring moves every window at once; the sky has to come with them or an immersive film
+/// and the controls in front of it part company, which is worse than either being wrong on its
+/// own. Both halves of the surface's state are moved -- what is being drawn now, and what the
+/// client's next commit will apply -- because updating only the applied half means the anchor
+/// springs back the moment the client sends anything at all.
+pub fn rotate_sky_anchor(state: &mut Spatiand, delta_radians: f64) {
+    let Some(surface) = state.sky_owner.clone() else {
+        return;
+    };
+    let delta = (delta_radians * 1e6) as i32;
+    with_states(&surface, |states| {
+        if let Some(applied) = states.data_map.get::<Applied>() {
+            if let Ok(mut applied) = applied.0.lock() {
+                applied.anchor_yaw_urad = applied.anchor_yaw_urad.wrapping_add(delta);
+            }
+        }
+    });
+    for (owned, object) in &state.xr_surfaces {
+        if *owned != surface {
+            continue;
+        }
+        if let Some(pending) = object.data::<Mutex<Pending>>() {
+            if let Ok(mut pending) = pending.lock() {
+                pending.next.anchor_yaw_urad = pending.next.anchor_yaw_urad.wrapping_add(delta);
+            }
+        }
+    }
+}
+
 /// Give up everything this object was holding, and forget how its surface was drawn.
 ///
 /// Idempotent: the surface is taken, so calling it twice is calling it once. That matters

@@ -44,8 +44,9 @@
 //! is facing that way — so windows open there and an immersive layer is centred there, which
 //! is what makes "the film arrived behind me" reproducible without a headset.
 //!
-//! `SPATIAND_IDLE_SECONDS=n` winds the idle-fade clock forward by n seconds of a still head,
-//! which is how a surface that asked for `set_idle_fade` is seen fading without a wearer.
+//! `SPATIAND_IDLE_SECONDS=n` winds the idle-fade clock forward by n seconds of nobody touching
+//! anything, which is how a surface that asked for `set_idle_fade` is seen fading without a
+//! wearer.
 //!
 //! `SPATIAND_CLICK=u,v` clicks the client's window at that fraction across it once it has
 //! painted, and `SPATIAND_CLICK_BUTTON=right` uses the other button. This is how a menu gets
@@ -346,19 +347,18 @@ pub fn run(
     }
     // Idle fading, without a wearer to sit still for it.
     //
-    // `SPATIAND_IDLE_SECONDS=n` winds the attention clock forward by n seconds of a perfectly
-    // still head, which is the one input a harness with no headset cannot produce by waiting.
+    // `SPATIAND_IDLE_SECONDS=n` winds the attention clock forward by n seconds of nobody
+    // touching anything, which is the one input a harness with no headset cannot produce by waiting.
     // It is how the compositor-side fade in `crate::attention` gets looked at at all.
     if let Ok(raw) = std::env::var("SPATIAND_IDLE_SECONDS") {
         let seconds: f32 = raw.parse().unwrap_or(0.0);
+        // `true` for "there is a headset": the harness has none, and without pretending
+        // otherwise nothing would ever fade and there would be nothing to photograph.
         let step = std::time::Duration::from_millis(14);
         let mut left = std::time::Duration::from_secs_f32(seconds.max(0.0));
         while !left.is_zero() {
             let dt = step.min(left);
-            runtime
-                .state
-                .attention
-                .tick(Some(glam::DQuat::IDENTITY), dt);
+            runtime.state.attention.tick(true, dt);
             left -= dt;
         }
         for quad in windows.iter_mut() {

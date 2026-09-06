@@ -824,6 +824,9 @@ pub fn run(
         // Which vblank this is, which is what lets a client tell a late frame from a dropped
         // one: two frames reported one sequence apart were consecutive, and a gap was not.
         let mut presented_seq: u64 = 0;
+        // What the hands were doing last frame, so "a hand moved" can be told from "the pads
+        // were read again". See `crate::attention::Hands`.
+        let mut last_hands = crate::attention::Hands::default();
         // For the idle-fade clock, which needs a frame delta rather than a frame count.
         let mut last_tick = std::time::Instant::now();
 
@@ -1099,8 +1102,37 @@ pub fn run(
                     }
                     ShellEvent::Hud(action) => match action {
                         HudAction::Recentre => {
+                            // Recentring brings the room to the wearer. It used to move only
+                            // the tracker's idea of zero, which is a different thing entirely:
+                            // afterwards the wearer's forward read 0 while every window kept
+                            // the absolute yaw it was placed at, so everything jumped by
+                            // however far they had turned since the session began. Turn round
+                            // once and press it and the whole room -- including a VR180 film
+                            // that had been directly in front -- was behind you. Which is
+                            // exactly how it was reported.
+                            //
+                            // So: pick what should end up in front, re-peg the tracker, and
+                            // turn the room by the same amount. Relative bearings are
+                            // untouched, so what was to the left of what stays there.
+                            let anchor = runtime
+                                .state
+                                .layout
+                                .focused_placement()
+                                .map(|p| (p.yaw, p.pitch))
+                                // With nothing focused, hold whatever is being looked at now,
+                                // which makes recentring with an empty room cost nothing
+                                // visible rather than swinging an environment away.
+                                .unwrap_or_else(|| {
+                                    let e = tracker.euler_degrees();
+                                    (e.yaw.to_radians(), e.pitch.to_radians())
+                                });
                             tracker.recenter();
-                            log::info!("recentred");
+                            runtime.state.layout.rotate_all(-anchor.0, -anchor.1);
+                            crate::xr::rotate_sky_anchor(&mut runtime.state, -anchor.0);
+                            log::info!(
+                                "recentred; brought the room round by {:.0} deg",
+                                (-anchor.0).to_degrees()
+                            );
                         }
                         HudAction::Calibrate => {
                             log::info!("restarting axis calibration from the HUD");
@@ -1346,14 +1378,13 @@ pub fn run(
 
             // --- is anyone paying attention ---
             //
-            // Advanced from the *measured* orientation rather than the predicted one: the
-            // prediction deliberately overshoots, which would read as a head that never quite
-            // settles and would keep a faded bar awake for ever. See `crate::attention`.
+            // Hands only. The head deliberately does not reach this: watching an immersive
+            // video *is* moving your head, so a transport bar woken by head movement is a bar
+            // that never goes away. See `crate::attention`.
             {
                 let dt = last_tick.elapsed();
                 last_tick = std::time::Instant::now();
-                let head = hmd.as_ref().map(|_| tracker.orientation());
-                runtime.state.attention.tick(head, dt);
+                runtime.state.attention.tick(hmd.is_some(), dt);
             }
 
             // Surfaces that named an edge keep it still when their shape changes. Here rather
@@ -1579,6 +1610,21 @@ pub fn run(
             };
             let right_aim = pads.as_ref().and_then(|p| aim_of(&p.right_pad));
             let left_aim = pads.as_ref().and_then(|p| aim_of(&p.left_pad));
+            // Whether a hand moved, in the pad's own coordinates rather than the ray's. The
+            // ray is cast through the head, so it sweeps the room when the wearer turns with
+            // no thumb involved -- watching it would be head tracking wearing a hat.
+            {
+                let touched = |pad: &spatiand_input::Pad| pad.touched.then_some((pad.x, pad.y));
+                let hands = crate::attention::Hands {
+                    right: pads.as_ref().and_then(|p| touched(&p.right_pad)),
+                    left: pads.as_ref().and_then(|p| touched(&p.left_pad)),
+                    mouse: desk.as_ref().and_then(|d| d.cursor()).map(|(x, y, _)| (x, y)),
+                };
+                if hands.moved_from(&last_hands) {
+                    runtime.state.attention.stir();
+                }
+                last_hands = hands;
+            }
             // The mouse aims the same way a thumb does: a position from -1 to 1, through the
             // head's orientation. It keeps its own position because a mouse only ever says how
             // far it has moved.

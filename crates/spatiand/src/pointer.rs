@@ -491,10 +491,6 @@ pub struct PointerState {
     held: Vec<u32>,
     /// Which window the cursor was last over, to notice when it leaves.
     last_focus: Option<usize>,
-    /// Where the ray was pointing last time, to tell "the wearer moved the pointer" from "the
-    /// pointer was serviced". Motion is called every frame whether anything moved or not, so
-    /// the call alone says nothing about whether anyone is there. See [`crate::attention`].
-    last_ray: Option<glam::DVec3>,
 }
 
 /// A ray plus what it currently hits.
@@ -672,16 +668,6 @@ impl PointerState {
         windows: &[WindowQuad],
         time_ms: u32,
     ) {
-        // Before the early return: whether the wearer is reaching for something does not
-        // depend on there being a pointer capability to deliver it to.
-        let moved = self
-            .last_ray
-            .map(|was| state.attention.reached(was, aim.ray.direction))
-            .unwrap_or(false);
-        self.last_ray = Some(aim.ray.direction);
-        if moved {
-            state.attention.stir();
-        }
         let Some(pointer) = state.seat.get_pointer() else {
             return;
         };

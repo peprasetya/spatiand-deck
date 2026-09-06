@@ -81,6 +81,14 @@ impl Placement {
     }
 }
 
+/// How far above or below the horizon a window may be pushed, in radians.
+///
+/// A little over sixty degrees. Pitch does not wrap the way yaw does — a window taken past
+/// vertical ends up facing away from a viewer who, being 3DoF, can only ever be at the centre
+/// of the sphere. Recentring is the one operation that can move every window at once, so it is
+/// also the one that can put them all somewhere unreachable.
+const PITCH_LIMIT: f64 = 1.1;
+
 /// Per-window spatial state, alongside Smithay's `Space`.
 #[derive(Debug, Default)]
 pub struct WindowLayout {
@@ -196,6 +204,24 @@ impl WindowLayout {
     pub fn focus(&mut self, window: &Window) {
         if let Some(id) = self.id_for(window) {
             self.focused = Some(id);
+        }
+    }
+
+    /// Where the focused window sits, if there is one.
+    pub fn focused_placement(&self) -> Option<Placement> {
+        self.placements.get(&self.focused?).copied()
+    }
+
+    /// Turn the whole room about the wearer, keeping every relative bearing.
+    ///
+    /// Used by recentring. Everything moves together, so what was to the left of what stays to
+    /// the left of it; only which way the whole arrangement faces changes.
+    pub fn rotate_all(&mut self, yaw: f64, pitch: f64) {
+        for placement in self.placements.values_mut() {
+            placement.yaw += yaw;
+            // Clamped, because pitch is not an angle that wraps: a window pushed past
+            // vertical would face away from a viewer who can only be at the centre.
+            placement.pitch = (placement.pitch + pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
         }
     }
 
@@ -337,6 +363,88 @@ pub fn apply_resize_anchors(state: &mut crate::state::Spatiand) {
 
 #[cfg(test)]
 mod tests {
+    /// Recentring, as the backend performs it: whatever should end up in front is chosen, the
+    /// tracker is re-pegged so the wearer's gaze reads zero, and the room turns by the same
+    /// amount the other way.
+    fn recentre(layout: &mut WindowLayout, anchor: (f64, f64)) {
+        layout.rotate_all(-anchor.0, -anchor.1);
+    }
+
+    fn window_at(layout: &mut WindowLayout, id: usize, yaw: f64) {
+        layout.placements.insert(
+            id,
+            Placement {
+                yaw,
+                ..Default::default()
+            },
+        );
+    }
+
+    #[test]
+    fn recentring_brings_the_anchor_to_dead_ahead() {
+        // The whole bug: the wearer had turned round, their window was in front of them, and
+        // recentring put it behind them because the window kept an absolute yaw while their
+        // forward was reset to zero.
+        let mut layout = WindowLayout::default();
+        window_at(&mut layout, 0, 3.0);
+        layout.focused = Some(0);
+        let anchor = layout.focused_placement().expect("focused").yaw;
+        recentre(&mut layout, (anchor, 0.0));
+        assert!(
+            layout.placements[&0].yaw.abs() < 1e-9,
+            "the focused window ended up at {} rad, not in front",
+            layout.placements[&0].yaw
+        );
+    }
+
+    #[test]
+    fn recentring_keeps_every_relative_bearing() {
+        // Turning the room must not rearrange it. What was to the left of what stays there,
+        // or recentring becomes a shuffle rather than a rotation.
+        let mut layout = WindowLayout::default();
+        window_at(&mut layout, 0, 3.0);
+        window_at(&mut layout, 1, 3.4);
+        window_at(&mut layout, 2, 2.5);
+        layout.focused = Some(0);
+        let before: Vec<f64> = (0..3).map(|i| layout.placements[&i].yaw - 3.0).collect();
+        recentre(&mut layout, (3.0, 0.0));
+        let after: Vec<f64> = (0..3).map(|i| layout.placements[&i].yaw).collect();
+        for (was, now) in before.iter().zip(after.iter()) {
+            assert!((was - now).abs() < 1e-9, "bearing moved: {was} -> {now}");
+        }
+    }
+
+    #[test]
+    fn recentring_on_nothing_moves_nothing() {
+        // With an empty room the backend anchors on the current gaze, which makes the whole
+        // operation cost nothing visible. A recentre that swings an environment away from
+        // someone who has no windows open would be the same bug in a smaller room.
+        let mut layout = WindowLayout::default();
+        window_at(&mut layout, 0, 1.0);
+        let gaze = 1.0;
+        recentre(&mut layout, (gaze, 0.0));
+        assert!(layout.placements[&0].yaw.abs() < 1e-9);
+    }
+
+    #[test]
+    fn recentring_cannot_push_a_window_past_vertical() {
+        // Pitch does not wrap. A window taken beyond vertical faces away from a viewer who can
+        // only ever be at the centre of the sphere, and recentring is the one operation that
+        // can move every window at once.
+        let mut layout = WindowLayout::default();
+        layout.placements.insert(
+            0,
+            Placement {
+                pitch: 1.0,
+                ..Default::default()
+            },
+        );
+        recentre(&mut layout, (0.0, -3.0));
+        let pitch = layout.placements[&0].pitch;
+        assert!(pitch <= PITCH_LIMIT, "pitch reached {pitch}");
+        assert!(pitch >= -PITCH_LIMIT);
+    }
+
     use super::*;
 
     fn approx(a: f64, b: f64) -> bool {

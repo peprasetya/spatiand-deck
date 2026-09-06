@@ -300,9 +300,16 @@ guess.)
 ### Getting out of the way
 
 `set_idle_fade(1)` hands the compositor your surface's visibility. After a few
-seconds in which the wearer has not moved the pointer, pressed anything, typed,
-or turned their head, the surface — and its frame, title bar and buttons — fades
-out; any of those things brings it straight back, faster than it left.
+seconds in which the wearer has not moved a thumb on a pad, moved the mouse,
+pressed anything or typed, the surface — and its frame, title bar and buttons —
+fades out; any of those brings it straight back, faster than it left.
+
+**Head movement is not attention**, and does not bring anything back. This was
+the other way round at first and it was wrong: watching an immersive video *is*
+moving your head, so a bar woken by head movement is a bar that never leaves.
+The pointer ray is cast from the head, so it sweeps the room when the wearer
+turns with no hand involved — what the compositor watches is the pad and mouse
+coordinates themselves, which move only when a hand moves them.
 
 This is here because you cannot do it yourself, even in principle. Pointer
 motion is delivered only to the surface under the ray, so a transport bar that
