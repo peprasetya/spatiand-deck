@@ -261,9 +261,24 @@ frame. A client that crashes, stops posting, or gives the layer up cannot leave
 the wearer inside a frozen image — the wearer's own environment simply comes
 back on the next frame.
 
+The *claim* is released the same way, however your process ends. Until
+2026-09-06 it was released only by the explicit `destroy` request, so one
+SIGKILL left it held by a surface that no longer existed and every later request
+for the room — from you restarted, or from anyone else — was refused for the
+life of the compositor. Both destroy paths now run the same body, and a claim
+whose surface is not alive cannot refuse anybody. Handling `SIGTERM` and giving
+the layer back is still the polite thing to do, but nothing depends on it any
+more. `tools/sky-handover.sh` is the reproduction, kept runnable.
+
 **A layer is either honoured or refused out loud.** A layer accepted and then
 drawn as something else would be worse than one declined, because you would lay
 yourself out for something you are not getting. There is a test asserting that.
+
+Every refusal is also written to the session log, in the protocol's own
+spelling — `layer_refused(equirect_360): another application is already the
+environment`. It used to go to the client and nowhere else, which made "the
+second application will not take the room" invisible from the only side that can
+see both applications.
 
 There is no `granted` event, so **silence is the yes**: send `set_layer`, then
 `wl_display.sync`, and if no `layer_refused` arrived before the sync callback,

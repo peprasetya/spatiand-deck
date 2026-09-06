@@ -277,32 +277,42 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
                 // Refused rather than half-honoured. A layer that is accepted and then drawn
                 // as something else is worse than one that is declined: the client believes
                 // it is immersive and lays itself out accordingly.
-                if let Some(reason) = refusal(wanted) {
-                    resource.layer_refused(wire, reason.into());
-                    return;
-                }
-                // The environment is exclusive: there is one room and it can only be one
-                // thing. Claimed here rather than on commit, because two clients asking in
-                // the same frame must get different answers and a commit is too late to be
-                // one of them.
+                //
+                // Every refusal leaves through one place below, because a refusal has to be
+                // logged as well as sent and two exits meant one of them was silent.
                 let surface = pending.surface.clone();
-                if matches!(wanted, Layer::Equirect180 | Layer::Equirect360) {
-                    match (&state.sky_owner, &surface) {
-                        (Some(owner), Some(mine)) if owner != mine => {
-                            resource.layer_refused(
-                                wire,
-                                "another application is already the environment".into(),
-                            );
-                            return;
+                let mut refused: Option<String> = refusal(wanted).map(String::from);
+                if refused.is_none() {
+                    // The environment is exclusive: there is one room and it can only be one
+                    // thing. Claimed here rather than on commit, because two clients asking
+                    // in the same frame must get different answers and a commit is too late
+                    // to be one of them.
+                    if matches!(wanted, Layer::Equirect180 | Layer::Equirect360) {
+                        release_dead_sky(state);
+                        match (&state.sky_owner, &surface) {
+                            (Some(owner), Some(mine)) if owner != mine => {
+                                refused =
+                                    Some("another application is already the environment".into());
+                            }
+                            (_, Some(mine)) => state.sky_owner = Some(mine.clone()),
+                            (_, None) => {}
                         }
-                        (_, Some(mine)) => state.sky_owner = Some(mine.clone()),
-                        (_, None) => {}
+                    } else if let (Some(owner), Some(mine)) = (&state.sky_owner, &surface) {
+                        // Leaving the sky for something else gives it back.
+                        if owner == mine {
+                            state.sky_owner = None;
+                            log::info!("the environment is free again; its application left it");
+                        }
                     }
-                } else if let (Some(owner), Some(mine)) = (&state.sky_owner, &surface) {
-                    // Leaving the sky for something else gives it back.
-                    if owner == mine {
-                        state.sky_owner = None;
-                    }
+                }
+                if let Some(reason) = refused {
+                    // Said here as well as sent. A refusal used to go to the client and
+                    // nowhere else, which made "the second application will not take the
+                    // room" invisible from the only side that can see both applications --
+                    // and cost somebody an afternoon that should have been five minutes.
+                    log::info!("layer_refused({}): {reason}", layer_name(wanted));
+                    resource.layer_refused(wire, reason);
+                    return;
                 }
                 pending.next.layer = wanted;
             }
@@ -312,25 +322,32 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
             spatiand_xr_surface_v1::Request::SetIdleFade { enable } => {
                 pending.next.idle_fade = enable != 0;
             }
-            spatiand_xr_surface_v1::Request::Destroy => {
-                if let Some(surface) = pending.surface.take() {
-                    if state.sky_owner.as_ref() == Some(&surface) {
-                        state.sky_owner = None;
-                    }
-                    reset(&surface);
-                }
-            }
+            spatiand_xr_surface_v1::Request::Destroy => release(state, &mut pending),
             _ => {}
         }
     }
 
+    /// The object has gone, however it went.
+    ///
+    /// This is the path a client that *crashed* takes, and it is the one that mattered: the
+    /// polite `destroy` request was releasing the environment and this was not, so one
+    /// SIGKILL left `sky_owner` pointing at a surface that no longer existed and every later
+    /// request for the room -- from the same application restarted, or from any other -- was
+    /// refused for the life of the compositor. Nothing could give it back, because the only
+    /// thing that could was gone.
+    ///
+    /// Both paths now run the same body. `release` takes the surface, so whichever arrives
+    /// first does the work and the other finds nothing to do.
     fn destroyed(
         state: &mut Self,
         _client: smithay::reexports::wayland_server::backend::ClientId,
         resource: &spatiand_xr_surface_v1::SpatiandXrSurfaceV1,
-        _data: &Mutex<Pending>,
+        data: &Mutex<Pending>,
     ) {
         state.xr_surfaces.retain(|(_, object)| object != resource);
+        if let Ok(mut pending) = data.lock() {
+            release(state, &mut pending);
+        }
     }
 }
 
@@ -353,6 +370,49 @@ impl Dispatch<SpatiandXrPoseChannelV1, ()> for Spatiand {
         _data: &(),
     ) {
         state.pose_clients.retain(|c| c != resource);
+    }
+}
+
+/// Give up everything this object was holding, and forget how its surface was drawn.
+///
+/// Idempotent: the surface is taken, so calling it twice is calling it once. That matters
+/// because both ends of an object's life lead here -- the `destroy` request and the object
+/// simply ceasing to exist -- and which of them happens, or whether both do, is not something
+/// this code should have to know.
+fn release(state: &mut Spatiand, pending: &mut Pending) {
+    let Some(surface) = pending.surface.take() else {
+        return;
+    };
+    if state.sky_owner.as_ref() == Some(&surface) {
+        state.sky_owner = None;
+        log::info!("the environment is free again; the application holding it has gone");
+    }
+    reset(&surface);
+}
+
+/// Let go of the environment if whoever claimed it no longer exists.
+///
+/// Belt and braces on top of [`release`], and deliberately so. The claim is a promise that
+/// exactly one application is the room; the cost of getting that wrong in one direction is
+/// two clients drawing the sky for a frame, and in the other it is nobody being able to have
+/// it ever again. Those are not the same size of mistake, and this is the cheap guard against
+/// the expensive one -- including against a `wl_surface` destroyed while its extension object
+/// lives on, which neither destroy path sees.
+fn release_dead_sky(state: &mut Spatiand) {
+    if state.sky_owner.as_ref().is_some_and(|owner| !owner.is_alive()) {
+        log::info!("the environment was still claimed by a surface that has gone; releasing it");
+        state.sky_owner = None;
+    }
+}
+
+/// The protocol's own spelling for a layer, for logs that can be read against the XML.
+fn layer_name(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Window => "window",
+        Layer::HeadLocked => "head_locked",
+        Layer::Projection => "projection",
+        Layer::Equirect180 => "equirect_180",
+        Layer::Equirect360 => "equirect_360",
     }
 }
 
