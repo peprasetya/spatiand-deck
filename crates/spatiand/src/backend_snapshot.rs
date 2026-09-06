@@ -35,6 +35,11 @@
 //! `SPATIAND_SNAPSHOT_EYE=right` draws the right eye instead of the left. Rendering both and
 //! comparing them is how a stereoscopic surface is checked without a headset on.
 //!
+//! `SPATIAND_VIEW=sidecar SPATIAND_VIEW_PAGE=startup` draws the panel as it looks while a
+//! session is still coming up, with `SPATIAND_VIEW_STAGE=link|stereo|world` for which stage.
+//! That screen only exists during startup on real hardware, so this is the only way to look at
+//! it without restarting a session and being quick with a camera.
+//!
 //! `SPATIAND_SNAPSHOT_YAW=150` looks 150 degrees round, and tells the compositor the wearer
 //! is facing that way — so windows open there and an immersive layer is centred there, which
 //! is what makes "the film arrived behind me" reproducible without a headset.
@@ -680,6 +685,22 @@ fn draw_sidecar(
     let mut monitors = crate::system::Monitors::new();
     monitors.tick();
 
+    // The startup screen is drawn instead of the running one, not as a page of it: none of
+    // what the sidecar normally shows exists while a session is still coming up.
+    // `SPATIAND_VIEW_PAGE=startup` picks it, and `SPATIAND_VIEW_STAGE=stereo` picks which
+    // stage -- otherwise the long one, which is the one worth looking at.
+    let startup = (std::env::var("SPATIAND_VIEW_PAGE").as_deref() == Ok("startup")).then(|| {
+        let stage = match std::env::var("SPATIAND_VIEW_STAGE").as_deref() {
+            Ok("link") => crate::startup::Stage::Link,
+            Ok("world") => crate::startup::Stage::World,
+            _ => crate::startup::Stage::Stereo,
+        };
+        let label = scene
+            .title_texture(renderer, text, stage.label(), 80.0)
+            .map(|t| (t.id, t.aspect));
+        (stage, label)
+    });
+
     let prepared = ui.prepare(renderer, text, &monitors, "17:04", levels, &audio, keyboard);
 
     let target: GlesTexture =
@@ -713,9 +734,19 @@ fn draw_sidecar(
         gl.Viewport(0, 0, panel.0 as i32, panel.1 as i32);
         gl.ClearColor(0.02, 0.03, 0.05, 1.0);
         gl.Clear(ffi::COLOR_BUFFER_BIT);
-        ui.draw(
-            gl, quads, rounded, &monitors, levels, &audio, keyboard, &prepared,
-        );
+        match &startup {
+            Some((stage, label)) => ui.draw_startup(
+                gl,
+                quads,
+                rounded,
+                *label,
+                stage.step(),
+                crate::startup::STAGES.len(),
+            ),
+            None => ui.draw(
+                gl, quads, rounded, &monitors, levels, &audio, keyboard, &prepared,
+            ),
+        }
         gl.ReadPixels(
             0,
             0,

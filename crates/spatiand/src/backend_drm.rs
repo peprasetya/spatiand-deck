@@ -560,6 +560,32 @@ pub fn run(
             .as_ref()
             .map(|s| crate::sidecar::Sidecar::new(scene.white_texture(), s.size));
 
+        // From here the panel says what is happening. Six seconds of two black screens reads
+        // as a machine that has hung, and the first thing anyone does with a hung machine is
+        // press something. See `crate::startup` for where the six seconds actually go.
+        //
+        // A macro rather than a closure: a closure would have to capture the renderer, the
+        // event loop and the runtime for the whole of setup, and every one of them is needed
+        // by the setup itself a few lines later.
+        macro_rules! say {
+            ($stage:expr) => {
+                if let (Some(side), Some(ui)) = (sidecar_surface.as_mut(), sidecar_ui.as_ref()) {
+                    show_startup_stage(
+                        &mut renderer,
+                        &mut text,
+                        &mut scene,
+                        side,
+                        ui,
+                        &vblank,
+                        event_loop,
+                        runtime,
+                        $stage,
+                    );
+                }
+            };
+        }
+        say!(crate::startup::Stage::Link);
+
         let mut pending_flip = false;
 
         // Present one blank frame before doing anything else.
@@ -596,6 +622,11 @@ pub fn run(
             }
             log::info!("link up (blank frame presented)");
         }
+        // The long one: the glasses are told to become a side-by-side display and the wider
+        // mode turns up on the connector when it turns up. Two seconds of nothing, measured,
+        // and the only stage where saying which box is busy is also the diagnosis -- a wearer
+        // stuck here has glasses answering over USB that will not switch, which is a cable.
+        say!(crate::startup::Stage::Stereo);
 
         // --- stereo negotiation, after the link is up ---
         //
@@ -683,6 +714,7 @@ pub fn run(
             }
         }
         log::info!("presenting at {w}x{h}, stereo: {on_glasses}");
+        say!(crate::startup::Stage::World);
         // Now that there is a renderer, clients can be offered dmabuf -- the formats come from
         // it, and there is nothing truthful to advertise before it exists.
         crate::dmabuf::advertise(&mut runtime.state, &renderer);
@@ -2868,6 +2900,97 @@ struct SidecarSurface {
     failures: u32,
     /// Held so the wayland global lives as long as the surface.
     _output: Output,
+}
+
+/// Say on the panel what the session is doing, while the glasses are still dark.
+///
+/// Best effort throughout: a startup that cannot draw its own progress screen must still
+/// start. Every failure here is swallowed rather than reported, because the alternative is a
+/// session that refuses to begin over a message about beginning.
+///
+/// Presents synchronously and waits briefly for the flip, which a frame loop would never do —
+/// but there is no frame loop yet, and a progress screen that is queued and never scanned out
+/// is exactly as useful as no progress screen.
+#[allow(clippy::too_many_arguments)]
+fn show_startup_stage(
+    renderer: &mut GlesRenderer,
+    text: &mut TextRenderer,
+    scene: &mut Scene,
+    side: &mut SidecarSurface,
+    ui: &crate::sidecar::Sidecar,
+    vblank: &Rc<RefCell<HashSet<crtc::Handle>>>,
+    event_loop: &mut EventLoop<'static, Runtime>,
+    runtime: &mut Runtime,
+    stage: crate::startup::Stage,
+) {
+    // Acknowledge whatever is still in the air, or this present is simply dropped.
+    if side.pending {
+        let deadline = std::time::Instant::now() + Duration::from_millis(80);
+        while std::time::Instant::now() < deadline {
+            if vblank.borrow_mut().remove(&side.crtc) {
+                let _ = side.compositor.frame_submitted();
+                side.pending = false;
+                break;
+            }
+            let _ = event_loop.dispatch(Some(Duration::from_millis(4)), runtime);
+        }
+        if side.pending {
+            return;
+        }
+    }
+
+    // Rasterised through the same cache the window titles use, so three short strings cost
+    // three textures for the life of the session.
+    let label = scene
+        .title_texture(renderer, text, stage.label(), 80.0)
+        .map(|t| (t.id, t.aspect));
+
+    let (sw, sh) = (side.size.0 as i32, side.size.1 as i32);
+    let fbo = side.fbo;
+    let step = stage.step();
+    let total = crate::startup::STAGES.len();
+    let quads = scene.quads();
+    let rounded = scene.rounded();
+    let drawn = renderer.with_context(|gl| unsafe {
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+        gl.Disable(ffi::SCISSOR_TEST);
+        gl.Viewport(0, 0, sw, sh);
+        gl.ClearColor(0.02, 0.03, 0.05, 1.0);
+        gl.Clear(ffi::COLOR_BUFFER_BIT);
+        ui.draw_startup(gl, quads, rounded, label, step, total);
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+    });
+    if drawn.is_err() {
+        return;
+    }
+
+    let element = TextureRenderElement::from_static_texture(
+        Id::new(),
+        renderer.context_id(),
+        (0.0, 0.0),
+        side.scene.clone(),
+        1,
+        Transform::Normal,
+        Some(1.0),
+        None,
+        None,
+        None,
+        Kind::Unspecified,
+    );
+    if side
+        .compositor
+        .render_frame(
+            renderer,
+            &[element],
+            Color32F::from([0.0, 0.0, 0.0, 1.0]),
+            FrameFlags::DEFAULT,
+        )
+        .is_ok()
+        && side.compositor.queue_frame(()).is_ok()
+    {
+        side.pending = true;
+        log::info!("startup {}/{}: {}", step, total, stage.label());
+    }
 }
 
 /// Bring up the sidecar on a connector the main output is not using.

@@ -922,6 +922,96 @@ impl Sidecar {
     /// # Safety
     /// Context must be current and the target framebuffer bound.
     #[allow(clippy::too_many_arguments)]
+    /// The panel while the session is still starting.
+    ///
+    /// Deliberately its own draw rather than a page of the ordinary one: none of the things
+    /// the sidecar normally shows exist yet -- no audio devices, no monitors, no brightness --
+    /// and a screen full of empty controls says less than one sentence does.
+    ///
+    /// # Safety
+    /// The GL context must be current and the target framebuffer bound.
+    pub unsafe fn draw_startup(
+        &self,
+        gl: &ffi::Gles2,
+        quads: &QuadPipeline,
+        rounded: &crate::gl::RoundedPipeline,
+        label: Option<(u32, f32)>,
+        step: usize,
+        total: usize,
+    ) {
+        let layout = Layout {
+            width: self.size.0,
+            height: self.size.1,
+        };
+        let projection = self.projection();
+        let (w, h) = (self.size.0, self.size.1);
+
+        // Backdrop, the same nearly-black the running sidecar uses, so the transition from
+        // this screen to the real one is not also a change of colour.
+        quads.draw(
+            gl,
+            self.white,
+            &(projection * layout.of(Rect { x: 0.0, y: 0.0, w, h })),
+            [0.02, 0.03, 0.05, 1.0],
+            (0.0, 1.0),
+        );
+
+        // The sentence, centred.
+        if let Some((texture, aspect)) = label {
+            // Read from a panel lying beside you rather than held up, so larger than the
+            // running sidecar's own labels. Capped on width as well as set by height, because
+            // "Bringing up the display" is half again as long as "Loading the room" and a line
+            // that runs off the panel is worse than one that is a little small.
+            let height = (h * 0.085).min(w * 0.72 / aspect.max(0.01));
+            let width = height * aspect.max(0.01);
+            quads.draw(
+                gl,
+                texture,
+                &(projection
+                    * layout.of(Rect {
+                        x: (w - width) * 0.5,
+                        y: h * 0.40,
+                        w: width,
+                        h: height,
+                    })),
+                [0.88, 0.92, 1.0, 1.0],
+                (0.0, 1.0),
+            );
+        }
+
+        // One pip per stage, lit up to where we are.
+        //
+        // A bar filling smoothly would be a lie: these stages are wildly different lengths and
+        // a bar that crawls for two seconds and then jumps looks stuck. Discrete pips only
+        // claim what is true -- this many things have happened, that many have not.
+        let total = total.max(1);
+        let pip = h * 0.018;
+        let gap = pip * 2.0;
+        let run = total as f32 * pip + (total.saturating_sub(1)) as f32 * (gap - pip);
+        let mut x = (w - run) * 0.5;
+        for index in 0..total {
+            let lit = index < step;
+            rounded.draw(
+                gl,
+                &(projection
+                    * layout.of(Rect {
+                        x,
+                        y: h * 0.58,
+                        w: pip,
+                        h: pip,
+                    })),
+                if lit {
+                    [0.62, 0.76, 1.0, 0.95]
+                } else {
+                    [0.55, 0.62, 0.78, 0.22]
+                },
+                (pip, pip),
+                pip * 0.5,
+            );
+            x += gap;
+        }
+    }
+
     pub unsafe fn draw(
         &mut self,
         gl: &ffi::Gles2,

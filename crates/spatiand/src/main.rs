@@ -34,6 +34,7 @@ mod pose;
 mod prefs;
 mod scene;
 mod shutdown;
+mod startup;
 mod sidecar;
 mod state;
 mod status;
