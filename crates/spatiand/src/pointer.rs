@@ -69,6 +69,33 @@ pub const BORDER_FRACTION: f64 = 0.10;
 /// at the end of the bar, where overshooting lands on the bar rather than on the surface.
 const FURNITURE_FRACTION: f64 = 0.66;
 
+/// The smallest the title bar may be, in radians as the wearer sees it.
+///
+/// The bar and everything on it are sized as a share of the *content's* height, which is
+/// right for an ordinary window and falls apart for a short one. A client that turns itself
+/// into a transport bar -- same width, a fifth of the height -- got a bar of 0.7 degrees with
+/// a close button of half a degree in it, which is not a target, it is a dare.
+///
+/// So the share becomes a floor instead. 1.5 degrees is a little under what a default window
+/// already gets (2.2), so nothing ordinary changes and only windows that had shrunk past
+/// usefulness are affected. What grows is the chrome, not the content: the surface keeps
+/// exactly the size the client asked for.
+const MIN_BAR_RADIANS: f64 = 0.0262;
+
+/// The smallest the frame may be, in radians. Same argument as the bar.
+///
+/// The frame is the resize target, so a short window losing its bar to unclickability was
+/// losing its handles at the same time and for the same reason. 1.2 degrees, again under the
+/// 1.8 a default window has.
+const MIN_BORDER_RADIANS: f64 = 0.0209;
+
+/// How much taller than its content a window's chrome may ever be.
+///
+/// A guard rather than a design: at some point a buffer is short enough that a floored bar and
+/// two floored borders would dwarf it, and a window that is mostly frame is worse than one
+/// with a small bar. Nothing real reaches this -- a transport bar lands at about 0.66.
+const MAX_CHROME_OVERHEAD: f64 = 1.5;
+
 /// How far apart two pieces of furniture sit, as a multiple of their own width.
 ///
 /// A little over one, so they are neighbours with a gap rather than a single wide control.
@@ -167,14 +194,36 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn of(pixels: (u32, u32)) -> Self {
+    /// The frame for a window of this shape, in this place.
+    ///
+    /// The placement is needed for the angular floors and nothing else: the fractions are
+    /// still fractions, but a share of a short window's height can be too small to aim at, and
+    /// how small "too small" is depends on how far away the window is. Everything else here
+    /// stays proportional, which is what keeps one set of numbers serving both the drawing and
+    /// the hit test.
+    pub fn of(pixels: (u32, u32), placement: &crate::window::Placement) -> Self {
+        let content_width = pixels.0 as f64 / pixels.1.max(1) as f64;
+        let content_height = placement.width / content_width.max(0.01);
+        // One radian of arc at this window's distance, in content-height units -- which is
+        // what turns an angular floor into a fraction this struct can hold.
+        let per_radian = if content_height > 1e-6 {
+            placement.radius / content_height
+        } else {
+            0.0
+        };
+        // TITLE_BAR_FRACTION is a share of the bar-plus-content height, which is how the
+        // drawing has always expressed it; here everything is relative to the content
+        // alone, so it has to be rebased.
+        let bar = (TITLE_BAR_FRACTION / (1.0 - TITLE_BAR_FRACTION))
+            .max(MIN_BAR_RADIANS * per_radian)
+            .min(MAX_CHROME_OVERHEAD * 0.6);
+        let border = BORDER_FRACTION
+            .max(MIN_BORDER_RADIANS * per_radian)
+            .min(MAX_CHROME_OVERHEAD * 0.2);
         Self {
-            content_width: pixels.0 as f64 / pixels.1.max(1) as f64,
-            border: BORDER_FRACTION,
-            // TITLE_BAR_FRACTION is a share of the bar-plus-content height, which is how the
-            // drawing has always expressed it; here everything is relative to the content
-            // alone, so it has to be rebased.
-            bar: TITLE_BAR_FRACTION / (1.0 - TITLE_BAR_FRACTION),
+            content_width,
+            border,
+            bar,
         }
     }
 
@@ -516,7 +565,7 @@ pub fn aim(ray: Ray, windows: &[WindowQuad]) -> Aim {
         Some(_) => Some(Zone::Content),
         None => hit.and_then(|(index, h)| {
             let window = windows.get(index)?;
-            Some(Frame::of(window.pixels).zone(h.u, h.v, window.sound.is_some()))
+            Some(Frame::of(window.pixels, &window.placement).zone(h.u, h.v, window.sound.is_some()))
         }),
     };
     Aim {
@@ -567,7 +616,7 @@ pub fn popup_quad(
 /// Takes the geometry rather than the whole [`WindowQuad`] so it can be tested: a `WindowQuad`
 /// carries a live Wayland window, which cannot be conjured up without a compositor.
 pub fn quad_of(pixels: (u32, u32), placement: &crate::window::Placement) -> Quad {
-    let frame = Frame::of(pixels);
+    let frame = Frame::of(pixels, placement);
     let aspect = pixels.0 as f64 / pixels.1.max(1) as f64;
     let content_height = placement.width / aspect.max(0.01);
     Quad {
@@ -588,7 +637,7 @@ pub fn quad_of(pixels: (u32, u32), placement: &crate::window::Placement) -> Quad
 /// midpoint sits above the surface's. Missing this offsets every hit by half a title bar —
 /// about a degree — which is small enough to look like poor aim rather than a bug.
 fn centre_of(pixels: (u32, u32), placement: &crate::window::Placement) -> glam::DVec3 {
-    let frame = Frame::of(pixels);
+    let frame = Frame::of(pixels, placement);
     let aspect = pixels.0 as f64 / pixels.1.max(1) as f64;
     let content_height = placement.width / aspect.max(0.01);
     let up = placement.orientation() * glam::DVec3::Z;
@@ -599,8 +648,12 @@ fn centre_of(pixels: (u32, u32), placement: &crate::window::Placement) -> glam::
 ///
 /// Returns `None` for a hit on the title bar: that is Spatiand's chrome, and forwarding it as
 /// a pointer position would put the cursor above the top edge of the surface.
-pub fn surface_position(hit: &Hit, pixels: (u32, u32)) -> Option<Point<f64, Logical>> {
-    let frame = Frame::of(pixels);
+pub fn surface_position(
+    hit: &Hit,
+    pixels: (u32, u32),
+    placement: &crate::window::Placement,
+) -> Option<Point<f64, Logical>> {
+    let frame = Frame::of(pixels, placement);
     // Whether there is a speaker on the bar cannot change whether this is the client's
     // surface: both answers are chrome, and chrome is not forwarded.
     if frame.zone(hit.u, hit.v, false) != Zone::Content {
@@ -654,7 +707,7 @@ impl PointerState {
             Some((surface, _)) => Some((surface, Point::from((0.0, 0.0)))),
             None => aim.hit.and_then(|(index, hit)| {
                 let window = windows.get(index)?;
-                let _ = surface_position(&hit, window.pixels)?;
+                let _ = surface_position(&hit, window.pixels, &window.placement)?;
                 // Straight off the quad, rather than looked up by position -- see the note on
                 // WindowQuad::window for why an index cannot be trusted between frames.
                 Some((window.surface.clone(), Point::from((0.0, 0.0))))
@@ -664,7 +717,10 @@ impl PointerState {
             Some((_, position)) => Some(position),
             None => aim
                 .hit
-                .and_then(|(index, hit)| surface_position(&hit, windows.get(index)?.pixels)),
+                .and_then(|(index, hit)| {
+                    let window = windows.get(index)?;
+                    surface_position(&hit, window.pixels, &window.placement)
+                }),
         };
 
         // Leaving a window has to be reported, or it keeps its hover state for ever.
@@ -915,7 +971,7 @@ mod tests {
             v: 0.5,
             point: DVec3::ZERO,
         };
-        let local = surface_position(&hit, PIXELS).expect("middle of the content");
+        let local = surface_position(&hit, PIXELS, &placement(0.0)).expect("middle of the content");
         assert!(
             local.x > 1.0 && local.y > 1.0,
             "a centre hit must not be the origin: {local:?}"
@@ -924,7 +980,7 @@ mod tests {
 
     #[test]
     fn the_close_button_is_in_the_bar_at_the_right_and_the_icon_at_the_left() {
-        let f = Frame::of(PIXELS);
+        let f = Frame::of(PIXELS, &placement(0.0));
         let (icon, close) = (f.icon(), f.close());
         assert!(icon.u < 0.5 && close.u > 0.5, "{icon:?} {close:?}");
         // Both inside the quad rather than half off its edge.
@@ -940,7 +996,7 @@ mod tests {
     fn pressing_the_close_button_is_not_pressing_the_bar() {
         // The distinction the whole zone exists for. If this ever collapses, pressing close
         // starts dragging the window instead, which looks like the button being dead.
-        let f = Frame::of(PIXELS);
+        let f = Frame::of(PIXELS, &placement(0.0));
         let close = f.close();
         assert_eq!(f.zone(close.u, close.v, false), Zone::Close);
         // A little to the left of it is ordinary bar.
@@ -954,7 +1010,7 @@ mod tests {
     fn the_icon_is_not_a_button() {
         // It is there to say which application this is, and a target that does nothing is
         // worse than no target: it gets pressed, and the window does not move.
-        let f = Frame::of(PIXELS);
+        let f = Frame::of(PIXELS, &placement(0.0));
         let icon = f.icon();
         assert_eq!(f.zone(icon.u, icon.v, false), Zone::Title);
     }
@@ -964,7 +1020,7 @@ mod tests {
         // u and v are fractions of different lengths, so equal fractions are not a square. A
         // wide window would otherwise get a close button stretched into a letterbox.
         for pixels in [(1280u32, 800u32), (800, 1280), (2560, 720)] {
-            let f = Frame::of(pixels);
+            let f = Frame::of(pixels, &placement(0.0));
             let c = f.close();
             let (w, h) = (c.half_u * f.width(), c.half_v * f.height());
             assert!((w - h).abs() < 1e-9, "{pixels:?} gave {w} by {h}");
@@ -975,7 +1031,7 @@ mod tests {
     fn aiming_at_the_close_button_does_not_offer_to_move_the_window() {
         // `on_title` is what starts a drag, so it has to be false here even though the button
         // is geometrically part of the bar.
-        let f = Frame::of(PIXELS);
+        let f = Frame::of(PIXELS, &placement(0.0));
         let close = f.close();
         assert!(matches!(f.zone(close.u, close.v, false), Zone::Close));
         assert_ne!(f.zone(close.u, close.v, false), Zone::Title);
@@ -1000,7 +1056,7 @@ mod tests {
             point: DVec3::ZERO,
         };
         assert!(
-            surface_position(&hit, PIXELS).is_none(),
+            surface_position(&hit, PIXELS, &placement(0.0)).is_none(),
             "the bar is not the surface"
         );
     }
@@ -1019,13 +1075,65 @@ mod tests {
 
     /// A hit at a point in the *content*, 0..1, expressed as a hit on the whole quad.
     fn at_content(pixels: (u32, u32), x: f64, y: f64) -> Hit {
-        let f = Frame::of(pixels);
+        let f = Frame::of(pixels, &placement(0.0));
         Hit {
             distance: 2.0,
             u: (x * f.content_width + f.border) / f.width(),
             v: (y + f.border + f.bar) / f.height(),
             point: DVec3::ZERO,
         }
+    }
+
+    #[test]
+    fn an_ordinary_window_is_not_touched_by_the_angular_floors() {
+        // The floors exist for windows that have shrunk past usefulness. If they ever start
+        // biting on a default window, every window in the room silently grows thicker chrome
+        // -- so this is the guard that says the floors are floors and not the design.
+        let p = placement(0.0);
+        let f = Frame::of(PIXELS, &p);
+        assert_eq!(f.bar, TITLE_BAR_FRACTION / (1.0 - TITLE_BAR_FRACTION));
+        assert_eq!(f.border, BORDER_FRACTION);
+    }
+
+    #[test]
+    fn a_transport_bar_keeps_a_bar_you_can_aim_at() {
+        // 1280x264 is a media player's transport bar: same width as its window, a fifth of
+        // the height. Proportionally its bar came out at 0.7 degrees with a close button of
+        // half a degree inside it, which is not a target.
+        let p = placement(0.0);
+        let short = Frame::of((1280, 264), &p);
+        let content_height = p.width / (1280.0 / 264.0);
+        let degrees = |fraction: f64| (fraction * content_height / p.radius).to_degrees();
+        assert!(
+            degrees(short.bar) > 1.4,
+            "bar is only {:.2} deg",
+            degrees(short.bar)
+        );
+        assert!(
+            degrees(short.border) > 1.1,
+            "frame is only {:.2} deg",
+            degrees(short.border)
+        );
+        // The close button is the smallest thing anyone is asked to hit, and it is what the
+        // whole floor is for.
+        let close = short.close();
+        let button = degrees(close.half_v * 2.0 * short.height());
+        assert!(button > 0.9, "close button is only {button:.2} deg");
+    }
+
+    #[test]
+    fn flooring_the_chrome_does_not_move_the_content() {
+        // The client asked for a surface of a certain size and gets exactly that. What grows
+        // is the glass around it -- if this ever stops being true, a short window's video
+        // would be quietly rescaled to pay for its own title bar.
+        let p = placement(0.0);
+        let pixels = (1280, 264);
+        let quad = quad_of(pixels, &p);
+        let f = Frame::of(pixels, &p);
+        let content_height = p.width / (pixels.0 as f64 / pixels.1 as f64);
+        assert!((quad.height - content_height * f.height()).abs() < 1e-9);
+        // The content is still exactly one content-height of the quad.
+        assert!((content_height / quad.height - 1.0 / f.height()).abs() < 1e-9);
     }
 
     #[test]
@@ -1041,7 +1149,7 @@ mod tests {
 
     #[test]
     fn the_middle_of_a_window_is_its_content() {
-        assert_eq!(Frame::of(PIXELS).zone(0.5, 0.5, false), Zone::Content);
+        assert_eq!(Frame::of(PIXELS, &placement(0.0)).zone(0.5, 0.5, false), Zone::Content);
     }
 
     #[test]
@@ -1049,7 +1157,7 @@ mod tests {
         // Sign errors here are invisible: every zone is a valid zone, so getting left and
         // right the wrong way round produces a cursor that resizes the opposite edge and
         // reads as the window fighting back.
-        let f = Frame::of(PIXELS);
+        let f = Frame::of(PIXELS, &placement(0.0));
         let mid_content = f.border + f.bar + 0.5;
         let just_inside = |t: f64| t * 0.5;
         assert_eq!(
@@ -1085,7 +1193,7 @@ mod tests {
     fn the_bottom_corners_are_reachable_from_both_directions() {
         // An L-shaped region, as on a 2D desktop: a corner you can only hit by coming along
         // the side is a corner you find by accident.
-        let f = Frame::of(PIXELS);
+        let f = Frame::of(PIXELS, &placement(0.0));
         let below = 1.0 - (f.border * 0.5) / f.height();
         let beside = (f.border * 0.5) / f.width();
         assert_eq!(f.zone(beside, below, false), Zone::Resize(Edge::BottomLeft));
@@ -1116,7 +1224,7 @@ mod tests {
     fn a_corner_never_swallows_the_whole_bottom_edge() {
         // On a narrow window the two corner regions could meet in the middle, leaving no
         // bottom edge at all.
-        let f = Frame::of((400, 900));
+        let f = Frame::of((400, 900), &placement(0.0));
         assert_eq!(
             f.zone(0.5, 1.0 - f.border * 0.5 / f.height(), false),
             Zone::Resize(Edge::Bottom)
@@ -1130,10 +1238,10 @@ mod tests {
         // aimed -- which is what happened when the title bar was first added.
         // Both probes sit a hair inside their corner. The corners themselves are the zone
         // boundaries, and which side of one a float lands on is not a property worth asserting.
-        let top_left = surface_position(&at_content(PIXELS, 0.001, 0.001), PIXELS).expect("inside");
+        let top_left = surface_position(&at_content(PIXELS, 0.001, 0.001), PIXELS, &placement(0.0)).expect("inside");
         assert!(top_left.x < 3.0 && top_left.y < 3.0, "{top_left:?}");
         let bottom_right =
-            surface_position(&at_content(PIXELS, 0.999, 0.999), PIXELS).expect("inside");
+            surface_position(&at_content(PIXELS, 0.999, 0.999), PIXELS, &placement(0.0)).expect("inside");
         assert!(
             bottom_right.x > 1277.0 && bottom_right.y > 798.0,
             "{bottom_right:?}"
@@ -1142,14 +1250,14 @@ mod tests {
 
     #[test]
     fn the_frame_is_not_forwarded_to_the_client() {
-        let f = Frame::of(PIXELS);
+        let f = Frame::of(PIXELS, &placement(0.0));
         let on_border = Hit {
             distance: 2.0,
             u: f.border * 0.5 / f.width(),
             v: 0.5,
             point: DVec3::ZERO,
         };
-        assert!(surface_position(&on_border, PIXELS).is_none());
+        assert!(surface_position(&on_border, PIXELS, &placement(0.0)).is_none());
     }
 
     #[test]
@@ -1282,7 +1390,7 @@ mod tests {
         // head-anchored. A desktop-proportioned bar would be about one degree tall.
         let p = placement(0.0);
         let content_height = p.width / (PIXELS.0 as f64 / PIXELS.1 as f64);
-        let bar_height = content_height * Frame::of(PIXELS).bar;
+        let bar_height = content_height * Frame::of(PIXELS, &placement(0.0)).bar;
         let angular = 2.0 * (bar_height / 2.0 / p.radius).atan().to_degrees();
         assert!(angular > 2.0, "title bar is only {angular} deg tall");
     }

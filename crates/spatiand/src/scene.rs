@@ -1306,7 +1306,6 @@ impl Scene {
     /// # Safety
     /// Context must be current.
     pub unsafe fn draw_windows(&self, gl: &ffi::Gles2, eye: &Eye, windows: &[WindowQuad]) {
-        let bar_fraction = crate::pointer::TITLE_BAR_FRACTION as f32;
         let mut order: Vec<&WindowQuad> = windows.iter().collect();
         // Furthest first. Everything here is a flat quad at a known distance, so a plain sort
         // is exact and costs nothing -- see the note at the top about there being no depth
@@ -1343,11 +1342,17 @@ impl Scene {
             // Frame and title bar are ONE pane of glass behind everything, not a border with
             // a bar resting on it. Two rectangles with different fills read as two objects
             // stuck together; a single rounded sheet reads as the window's chrome.
-            // Thick enough to grab. This is the resize target, and it has to be the same
-            // number the hit test uses or the wearer aims at a frame that is not where the
-            // pointer thinks it is -- which reads as a tracking fault, not a layout one.
-            let border = height * crate::pointer::BORDER_FRACTION as f32;
-            let bar_height = height * bar_fraction / (1.0 - bar_fraction);
+            //
+            // Both thicknesses come out of `Frame`, which is also what the ray is tested
+            // against. They used to be recomputed here from the same two constants, which was
+            // the same answer right up until the constants stopped being the whole story:
+            // `Frame` now floors them at an angular size so a short window's bar stays
+            // aimable, and a drawing that had its own copy of the arithmetic would have gone
+            // on shrinking while the hit test grew -- the exact drift this struct exists to
+            // make impossible.
+            let frame = crate::pointer::Frame::of(window.pixels, &window.placement);
+            let border = height * frame.border as f32;
+            let bar_height = height * frame.bar as f32;
             let chrome_height = height + bar_height + border * 2.0;
             // The sheet covers the content and the bar, so its centre sits above the content's.
             let chrome_centre = centre + (orientation * Vec3::Z) * (bar_height * 0.5);
@@ -1388,7 +1393,6 @@ impl Scene {
             // other. Both are placed from `Frame`, in the quad's own coordinates, which is the
             // same arithmetic the ray is tested against — so what is drawn and what can be
             // pressed cannot drift apart.
-            let frame = crate::pointer::Frame::of(window.pixels);
             let content_height = height;
             let quad = (
                 content_height * frame.width() as f32,

@@ -36,8 +36,20 @@
 #include "xdg-shell-client-protocol.h"
 #include "spatiand-xr-v1-client-protocol.h"
 
-#define W 640
-#define H 400
+// Buffer size. `SPATIAND_PROBE_SIZE=1280x264` makes it the shape a media player's transport
+// bar takes -- same width as its window, a fifth of the height -- which is the case where a
+// window's chrome stops being big enough to aim at. Anything that depends on a short wide
+// surface is checked with that.
+static int W = 640, H = 400;
+
+static void read_size(void) {
+    const char *spec = getenv("SPATIAND_PROBE_SIZE");
+    int w, h;
+    if (spec && sscanf(spec, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+        W = w;
+        H = h;
+    }
+}
 
 static struct wl_compositor *compositor;
 static struct wl_shm *shm;
@@ -154,6 +166,7 @@ static void global_remove(void *d, struct wl_registry *r, uint32_t name) {}
 static const struct wl_registry_listener registry_listener = { global, global_remove };
 
 int main(void) {
+    read_size();
     struct wl_display *display = wl_display_connect(NULL);
     if (!display) { fprintf(stderr, "probe: no display\n"); return 1; }
     struct wl_registry *registry = wl_display_get_registry(display);
