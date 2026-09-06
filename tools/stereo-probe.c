@@ -21,6 +21,11 @@
 // layer instead of being an ordinary window. With an equirect layer the two halves become the
 // sky rather than a panel, so the whole view goes red or blue depending on the eye -- which is
 // a crude picture and an unambiguous test.
+//
+// SPATIAND_IDLE_FADE=1 asks the compositor to fade this surface out when the wearer stops
+// paying attention to it, which is what a transport bar over a film wants. Paired with the
+// harness's SPATIAND_IDLE_SECONDS it is the whole of that feature, end to end: the client says
+// one word and the compositor does the rest.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,6 +105,18 @@ static void surface_configure(void *d, struct xdg_surface *s, uint32_t serial) {
             top_bottom ? SPATIAND_XR_SURFACE_V1_EYE_LAYOUT_TOP_BOTTOM
                        : SPATIAND_XR_SURFACE_V1_EYE_LAYOUT_SIDE_BY_SIDE);
         if (swap) spatiand_xr_surface_v1_set_eye_swapped(x, 1);
+        // Version 2. A compositor that only offers version 1 has the request but not this
+        // one, and calling it there is a protocol error -- so it is guarded by what the
+        // registry actually bound rather than by what the headers happen to declare.
+        if (getenv("SPATIAND_IDLE_FADE")) {
+            if (wl_proxy_get_version((struct wl_proxy *) x) >=
+                SPATIAND_XR_SURFACE_V1_SET_IDLE_FADE_SINCE_VERSION) {
+                spatiand_xr_surface_v1_set_idle_fade(x, 1);
+                fprintf(stderr, "probe: asked the compositor to fade me when unattended\n");
+            } else {
+                fprintf(stderr, "probe: this compositor is too old for set_idle_fade\n");
+            }
+        }
         fprintf(stderr, "probe: declared %s%s\n",
                 top_bottom ? "top-bottom" : "side-by-side", swap ? ", swapped" : "");
     } else {
@@ -121,7 +138,13 @@ static const struct xdg_wm_base_listener wm_base_listener = { .ping = ping };
 static void global(void *d, struct wl_registry *r, uint32_t name, const char *iface, uint32_t ver) {
     if (!strcmp(iface, "wl_compositor")) compositor = wl_registry_bind(r, name, &wl_compositor_interface, 4);
     else if (!strcmp(iface, "wl_shm")) shm = wl_registry_bind(r, name, &wl_shm_interface, 1);
-    else if (!strcmp(iface, "spatiand_xr_v1")) xr = wl_registry_bind(r, name, &spatiand_xr_v1_interface, 1);
+    else if (!strcmp(iface, "spatiand_xr_v1")) {
+        // Bind the newest version this client was built against that the compositor also has.
+        // Binding a fixed 1 would silently give up set_idle_fade on a compositor that offers
+        // it, which is the ordinary Wayland way to lose a feature without noticing.
+        uint32_t want = spatiand_xr_v1_interface.version;
+        xr = wl_registry_bind(r, name, &spatiand_xr_v1_interface, ver < want ? ver : want);
+    }
     else if (!strcmp(iface, "xdg_wm_base")) {
         wm_base = wl_registry_bind(r, name, &xdg_wm_base_interface, 1);
         xdg_wm_base_add_listener(wm_base, &wm_base_listener, NULL);

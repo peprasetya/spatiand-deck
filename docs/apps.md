@@ -21,11 +21,13 @@ document:
 |---|---|
 | Window sizing, fullscreen, no-fullscreen semantics | **Works** |
 | Launching, audio routing, per-window sinks, mono→7.1.4 | **Works** |
-| GPU buffers (`zwp_linux_dmabuf_v1`) | **Works** |
+| GPU buffers (`zwp_linux_dmabuf_v1` v4+, with the device named) | **Works** |
+| Frame timing (`wp_presentation`) | **Works** |
 | Menus, popups, X11 compatibility | **Works** |
 | Environment from image files | **Interim** |
 | `spatiand_xr_v1` — stereo layouts, head-locked, equirect | **Works** |
 | `spatiand_xr_v1` — the shared-memory pose channel | **Works** |
+| `spatiand_xr_v1` — `set_idle_fade` | **Works** |
 | `spatiand_xr_v1` — the `projection` layer | Refused, not built |
 | OpenXR | Not a runtime — see [openxr.md](openxr.md) |
 
@@ -98,9 +100,10 @@ round. See [x11.md](x11.md) for why you should want the Wayland path.
 
 **Works.**
 
-`zwp_linux_dmabuf_v1` is offered, version 3, in whatever formats the renderer
-can import — 321 format/modifier pairs on the Deck's Van Gogh. Use it. It is the
-single largest thing you can do for a player's frame budget here.
+`zwp_linux_dmabuf_v1` is offered at version 5, with default feedback naming the
+render node, in whatever formats the renderer can import — 321 format/modifier
+pairs on the Deck's Van Gogh. Use it. It is the single largest thing you can do
+for a player's frame budget here.
 
 The alternative is `wl_shm`, which means every decoded frame is copied by the
 CPU into shared memory and then uploaded to a texture by us: about four
@@ -117,11 +120,36 @@ Nothing special is needed on your side beyond using it: EGL with
 
 Three things worth knowing:
 
-  * **Version 3, not 4.** Version 4's per-surface feedback exists to tell a
-    client which formats would let its buffer go straight to the display
-    controller without compositing. Nothing here can ever do that — every window
-    is a texture on a quad sampled by a shader — so there is no feedback to give
-    that would not be a lie. Your buffer is always composited.
+  * **This is also how your EGL finds the GPU, and it used to be broken.** Mesa
+    learns which render node to open from exactly two places: the `wl_drm`
+    global, or dmabuf feedback at version 4 or later, whose `main_device` names
+    the device. Spatiand has never offered `wl_drm` — it is a Mesa-specific
+    relic — and until 2026-09-06 it offered a version 3 dmabuf global, so it
+    offered neither. Mesa's response to that is not an error. It prints
+
+    ```
+    libEGL warning: failed to get driver name for fd -1
+    libEGL warning: MESA-LOADER: failed to retrieve device information
+    ```
+
+    to your stderr and hands you a perfectly working **llvmpipe** context, whose
+    every capability query answers the way a real GPU would. Measured cost, on
+    the first player written against this compositor: a 3840×1920 immersive film
+    at **550% of a core** instead of 20%. If you are on a build from before that
+    date, check `GL_RENDERER` after making your context — and on a current build
+    you should not have to. If you built a readback path to work around it, that
+    path is now dead weight: the zero-copy one is the one taken.
+
+    Verified both ways rather than asserted: under the snapshot harness
+    `eglinfo` run as a client reports `radeonsi` on a current build, and
+    `llvmpipe` preceded by exactly those two warnings on a build with the device
+    withheld.
+
+  * **Feedback, but no scanout tranches.** The per-surface feedback that comes
+    with version 4 also exists to say which formats could go straight to the
+    display controller without compositing. Nothing here can ever do that: every
+    window is a texture on a quad sampled by a shader. So you get one tranche,
+    the main one, and your buffer is always composited.
   * **The import is tested before it is accepted.** If we cannot import a
     format you will be told `failed` rather than silently shown nothing, so a
     fallback path in your player will actually be reached. The answer comes one
@@ -132,6 +160,42 @@ Three things worth knowing:
     against our sampling. This has not been stress-tested against a decoder
     running flat out; if you see tearing inside a window, say so, because that
     is the shape it would take.
+
+### If you decode through libmpv
+
+Hand it your Wayland connection. `mpv_render_context_create` takes
+`MPV_RENDER_PARAM_WL_DISPLAY`, and without it mpv cannot construct a VA display
+— it can only make one from a connection somebody gives it. What you get instead
+is `vaapi-copy`, which says so quietly:
+
+```
+[libmpv_render/vaapi] Trying to open a wayland VA display...
+[libmpv_render/vaapi] Could not create a VA display.
+```
+
+It is not an error and the picture is correct. It is eleven megabytes off the
+GPU and eleven back, per frame, on a 3840×1920 film — twenty-four times a second
+on a machine with eight compute units. This is not Spatiand-specific and it is
+not something the compositor can fix from this side, but every player written
+for this compositor will hit it, so it is written down here where all of them
+can read it once.
+
+### Frame timing
+
+`wp_presentation` (version 2) is offered, on `CLOCK_MONOTONIC` — the same clock
+a frame callback's timestamp already comes from. Use it if you need to tell a
+frame that arrived *late* from one that was *dropped*: those want opposite
+corrections, and the refresh rate alone cannot distinguish them. The sequence
+number increments once per completed flip, so two reports one apart were
+consecutive vblanks and a gap was not.
+
+Two honest caveats. The timestamp is taken when the vblank event is serviced by
+the event loop rather than read out of the DRM event itself, so it is
+approximately one event-loop hop late — well under a millisecond, and the
+sequence number, which is the part that separates late from dropped, is exact.
+And feedback is only reported by the DRM session; the nested and headless
+backends advertise the global and answer nothing, because neither has a vblank
+to be honest about.
 
 ## 4. Being stereoscopic, head-locked, or the room itself
 
@@ -144,6 +208,13 @@ Bind the global, get an object for your surface, and set two things. Both are
 double-buffered against `wl_surface.commit`, like everything else about a
 surface, so layout and buffer land on the same frame and never one without the
 other.
+
+**The global is at version 2**, and `set_idle_fade` is the request that needs
+it. Bind `MIN(interface version you built against, version the registry
+advertises)` rather than a hard-coded number — a client that binds 1 on a
+version 2 compositor loses the request silently, which is the ordinary Wayland
+way to lose a feature without noticing. Everything else here is version 1 and
+works either way.
 
 ### Eye layout
 
@@ -193,6 +264,40 @@ back on the next frame.
 **A layer is either honoured or refused out loud.** A layer accepted and then
 drawn as something else would be worse than one declined, because you would lay
 yourself out for something you are not getting. There is a test asserting that.
+
+There is no `granted` event, so **silence is the yes**: send `set_layer`, then
+`wl_display.sync`, and if no `layer_refused` arrived before the sync callback,
+the layer is yours. Nothing else is coming; do not wait for it. (This was left
+implicit in the first version of the protocol and is now written into the XML,
+because "no news is good news" is a fine rule and a terrible thing to have to
+guess.)
+
+### Getting out of the way
+
+`set_idle_fade(1)` hands the compositor your surface's visibility. After a few
+seconds in which the wearer has not moved the pointer, pressed anything, typed,
+or turned their head, the surface — and its frame, title bar and buttons — fades
+out; any of those things brings it straight back, faster than it left.
+
+This is here because you cannot do it yourself, even in principle. Pointer
+motion is delivered only to the surface under the ray, so a transport bar that
+has faded out never learns the wearer is reaching for it: it is not under the
+ray until they arrive, and by then it should already be visible. The compositor
+sees every pointer sample and every head movement whatever they are aimed at, so
+the timer belongs on this side and the request is one bit saying "you hold it".
+
+While faded the surface is **still the input target**, at every alpha including
+zero — but the same motion that would reach for it has already brought it back,
+so in practice the wearer sees it before they press it. Nothing about your
+buffers, frame callbacks or size changes; you never need to know whether you are
+currently faded, and there is no event telling you.
+
+One clock for the whole session, so every surface that asked fades in step. A
+toolbar still lit beside a faded transport bar would read as a fault rather than
+a design.
+
+If you were shrinking a bar to a line to approximate this — delete that. It is
+what this replaces.
 
 ## 5. Where the head is
 
@@ -303,6 +408,10 @@ solved.
     appears in the window count and the switcher and draws nothing. If your
     application launches and you see no window, that is the first thing to
     check — the log says which of the three reasons it is.
+  * **A surface holding an equirect layer is not counted as a window** — it has
+    no panel, cannot be pointed at and cannot be switched to. So a player that
+    is the room, with two surfaces, reads as one window and not two. (Until
+    2026-09-06 it read as two, which is the same fault from the other side.)
   * **There is no cursor confined to your window.** The pointer is a ray cast
     from the wearer's eye through a trackpad position; it can be pointing at
     another window, at the keyboard, or at nothing. Pointer grabs are not
@@ -318,9 +427,49 @@ solved.
     unplugged, calibration never run). Nothing about your application should
     depend on the wearer being able to turn their head to find something.
 
-## 8. Asking for changes
+## 8. Should the compositor play the film instead?
 
-The two protocols above are drafts, and the person most likely to find out that
-they are wrong is whoever writes the first player against them. That is the
-intended order: build the player, say what the protocol should have been, and
-the protocol follows the player rather than the other way round.
+**No — and the question is a good one, so here is the reasoning rather than
+just the answer.**
+
+The case for it is real. The environment is already the compositor's, the head
+pose is already the compositor's, and what a player adds is a decoder and an
+authorised byte range. Handing over a URL and letting Spatiand decode into its
+own sky texture would delete the client's entire second presentation path.
+
+It is still the wrong split, for three reasons that do not go away:
+
+  * **It would make the compositor hold your credentials.** A media session
+    cookie, refreshed, scoped to an account, passed over a Wayland protocol into
+    a process that is also driving the display and reading a headset. Every
+    later question — what happens when it expires mid-film, who sees it in a
+    log, what a second application could ask for — is a question that does not
+    exist while the bytes stay in the client.
+  * **Transport would have to be invented twice.** Play, pause, seek, and a
+    position reported back often enough that "resume where you left off" works,
+    all as protocol, all as round trips, in a compositor whose job is to be
+    finished with a frame in 13.9 ms. MPRIS already does this over D-Bus and is
+    not blocked on a frame deadline.
+  * **A crash stops being survivable.** Today a client that dies takes its sky
+    with it and the wearer's own environment comes back next frame. A decoder
+    inside the compositor that wedges takes the session.
+
+What was actually missing was smaller than the proposal and is now in: your
+buffers reach the GPU without a copy (§3), your surface can be the room without
+being a window (§4), and the compositor holds the idle timer you could not hold
+(§4). If something in that set still forces a copy or a second code path, that
+is worth another round — but the division of labour stays where it is.
+
+## 9. Asking for changes
+
+The protocol above is a draft, and the person most likely to find out that it is
+wrong is whoever writes the first player against it. That is the intended order:
+build the player, say what the protocol should have been, and the protocol
+follows the player rather than the other way round.
+
+That has happened once already and it worked. Items 1, 2, 3, 5, 7 and 8 of the
+first player's report are the previous section, `set_idle_fade`, the window
+count, `wp_presentation`, the "silence is the yes" sentence in the XML, and a
+fix to `tools/setup-buildbox.sh`. The `set_idle_fade` design in particular is
+better than what was asked for, because the person asking could see what was
+wrong and only this side could see why.

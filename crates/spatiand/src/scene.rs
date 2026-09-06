@@ -137,6 +137,13 @@ pub struct WindowQuad {
     /// What the client said this surface is: mono or stereo, and how packed. Default for a
     /// client that never asked, which is a mono window. See `spatiand_xr_v1`.
     pub xr: crate::xr::XrState,
+    /// How visible this window is, 0..1. Always 1 unless the client asked the compositor to
+    /// fade it when the wearer is not attending to it — see [`crate::attention`].
+    ///
+    /// Applied to the chrome and its furniture as well as to the surface, because the point of
+    /// the request is that the window gets out of the way, and a frame with a title bar around
+    /// an invisible surface is a black-bordered hole in the middle of a film.
+    pub fade: f32,
 }
 
 /// What a window is playing, as far as its title bar is concerned.
@@ -1307,6 +1314,20 @@ impl Scene {
         order.sort_by(|a, b| b.placement.radius.total_cmp(&a.placement.radius));
 
         for window in order {
+            // Faded all the way out. Skipped rather than drawn at zero: a transport bar that
+            // has got out of the way should cost nothing, and there is no blend of alpha zero
+            // that is cheaper than not drawing. It is still hit-tested, which is what makes it
+            // come back -- see `crate::attention`.
+            if window.fade <= 0.004 {
+                continue;
+            }
+            // Everything this window draws is scaled by how visible it currently is, chrome
+            // and furniture included. Fading only the surface would leave a lit frame with a
+            // hole in it, which is worse than not fading at all.
+            let dim = |mut tint: [f32; 4]| {
+                tint[3] *= window.fade;
+                tint
+            };
             let aspect = window.pixels.0 as f32 / window.pixels.1.max(1) as f32;
             let width = window.placement.width as f32;
             let height = width / aspect.max(0.01);
@@ -1345,7 +1366,7 @@ impl Scene {
                 gl,
                 self.glass,
                 &(eye.view_projection() * chrome),
-                chrome_tint,
+                dim(chrome_tint),
                 (0.0, 1.0),
             );
 
@@ -1358,7 +1379,7 @@ impl Scene {
                     gl,
                     title.id,
                     &(eye.view_projection() * label),
-                    [1.0, 1.0, 1.0, if window.focused { 1.0 } else { 0.7 }],
+                    dim([1.0, 1.0, 1.0, if window.focused { 1.0 } else { 0.7 }]),
                     (0.0, 1.0),
                 );
             }
@@ -1401,7 +1422,7 @@ impl Scene {
                     gl,
                     icon.id,
                     &(eye.view_projection() * furniture(box2)),
-                    [1.0, 1.0, 1.0, if window.focused { 1.0 } else { 0.72 }],
+                    dim([1.0, 1.0, 1.0, if window.focused { 1.0 } else { 0.72 }]),
                     (0.0, 1.0),
                 );
             }
@@ -1428,7 +1449,7 @@ impl Scene {
             self.rounded.draw(
                 gl,
                 &(eye.view_projection() * furniture(close)),
-                disc,
+                dim(disc),
                 (disc_px, disc_px),
                 disc_px * 0.5,
             );
@@ -1439,11 +1460,11 @@ impl Scene {
                 gl,
                 self.close_glyph,
                 &(eye.view_projection() * furniture(cross)),
-                if hot {
+                dim(if hot {
                     [1.0, 1.0, 1.0, 1.0]
                 } else {
                     [0.92, 0.95, 1.0, if window.focused { 0.90 } else { 0.55 }]
-                },
+                }),
                 (0.0, 1.0),
             );
 
@@ -1468,7 +1489,7 @@ impl Scene {
                 self.rounded.draw(
                     gl,
                     &(eye.view_projection() * furniture(mute)),
-                    disc,
+                    dim(disc),
                     (disc_px, disc_px),
                     disc_px * 0.5,
                 );
@@ -1483,11 +1504,11 @@ impl Scene {
                         self.speaker_glyph
                     },
                     &(eye.view_projection() * furniture(glyph)),
-                    if hot || sound.muted {
+                    dim(if hot || sound.muted {
                         [1.0, 1.0, 1.0, 1.0]
                     } else {
                         [0.92, 0.95, 1.0, if window.focused { 0.90 } else { 0.55 }]
-                    },
+                    }),
                     (0.0, 1.0),
                 );
             }
@@ -1526,11 +1547,14 @@ impl Scene {
             // And each eye samples its own part of the buffer. For a mono surface -- which is
             // every surface that has not said otherwise -- that is the whole of it, and this
             // is the same draw it always was.
+            // The tint's alpha *replaces* the texture's here rather than scaling it -- see
+            // `u_opaque` -- so a fade of 1.0 is the opaque draw this has always been, and
+            // anything less is a straight crossfade to whatever is behind the window.
             self.quads.draw_opaque_rect(
                 gl,
                 window.texture,
                 &mvp,
-                [1.0, 1.0, 1.0, 1.0],
+                [1.0, 1.0, 1.0, window.fade],
                 window.xr.eye_rect(matches!(eye.side, EyeSide::Left)),
             );
 
@@ -1588,7 +1612,7 @@ impl Scene {
                     gl,
                     popup.texture,
                     &(eye.view_projection() * model),
-                    [1.0, 1.0, 1.0, 1.0],
+                    [1.0, 1.0, 1.0, window.fade],
                     (0.0, 1.0),
                 );
             }
@@ -2719,6 +2743,7 @@ pub fn collect_windows(
                 state.title_of(&window).unwrap_or_else(|| "untitled".into())
             );
         }
+        let xr = crate::xr::state_of(&surface);
         out.push(WindowQuad {
             window: window.clone(),
             surface: surface.clone(),
@@ -2735,7 +2760,12 @@ pub fn collect_windows(
             sound: None,
             mute_hot: false,
             popups,
-            xr: crate::xr::state_of(&surface),
+            xr,
+            fade: if xr.idle_fade {
+                state.attention.alpha()
+            } else {
+                1.0
+            },
         });
     }
     out

@@ -785,6 +785,15 @@ pub fn run(
         let mut frames = 0u32;
         let mut skipped = 0u32;
         let mut last_report = std::time::Instant::now();
+        // Presentation feedback for the frame currently on its way to the glass, answered
+        // when its flip completes. See `Spatiand::take_presentation_feedback`.
+        let mut in_flight: Vec<smithay::wayland::presentation::PresentationFeedbackCallback> =
+            Vec::new();
+        // Which vblank this is, which is what lets a client tell a late frame from a dropped
+        // one: two frames reported one sequence apart were consecutive, and a gap was not.
+        let mut presented_seq: u64 = 0;
+        // For the idle-fade clock, which needs a frame delta rather than a frame count.
+        let mut last_tick = std::time::Instant::now();
 
         // What the output was built for. If reality diverges, rebuild.
         //
@@ -1275,8 +1284,14 @@ pub fn run(
                     .elements()
                     .filter(|w| {
                         use smithay::wayland::seat::WaylandFocus;
+                        // `head_locked` specifically, not "anything that is not a window".
+                        // The sky is also not a window, and steering its placement to face
+                        // the wearer means moving something that is not drawn as a panel at
+                        // all -- harmless today only because nothing reads that placement.
                         w.wl_surface()
-                            .map(|s| !crate::xr::state_of(&s).is_window())
+                            .map(|s| {
+                                crate::xr::state_of(&s).layer == crate::xr::Layer::HeadLocked
+                            })
                             .unwrap_or(false)
                     })
                     .cloned()
@@ -1296,6 +1311,18 @@ pub fn run(
                 spatiand_track::DEFAULT_PREDICTION_SECONDS,
                 spatiand_track::DEFAULT_PREDICTION_MAX_DEGREES,
             );
+
+            // --- is anyone paying attention ---
+            //
+            // Advanced from the *measured* orientation rather than the predicted one: the
+            // prediction deliberately overshoots, which would read as a head that never quite
+            // settles and would keep a faded bar awake for ever. See `crate::attention`.
+            {
+                let dt = last_tick.elapsed();
+                last_tick = std::time::Instant::now();
+                let head = hmd.as_ref().map(|_| tracker.orientation());
+                runtime.state.attention.tick(head, dt);
+            }
 
             // --- poses, for clients that draw their own eye views ---
             //
@@ -1407,7 +1434,7 @@ pub fn run(
             // Once a second is plenty: the clock changes once a minute and the battery
             // slower still, while rebuilding rasterises and uploads a texture.
             if last_status_update.elapsed() >= Duration::from_secs(1) || status_text.is_empty() {
-                status_text = crate::status::line(runtime.state.space.elements().count());
+                status_text = crate::status::line(runtime.state.window_count());
                 last_status_update = std::time::Instant::now();
             }
             scene.sync_status(&mut renderer, &mut text, &status_text, ppd)?;
@@ -2518,6 +2545,31 @@ pub fn run(
                     log::error!("frame_submitted failed: {e}");
                 }
                 pending_flip = false;
+                // The frame that was in flight is now on the glass, so answer everyone who
+                // asked when it got there.
+                //
+                // The time is taken here rather than read out of the DRM event, because
+                // smithay's `DrmEvent::VBlank` carries only the CRTC. That makes this the
+                // moment the event was *serviced* rather than the moment the scanout began,
+                // which is an event-loop hop late -- under a millisecond, and honest about
+                // being an approximation. The sequence number, which is the part that
+                // distinguishes late from dropped, is exact.
+                if !in_flight.is_empty() {
+                    let now = crate::pose::now_ns().max(0) as u64;
+                    let refresh = std::time::Duration::from_nanos(frame_ns.max(1) as u64);
+                    let screen = runtime.state.screen.clone();
+                    for feedback in in_flight.drain(..) {
+                        feedback.presented(
+                            &screen,
+                            std::time::Duration::from_nanos(now),
+                            smithay::wayland::presentation::Refresh::fixed(refresh),
+                            presented_seq,
+                            smithay::reexports::wayland_protocols::wp::presentation_time::server
+                                ::wp_presentation_feedback::Kind::Vsync,
+                        );
+                    }
+                }
+                presented_seq += 1;
             }
             // The sidecar flips on its own schedule -- a different CRTC at a different refresh
             // -- so its completion is acknowledged independently of the glasses'.
@@ -2560,6 +2612,17 @@ pub fn run(
             )?;
             compositor.queue_frame(())?;
             pending_flip = true;
+            // Taken after the frame is queued and before the next one is built, so these are
+            // exactly the callbacks belonging to the frame that was just handed to the
+            // display. Anything a client commits from here on belongs to the next one.
+            //
+            // Anything still in the list has been superseded rather than shown -- which
+            // happens when a flip is skipped -- and is discarded rather than reported, because
+            // "presented" is a claim about pixels the wearer saw.
+            for stale in in_flight.drain(..) {
+                stale.discarded();
+            }
+            in_flight = runtime.state.take_presentation_feedback();
             frames += 1;
             if last_report.elapsed() >= Duration::from_secs(2) {
                 let secs = last_report.elapsed().as_secs_f32();
@@ -3078,6 +3141,9 @@ fn send_stroke(state: &mut Spatiand, stroke: spatiand_shell::keyboard::Stroke, t
 /// `spatiand_shell::keyboard` stores the evdev numbers so it can be read against the kernel
 /// header, and the offset is applied here, once.
 fn send_key_state(state: &mut Spatiand, evdev_code: u32, pressed: bool, time_ms: u32) {
+    // Typing is attention, even with the head perfectly still and the pointer nowhere near
+    // what is being typed into. See `crate::attention`.
+    state.attention.stir();
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };

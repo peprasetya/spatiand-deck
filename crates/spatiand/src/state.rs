@@ -32,8 +32,9 @@ use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_to
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
-    delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
+    delegate_presentation, delegate_seat, delegate_shm, delegate_xdg_decoration,
+    delegate_xdg_shell,
 };
 
 use crate::window::WindowLayout;
@@ -75,6 +76,10 @@ pub struct Spatiand {
     /// Advertised only so it can be answered with "server side" — see [`XdgDecorationHandler`].
     pub xdg_decoration_state: XdgDecorationState,
     pub shm_state: ShmState,
+    /// When a frame actually reached the glass — see [`crate::state::Spatiand::presented`].
+    ///
+    /// Held only so the global outlives the compositor; nothing is read out of it.
+    pub _presentation_state: smithay::wayland::presentation::PresentationState,
     /// Handing us a picture rather than a copy of one — see [`crate::dmabuf`].
     pub dmabuf_state: DmabufState,
     /// `None` until a backend has a renderer whose import formats can be advertised.
@@ -159,6 +164,11 @@ pub struct Spatiand {
     /// Answered from the frame loop, because only the backend knows whether there is a head
     /// being tracked — the same reason dmabuf imports are answered there.
     pub pose_channels_to_open: bool,
+    /// Whether the wearer is busy, and the alpha that follows from it.
+    ///
+    /// Advanced once a frame by the backend, which is the only place with a head pose and a
+    /// frame time. Read by the scene when it builds a surface that asked for `set_idle_fade`.
+    pub attention: crate::attention::Attention,
     /// Yaw the wearer is currently facing, radians, refreshed once a frame by the backend.
     ///
     /// Lives here because `new_toplevel` needs it and has no access to the tracker: a window
@@ -179,6 +189,20 @@ impl Spatiand {
         let shm_state = ShmState::new::<Self>(&dh, Vec::new());
         // The global itself waits for a renderer; see `crate::dmabuf::advertise`.
         let dmabuf_state = DmabufState::new();
+        // `wp_presentation`: when a frame was actually shown, and on which vblank.
+        //
+        // A player asked for this and the reason is worth recording, because "we already tell
+        // you the refresh rate" sounds like an answer and is not. The refresh rate says how
+        // often frames *can* appear. It cannot distinguish a frame that arrived late from one
+        // that was dropped entirely, and those want opposite corrections: a late frame means
+        // present sooner, a dropped frame means the pipeline is over budget and something has
+        // to give. The sequence number here is what tells them apart.
+        //
+        // CLOCK_MONOTONIC, which is the clock a frame callback's time already comes from.
+        let presentation_state = smithay::wayland::presentation::PresentationState::new::<Self>(
+            &dh,
+            libc::CLOCK_MONOTONIC as u32,
+        );
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -193,7 +217,7 @@ impl Spatiand {
         // Stereo, head-locked and immersive surfaces. Binding it says nothing and changes
         // nothing: an application that ignores it is an ordinary window, which is the whole
         // design. See `crate::xr` and the protocol XML.
-        dh.create_global::<Self, spatiand_proto::server::spatiand_xr_v1::SpatiandXrV1, _>(1, ());
+        dh.create_global::<Self, spatiand_proto::server::spatiand_xr_v1::SpatiandXrV1, _>(2, ());
 
         // The screen clients see. Refresh is a placeholder until a backend reports the real
         // one; the size is the size every toplevel is offered.
@@ -234,6 +258,7 @@ impl Spatiand {
             xdg_shell_state,
             xdg_decoration_state,
             shm_state,
+            _presentation_state: presentation_state,
             dmabuf_state,
             dmabuf_global: None,
             pending_dmabufs: Vec::new(),
@@ -256,6 +281,7 @@ impl Spatiand {
             sky_owner: None,
             pose_clients: Vec::new(),
             pose_channels_to_open: false,
+            attention: crate::attention::Attention::default(),
             screen,
             spawn_yaw: 0.0,
         }
@@ -407,6 +433,38 @@ impl Spatiand {
         }
     }
 
+    /// Collect every `wp_presentation` feedback a client has committed and is waiting on.
+    ///
+    /// Taken when the frame is queued and answered when the flip completes, because those are
+    /// two different moments and the whole value of the protocol is in the gap between them.
+    /// Answering at queue time would report the compositor's intention rather than the
+    /// display's behaviour, which is the thing the client already knows.
+    pub fn take_presentation_feedback(
+        &self,
+    ) -> Vec<smithay::wayland::presentation::PresentationFeedbackCallback> {
+        use smithay::desktop::utils::with_surfaces_surface_tree;
+        use smithay::wayland::seat::WaylandFocus;
+        let mut out = Vec::new();
+        let mut take = |surface: &WlSurface| {
+            with_surfaces_surface_tree(surface, |_surface, states| {
+                let mut cached = states
+                    .cached_state
+                    .get::<smithay::wayland::presentation::PresentationFeedbackCachedState>();
+                out.append(&mut cached.current().callbacks);
+            });
+        };
+        for window in self.space.elements() {
+            let Some(surface) = window.wl_surface() else {
+                continue;
+            };
+            take(&surface);
+            for (popup, _) in smithay::desktop::PopupManager::popups_for_surface(&surface) {
+                take(popup.wl_surface());
+            }
+        }
+        out
+    }
+
     /// Every open window, for the switcher.
     ///
     /// Titles rather than handles: the shell has no window type and is not being given one.
@@ -415,6 +473,7 @@ impl Spatiand {
     pub fn open_windows(&self) -> Vec<spatiand_shell::WindowEntry> {
         self.space
             .elements()
+            .filter(|w| !Self::is_environment(w))
             .filter_map(|window| {
                 let id = self.layout.id_of(window)?;
                 let title = self.display_title(window);
@@ -425,6 +484,30 @@ impl Spatiand {
                 })
             })
             .collect()
+    }
+
+    /// Whether this window has become the room rather than a thing in it.
+    ///
+    /// See [`crate::xr::XrState::is_environment`]. A window holding an immersive layer has no
+    /// panel, cannot be pointed at and cannot be switched to, so counting it produced a status
+    /// bar reading "2 windows" for a player showing one film — which is the normal shape for
+    /// immersive video, not an odd one.
+    pub fn is_environment(window: &smithay::desktop::Window) -> bool {
+        use smithay::wayland::seat::WaylandFocus;
+        window
+            .wl_surface()
+            .map(|s| crate::xr::state_of(&s).is_environment())
+            .unwrap_or(false)
+    }
+
+    /// How many windows the wearer would say are open.
+    ///
+    /// Not `space.elements().count()`, which counts the sky.
+    pub fn window_count(&self) -> usize {
+        self.space
+            .elements()
+            .filter(|w| !Self::is_environment(w))
+            .count()
     }
 
     /// Tell clients how often the world is redrawn.
@@ -663,7 +746,7 @@ impl XdgShellHandler for Spatiand {
         log::info!(
             "new toplevel at yaw {:.0} deg ({} windows), offered {}x{}",
             self.spawn_yaw.to_degrees(),
-            self.space.elements().count(),
+            self.window_count(),
             DEFAULT_WINDOW_SIZE.0,
             DEFAULT_WINDOW_SIZE.1
         );
@@ -840,7 +923,7 @@ impl Spatiand {
             "new X11 window {:?} at yaw {:.0} deg ({} windows), surface {}",
             title,
             self.spawn_yaw.to_degrees(),
-            self.space.elements().count(),
+            self.window_count(),
             if has_surface {
                 "already attached"
             } else {
@@ -1078,5 +1161,6 @@ delegate_xdg_shell!(Spatiand);
 delegate_xdg_decoration!(Spatiand);
 delegate_seat!(Spatiand);
 delegate_output!(Spatiand);
+delegate_presentation!(Spatiand);
 delegate_data_device!(Spatiand);
 smithay::delegate_xwayland_shell!(Spatiand);

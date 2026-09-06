@@ -14,6 +14,7 @@
 use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
 
+mod attention;
 mod audio;
 mod backend_drm;
 mod backend_snapshot;

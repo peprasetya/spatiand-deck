@@ -35,6 +35,9 @@
 //! `SPATIAND_SNAPSHOT_EYE=right` draws the right eye instead of the left. Rendering both and
 //! comparing them is how a stereoscopic surface is checked without a headset on.
 //!
+//! `SPATIAND_IDLE_SECONDS=n` winds the idle-fade clock forward by n seconds of a still head,
+//! which is how a surface that asked for `set_idle_fade` is seen fading without a wearer.
+//!
 //! `SPATIAND_CLICK=u,v` clicks the client's window at that fraction across it once it has
 //! painted, and `SPATIAND_CLICK_BUTTON=right` uses the other button. This is how a menu gets
 //! opened without a person: a menu is opened *by* a click, so a harness that cannot click can
@@ -318,6 +321,32 @@ pub fn run(
             Err(e) => log::warn!("could not launch {command:?}: {e}"),
         }
     }
+    // Idle fading, without a wearer to sit still for it.
+    //
+    // `SPATIAND_IDLE_SECONDS=n` winds the attention clock forward by n seconds of a perfectly
+    // still head, which is the one input a harness with no headset cannot produce by waiting.
+    // It is how the compositor-side fade in `crate::attention` gets looked at at all.
+    if let Ok(raw) = std::env::var("SPATIAND_IDLE_SECONDS") {
+        let seconds: f32 = raw.parse().unwrap_or(0.0);
+        let step = std::time::Duration::from_millis(14);
+        let mut left = std::time::Duration::from_secs_f32(seconds.max(0.0));
+        while !left.is_zero() {
+            let dt = step.min(left);
+            runtime
+                .state
+                .attention
+                .tick(Some(glam::DQuat::IDENTITY), dt);
+            left -= dt;
+        }
+        let alpha = runtime.state.attention.alpha();
+        log::info!("idle for {seconds}s: a fading surface is at alpha {alpha:.2}");
+        for quad in windows.iter_mut() {
+            if quad.xr.idle_fade {
+                quad.fade = alpha;
+            }
+        }
+    }
+
     // Whether an application has taken the environment. Asked once here, because a snapshot
     // is one frame -- in the session this is asked every frame. See `scene::sky_surface`.
     let sky_from_client = crate::scene::sky_surface(&mut renderer, &runtime.state);
@@ -402,7 +431,7 @@ pub fn run(
     scene.sync_status(
         &mut renderer,
         &mut text,
-        &crate::status::line(runtime.state.space.elements().count()),
+        &crate::status::line(runtime.state.window_count()),
         ppd,
     )?;
     scene.sync_menu(

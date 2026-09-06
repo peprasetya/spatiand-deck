@@ -58,6 +58,8 @@ pub struct XrState {
     pub swapped: bool,
     pub layer: Layer,
     pub yaw_offset_urad: i32,
+    /// The client has handed its visibility to the compositor — see [`crate::attention`].
+    pub idle_fade: bool,
 }
 
 impl XrState {
@@ -86,6 +88,18 @@ impl XrState {
     /// and for a drag as well as for the pixels.
     pub fn is_window(&self) -> bool {
         matches!(self.layer, Layer::Window)
+    }
+
+    /// Whether this surface has become the room rather than a thing in it.
+    ///
+    /// Distinct from `!is_window()`, which is also true of a head-locked panel — a head-locked
+    /// panel is still a window, it just moves. This one is not a window at all: it has no
+    /// frame, cannot be pointed at, cannot be switched to, and must not be counted as one.
+    /// A player that is the room always has two surfaces, because the sky takes no input and
+    /// something has to stay the transport, so this is the ordinary case for immersive video
+    /// rather than an odd one.
+    pub fn is_environment(&self) -> bool {
+        matches!(self.layer, Layer::Equirect180 | Layer::Equirect360)
     }
 }
 
@@ -294,6 +308,9 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
             }
             spatiand_xr_surface_v1::Request::SetYawOffset { microradians } => {
                 pending.next.yaw_offset_urad = microradians;
+            }
+            spatiand_xr_surface_v1::Request::SetIdleFade { enable } => {
+                pending.next.idle_fade = enable != 0;
             }
             spatiand_xr_surface_v1::Request::Destroy => {
                 if let Some(surface) = pending.surface.take() {

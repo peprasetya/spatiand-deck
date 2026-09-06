@@ -28,13 +28,16 @@ being put in a room, every X11 window says so on its title bar, and
 views are packed into one buffer, whether it follows the view, and whether it is
 the room itself — 180° or 360°, mono or stereo. It also hands over head and eye
 poses through shared memory, so an application drawing its own views can read
-them at the last moment before it draws. An application that ignores all of it
-is an ordinary window and stays one. See [docs/apps.md](docs/apps.md).
+them at the last moment before it draws. A surface can also ask the compositor
+to fade it out while nobody is attending to it and bring it back on a glance,
+which is a thing a client cannot do for itself. An application that ignores all
+of it is an ordinary window and stays one. See [docs/apps.md](docs/apps.md).
 
 **GPU buffers.** Clients can hand over decoded frames as dmabuf rather than
 copying them through shared memory — which is what a hardware video decoder
 produces natively, and the difference between a video player that works and one
-that spends its budget on memcpy.
+that spends its budget on memcpy. The global carries the render node's identity,
+which is also how a client's EGL finds the GPU at all.
 
 **Spatial audio.** Each window gets its own audio sink; its channels are placed
 around you and rendered to two ears through a measured head-related transfer

@@ -52,7 +52,7 @@
     The per-frame values are not on the wire at all -- see the pose channel.
   </description>
 
-  <interface name="spatiand_xr_v1" version="1">
+  <interface name="spatiand_xr_v1" version="2">
     <description summary="stereoscopic and head-tracked surfaces">
       The factory. Binding it says nothing and changes nothing.
     </description>
@@ -91,7 +91,7 @@
     </enum>
   </interface>
 
-  <interface name="spatiand_xr_surface_v1" version="1">
+  <interface name="spatiand_xr_surface_v1" version="2">
     <description summary="how a surface is drawn for two eyes">
       All state here is double-buffered: it takes effect on the next
       wl_surface.commit, like everything else about a surface. Changing layout
@@ -138,6 +138,13 @@
         See the layer enum. A compositor that cannot honour a layer -- the sky
         is already taken, say -- answers with layer_refused and keeps drawing
         the surface as a window, which is always a valid thing to be.
+
+        THERE IS NO "GRANTED" EVENT, AND SILENCE IS THE YES. A layer is
+        honoured without comment and refused out loud, so a client can never
+        lay itself out for something it is not getting. What that means in
+        practice: send set_layer, then wl_display.sync, and if no layer_refused
+        arrived before the sync callback, the layer is yours. Do not wait for
+        anything else; nothing else is coming.
       </description>
       <arg name="layer" type="uint" enum="layer"/>
     </request>
@@ -205,6 +212,33 @@
       </description>
       <arg name="layer" type="uint" enum="layer"/>
     </event>
+
+    <request name="set_idle_fade" since="2">
+      <description summary="let the compositor fade this surface out when unattended">
+        For a surface that should get out of the way -- a transport bar over a
+        film, a toolbar over a model -- and come back when the wearer wants it.
+
+        The compositor owns the timer, the threshold and the animation, and
+        that is the point of putting it here rather than leaving it to the
+        client. A client cannot do this correctly even in principle: pointer
+        motion is delivered only to the surface under the ray, so a surface
+        that has faded out cannot see the wearer reaching for it, and has no
+        way to know it should come back. The compositor sees every pointer
+        sample and every head movement, whatever they are pointed at.
+
+        While faded the surface is STILL THE INPUT TARGET, at every alpha
+        including zero. Pressing where an invisible transport bar is will hit
+        it -- but the same motion has already brought it back, so in practice
+        the wearer sees it before they press it.
+
+        The surface keeps rendering; nothing about its buffers, frame callbacks
+        or size changes, and a client need not know whether it is currently
+        faded. It is a compositor-side dimmer on an otherwise ordinary window.
+
+        Off by default. This is double-buffered like everything else here.
+      </description>
+      <arg name="enable" type="uint" summary="0 or 1"/>
+    </request>
   </interface>
 
   <interface name="spatiand_xr_pose_channel_v1" version="1">
