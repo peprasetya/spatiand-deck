@@ -226,7 +226,11 @@ pub fn run(
     // saying "the compositor is here" is true. The nested backend is a window inside somebody
     // else's session, and it would be pointing that session's portals at a compositor that
     // closes when the window does.
-    {
+    //
+    // What is published is remembered, because it has to be taken back on the way out: these
+    // name our sockets, the systemd user manager outlives the session, and a value left
+    // behind points whatever runs next at a compositor that is gone.
+    let published_names: Vec<&'static str> = {
         let mut published: Vec<(&str, &str)> = vec![
             ("WAYLAND_DISPLAY", runtime.state.socket_name.as_str()),
             ("XDG_SESSION_TYPE", "wayland"),
@@ -236,7 +240,12 @@ pub fn run(
             published.push(("DISPLAY", display));
         }
         spatiand_platform::publish_session_environment(&published);
-    }
+        let mut names = vec!["WAYLAND_DISPLAY", "XDG_SESSION_TYPE"];
+        if display.is_some() {
+            names.push("DISPLAY");
+        }
+        names
+    };
     // Every window's sound, placed where the window is. Started here rather than lazily
     // because the connection to the audio server is what takes the time, and doing it on the
     // first launch would stall the launcher rather than the startup.
@@ -1197,6 +1206,13 @@ pub fn run(
                 leaving = true;
             }
             if leaving {
+                // Before anything else, stop claiming to be the session.
+                //
+                // First because of the ordering: the switch below can have SDDM starting the
+                // next session while this process is still winding down, and a session that
+                // starts before the retraction lands inherits the stale value anyway. This is
+                // what game mode was tripping over -- see `withdraw_session_environment`.
+                spatiand_platform::withdraw_session_environment(&published_names);
                 // Exiting is not enough. SDDM restarts whatever the default session is, and
                 // getting here means that is Spatiand - so quitting just relaunches us, which
                 // looks like the button doing nothing. Hand the default back to Plasma first.

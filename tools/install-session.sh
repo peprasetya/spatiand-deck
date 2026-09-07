@@ -21,14 +21,14 @@
 # and the compositor cannot take the display without running a separate seatd as root.
 set -euo pipefail
 
-# Bumped whenever the *content* of the session entry below changes.
+# Bumped whenever the *content* of the session entry or the launcher below changes.
 #
 # Written into the entry and read back by go-to-spatiand.sh, which used to re-register only
 # when the entry was missing -- so an entry that was present and out of date was left alone
 # forever. That is not hypothetical: DesktopNames gained KDE, without which no Flatpak file
 # chooser opens, and every machine that already had a session entry would have carried on
 # without it.
-ENTRY_REVISION=2
+ENTRY_REVISION=3
 
 if [[ $EUID -ne 0 ]]; then
     echo "!! Run this with sudo:  sudo $0" >&2
@@ -103,7 +103,22 @@ fi
 LOG="\$HOME/.local/share/spatiand-session.log"
 mkdir -p "\$(dirname "\$LOG")"
 [ -f "\$LOG" ] && mv -f "\$LOG" "\$LOG.1"
-exec "$BIN" >"\$LOG" 2>&1
+# Not exec'd, because there is one thing to do after it stops.
+"$BIN" >"\$LOG" 2>&1
+status=\$?
+
+# Stop telling the rest of the machine that this compositor is here.
+#
+# Spatiand withdraws these itself on the way out, and this is the case it cannot cover: a
+# crash, or a SIGKILL, runs no code of ours at all. The systemd user manager outlives the
+# session, so a WAYLAND_DISPLAY left pointing at a socket that has gone is inherited by
+# whatever starts next -- and game mode is the one that notices, because gamescope reads it,
+# decides it should run nested inside us, and exits 1. Only a full power cycle cleared it.
+#
+# Harmless when Spatiand has already done it: unsetting a variable that is not set succeeds.
+systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE 2>/dev/null
+
+exit \$status
 EOF
 chmod +x "$LAUNCHER"
 

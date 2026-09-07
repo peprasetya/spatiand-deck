@@ -181,6 +181,51 @@ pub fn publish_session_environment(vars: &[(&str, &str)]) {
     }
 }
 
+/// Take back what [`publish_session_environment`] said, because it has stopped being true.
+///
+/// The other half of publishing, and it was missing. `WAYLAND_DISPLAY` and `DISPLAY` name
+/// sockets belonging to *this* compositor; the moment it exits they name nothing. But the
+/// systemd user manager outlives the session -- the same `systemd --user` serves the desktop,
+/// the spatial session and game mode one after another -- so an unretracted value sits there
+/// pointing at a dead socket for everything started afterwards.
+///
+/// That is not theoretical. Leaving spatial mode and asking for game mode gave:
+///
+/// ```text
+/// gamescope-session: Failed to connect to wayland socket: wayland-1.
+/// gamescope-session.service: Main process exited, code=exited, status=1/FAILURE
+/// ```
+///
+/// `wayland-1` was ours. Gamescope found a `WAYLAND_DISPLAY` in its inherited environment,
+/// concluded it should run nested inside that compositor, and failed -- so game mode could
+/// not be entered again until a full power cycle, which is what finally restarts the user
+/// manager and clears its environment.
+///
+/// Unset rather than blanked, deliberately. A variable set to the empty string is still set,
+/// and a program testing whether it has a Wayland display to connect to will believe it has
+/// one -- which is the same fault with a shorter socket name. There is no way to withdraw a
+/// variable from the *D-Bus* activation environment, only from systemd's; systemd's is the
+/// one a session unit inherits, so it is the one that matters here.
+pub fn withdraw_session_environment(names: &[&str]) {
+    let mut command = Command::new("systemctl");
+    command.arg("--user").arg("unset-environment");
+    for name in names {
+        command.arg(name);
+    }
+    match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => {
+            log::info!("took back {} from the session", names.join(", "))
+        }
+        Ok(status) => log::warn!("could not withdraw the session environment ({status})"),
+        Err(e) => log::warn!("no systemctl ({e}); the session environment still names us"),
+    }
+}
+
 /// Where an option has to be inserted on a `flatpak run` command line, if this is one.
 ///
 /// A sandbox does not inherit our environment. Everything `extra` carries -- which is how a

@@ -36,6 +36,19 @@ say "registering the session (this needs your password once)"
 # matters when this was started by double-clicking rather than from a terminal.
 LAUNCHER=/usr/local/bin/spatiand-session
 SESSION=/usr/share/wayland-sessions/spatiand.desktop
+# Two traps live in this one construct, both paid for.
+#
+# ESCAPING IS ONE LEVEL, NOT TWO. The heredoc below is unquoted (<<EOF), so its body is
+# expanded once when $script is built: a \$ here becomes a $ there. The inner heredoc that
+# writes the launcher IS quoted (<<'LAUNCH'), so nothing is expanded again. Anything written
+# \\\$ therefore reached the installed launcher as a literal \$, which sh reads as an escaped
+# dollar -- so LOG was set to the eight characters "$HOME/..." and the session log went to a
+# file named that, in whatever directory SDDM happened to start in.
+#
+# NO APOSTROPHES anywhere inside this substitution, comments included. Bash scans the
+# body of $( ) for quotes before it ever gets to the heredoc, so a lone ' in a word like
+# "doesn't" makes it hunt for a closing quote to the end of the file and report an unmatched
+# parenthesis on this line. Cost twenty minutes once; the rule is cheaper than the diagnosis.
 script="$(cat <<EOF
 set -e
 if command -v steamos-readonly >/dev/null; then steamos-readonly disable || true; fi
@@ -43,12 +56,20 @@ cat > $LAUNCHER <<'LAUNCH'
 #!/bin/sh
 export SPATIAND_BACKEND=drm
 export RUST_BACKTRACE=1
-ENVFILE="\\\$HOME/.config/spatiand/session.env"
-if [ -f "\\\$ENVFILE" ]; then set -a; . "\\\$ENVFILE"; set +a; fi
-LOG="\\\$HOME/.local/share/spatiand-session.log"
-mkdir -p "\\\$(dirname "\\\$LOG")"
-[ -f "\\\$LOG" ] && mv -f "\\\$LOG" "\\\$LOG.1"
-exec $BIN >"\\\$LOG" 2>&1
+ENVFILE="\$HOME/.config/spatiand/session.env"
+if [ -f "\$ENVFILE" ]; then set -a; . "\$ENVFILE"; set +a; fi
+LOG="\$HOME/.local/share/spatiand-session.log"
+mkdir -p "\$(dirname "\$LOG")"
+[ -f "\$LOG" ] && mv -f "\$LOG" "\$LOG.1"
+# Deliberately not exec: the session environment has to be taken back afterwards. Spatiand does that
+# itself on a normal exit; this is the crash case, where no code of ours runs at all. A
+# WAYLAND_DISPLAY left in the systemd user manager -- which outlives the session -- points
+# whatever starts next at a socket that is gone, and game mode is what notices: gamescope
+# reads it, runs itself nested inside a compositor that has exited, and fails to start.
+$BIN >"\$LOG" 2>&1
+status=\$?
+systemctl --user unset-environment WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE 2>/dev/null
+exit \$status
 LAUNCH
 chmod +x $LAUNCHER
 mkdir -p /usr/share/wayland-sessions
