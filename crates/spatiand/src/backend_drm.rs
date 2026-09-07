@@ -1575,11 +1575,36 @@ pub fn run(
             // new filters once a direction has moved further than anyone can hear.
             if spatial_audio.is_on() {
                 let head = tracker.orientation();
+                // Every window that could be what an app's sound is coming from -- including
+                // the one that has become the room, which has no quad to be found among and
+                // so was silently left out of this for as long as environments have existed.
+                // Its sound stopped being pointed the moment it took the room, which meant it
+                // stopped counter-rotating with the head as well.
+                let mut sources: Vec<crate::audio::Source> = Vec::new();
+                for window in runtime.state.space.elements() {
+                    use smithay::wayland::seat::WaylandFocus;
+                    let (Some(id), Some(surface)) =
+                        (runtime.state.layout.id_of(window), window.wl_surface())
+                    else {
+                        continue;
+                    };
+                    let xr = crate::xr::state_of(&surface);
+                    let kind = if xr.is_environment() {
+                        crate::audio::Kind::Environment {
+                            yaw: xr.sky_yaw_urad() as f64 * 1e-6,
+                        }
+                    } else if let Some(placement) = runtime.state.layout.get(window) {
+                        crate::audio::Kind::Window(placement)
+                    } else {
+                        continue;
+                    };
+                    sources.push(crate::audio::Source { window: id, kind });
+                }
+                spatial_audio.aim_all(&sources, head);
                 for quad in windows.iter_mut() {
                     let Some(id) = runtime.state.layout.id_of(&quad.window) else {
                         continue;
                     };
-                    spatial_audio.aim(id, &quad.placement, head);
                     // A window only grows a speaker once it has actually made a sound, and
                     // keeps it from then on: one that vanished between tracks would be a
                     // control that moved out from under a thumb reaching for it.

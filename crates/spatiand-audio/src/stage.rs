@@ -206,7 +206,12 @@ impl Channel {
 ///
 /// The reference the window's own width is measured against: a window subtending exactly this
 /// much either side of its centre gets the layout the app assumed, untouched.
-const NOMINAL_HALF_STAGE: f64 = 30.0 * std::f64::consts::PI / 180.0;
+///
+/// Public because it is also the answer for a sound whose picture has no edges. An immersive
+/// film fills the sphere, so there is no width to measure and stretching the stage to the
+/// picture would put the front pair at your ears; asking for exactly this much is how a
+/// caller says "leave the mix alone and only point it".
+pub const NOMINAL_HALF_STAGE: f64 = 30.0 * std::f64::consts::PI / 180.0;
 
 /// Where the sound's front is, and how wide.
 ///

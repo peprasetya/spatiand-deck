@@ -439,6 +439,32 @@ its own.
     angles a listening room would give them, rotated with the window.
   * **LFE has no direction** and is mixed to both ears.
 
+### One sink per application, aimed from one window
+
+A sink belongs to the **process**, not to the surface, because the routing is
+set in the launched application's environment before any window exists. So a
+player with a film and a transport bar has two windows and one sound, and
+something has to decide which of them the sound is coming from.
+
+  * **A surface holding `equirect_180` or `equirect_360` wins.** Its sound comes
+    from the centre of its picture — the anchor `set_layer` captured, plus any
+    `set_yaw_offset` — so a recentre turns the sound and the film together.
+  * **Otherwise the largest window wins**, by how big it looks rather than how
+    big it is. Not the focused one: opening your preferences should not move the
+    music.
+
+**An immersive film's stage is not stretched.** An ordinary window's front pair
+sits on the window's own edges, but a film that fills the sphere has no edges,
+and the literal reading — the picture is 180° wide, so the stage is too — would
+put front left and right at your ears and hollow out the middle of every mix. An
+immersive track already describes a room, so it is pointed and otherwise left
+alone.
+
+Nothing here needs a client change. It is written down because the shape of the
+rule is visible from your side: if you split your interface across several
+surfaces, the sound follows the biggest one, and if one of them is the
+environment it follows that.
+
 ### Objects
 
 **Not supported, and not for want of trying.** Atmos and DTS:X do not reach a
