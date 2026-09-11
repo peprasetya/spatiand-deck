@@ -12,7 +12,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 /// The most this file is allowed to grow to before it is started again, in bytes.
 ///
@@ -320,12 +320,47 @@ pub fn launch(
 
     let pid = child.id();
     prefer_as_oom_victim(pid);
-    // Deliberately dropped rather than waited on. `Child`'s own drop does not reap, so the
-    // process is left to init — which is what we want for something that should outlive the
-    // launcher, and avoids a wait() that would block the render loop.
-    std::mem::forget(child);
     log::info!("launched {program} (pid {pid})");
+    // After the OOM adjustment, not before: once reaped the pid is free to be reused, and the
+    // write would land on whatever took it.
+    reap_when_it_exits(child, program);
     Ok(pid)
+}
+
+/// Wait for a launched application on a thread of its own, so that it is reaped when it exits.
+///
+/// This used to drop the child and call it "left to init", which is only true once *we* exit.
+/// Until then we are its parent, and a process whose parent never waits on it stays behind as
+/// a zombie -- so every application opened and closed in a session left one, holding its pid,
+/// until the session ended.
+///
+/// A thread per child, blocked in `wait()` on that one pid, rather than anything
+/// process-wide. `waitpid(-1)` from a `SIGCHLD` handler, or ignoring `SIGCHLD` so the kernel
+/// reaps for us, would also collect children that other code is waiting on by pid: Smithay
+/// reaps Xwayland from a thread exactly like this one, and every `Command::status()` and
+/// `output()` in the compositor waits on its own child. Whichever of them lost the race would
+/// get `ECHILD` instead of an exit status -- a volume change reported as failed, say, when it
+/// worked. Naming the pid is what keeps this out of everyone else's way. The thread is also
+/// what keeps the wait off the render loop, which cannot block on anything.
+///
+/// Its one other job is saying how the application ended. An application that starts and
+/// dies straight away looks, from the launcher, exactly like one that never started; the exit
+/// status is the line in the log that tells them apart.
+fn reap_when_it_exits(mut child: Child, program: &str) {
+    let pid = child.id();
+    let name = program.to_string();
+    let watcher = std::thread::Builder::new()
+        .name(format!("reap {pid}"))
+        .spawn(move || match child.wait() {
+            Ok(status) if status.success() => log::info!("{name} (pid {pid}) exited"),
+            Ok(status) => log::warn!("{name} (pid {pid}) exited: {status}"),
+            Err(e) => log::warn!("could not wait for {name} (pid {pid}): {e}"),
+        });
+    // Failing leaves the application running and exactly as it was before this existed: a
+    // zombie when it exits. Not a reason to fail a launch that has already happened.
+    if let Err(e) = watcher {
+        log::warn!("nothing to reap pid {pid} ({e}); it will linger as a zombie when it exits");
+    }
 }
 
 /// How much more willing the kernel should be to kill a launched application than the
@@ -587,8 +622,34 @@ mod tests {
             OOM_PREFERENCE,
             "a launched app must be a likelier victim than its compositor"
         );
-        // Left to exit on its own -- it is a two-second sleep, and reaping it here would mean
-        // the wait() this module deliberately never does.
+        // Not waited on here: the launcher's own reaper already is, and a second wait on the
+        // same pid would race it for the exit status.
+    }
+
+    /// The state letter from `/proc/<pid>/stat`, or `None` once the process is gone entirely.
+    ///
+    /// Read after the *last* `)` for the same reason as `spatiand::audio::parent_of`: the name
+    /// field can contain anything, brackets included.
+    fn process_state(pid: u32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat[stat.rfind(')')? + 1..].trim_start().chars().next()
+    }
+
+    #[test]
+    fn an_application_that_exits_is_reaped_rather_than_left_a_zombie() {
+        // Every app opened and closed in a session used to leave one of these behind until the
+        // session ended. A zombie keeps its `/proc` entry, in state Z, until its parent waits
+        // on it -- so the entry disappearing is exactly the thing being tested.
+        let pid = launch("/bin/true", "wayland-test", &[]).expect("true should start");
+        let mut last = None;
+        for _ in 0..100 {
+            last = process_state(pid);
+            if last.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("pid {pid} was never reaped; still in state {last:?}");
     }
 
     #[test]
