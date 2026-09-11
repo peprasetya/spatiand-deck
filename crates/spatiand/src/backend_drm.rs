@@ -339,10 +339,16 @@ pub fn run(
     let mut environments = Environments::discover();
     shell.set_environments(environments.entries(), environments.choice());
     let mut browser = crate::environment::Browser::new();
-    let mut sky_image = environments.current();
-    let mut sky_dirty = false;
+    // Loaded here and now for the first frame, which has nothing to show until it is. Every
+    // later change goes through the loader, because by then there is a world tracking the
+    // wearer's head that a decode would stop.
+    let sky_image = environments.current();
+    let mut sky_loader = crate::environment::SkyLoader::start();
     // Owns the three pipelines and every texture that outlives one frame.
     let mut scene = Scene::new(&mut renderer, &sky_image)?;
+    // On the GPU now. The copy here is 32 MB for a 4000x2000 panorama, and nothing reads it
+    // again: it used to be kept only so a later change had somewhere to be put.
+    drop(sky_image);
     // Deliberately not decided here. Which axis convention applies is a fact about the
     // headset, so it cannot be settled before one is open — see `settle_axes`, called from
     // the rebuild loop below.
@@ -1078,8 +1084,7 @@ pub fn run(
                     }
                     ShellEvent::ChooseEnvironment(choice) => {
                         environments.select(choice);
-                        sky_image = environments.current();
-                        sky_dirty = true;
+                        sky_loader.load(&environments);
                     }
                     ShellEvent::ListDirectory(name) => {
                         if let Some(name) = name {
@@ -1091,8 +1096,7 @@ pub fn run(
                         let path = browser.resolve(&name);
                         let choice = environments.add(&path);
                         environments.select(choice);
-                        sky_image = environments.current();
-                        sky_dirty = true;
+                        sky_loader.load(&environments);
                     }
                     // Switching to a window brings it to you rather than turning you to it.
                     // A 3DoF room has no way to move the wearer, and the alternative -- "your
@@ -1517,10 +1521,9 @@ pub fn run(
                 })?);
             }
 
-            if sky_dirty {
-                sky_dirty = false;
-                let image = &sky_image;
-                renderer.with_context(|gl| unsafe { scene.set_sky(gl, image) })?;
+            // Decoded on the loader's thread; only the upload is done here, where the context is.
+            if let Some(image) = sky_loader.take() {
+                renderer.with_context(|gl| unsafe { scene.set_sky(gl, &image) })?;
                 log::info!("environment now {}", environments.describe());
             }
             // Once a second is plenty: the clock changes once a minute and the battery

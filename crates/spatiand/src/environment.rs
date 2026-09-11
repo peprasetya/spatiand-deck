@@ -275,22 +275,21 @@ impl Environments {
         std::fs::write(&list, text)
     }
 
-    /// Load whatever is currently selected.
+    /// Load whatever is currently selected, here and now. See [`SkyLoader`] for doing it
+    /// anywhere a frame is waiting.
     pub fn current(&self) -> Sky {
+        self.wanted().load()
+    }
+
+    /// What loading the current selection involves, detached from the list so it can be done
+    /// on another thread.
+    fn wanted(&self) -> Wanted {
         match self.choice {
-            EnvironmentChoice::Blank => Sky::blank(),
-            EnvironmentChoice::Studio => Sky::studio(GENERATED_SIZE.0, GENERATED_SIZE.1),
+            EnvironmentChoice::Blank => Wanted::Blank,
+            EnvironmentChoice::Studio => Wanted::Studio,
             EnvironmentChoice::File(i) => match self.files.get(i) {
-                Some(path) => match load_image(path) {
-                    Ok(sky) => sky,
-                    Err(e) => {
-                        // Falling back rather than failing: an unreadable file should not leave
-                        // the wearer in a black void with no way to change it.
-                        log::warn!("could not load {}: {e}", path.display());
-                        Sky::studio(GENERATED_SIZE.0, GENERATED_SIZE.1)
-                    }
-                },
-                None => Sky::studio(GENERATED_SIZE.0, GENERATED_SIZE.1),
+                Some(path) => Wanted::File(path.clone()),
+                None => Wanted::Studio,
             },
         }
     }
@@ -532,6 +531,114 @@ fn load_image(path: &Path) -> Result<Sky, String> {
     );
     Sky::from_rgba(width, height, decoded.into_raw(), source)
         .ok_or_else(|| "decoded image had an implausible size".to_string())
+}
+
+/// An environment to be loaded: which kind, and for a file, which file.
+#[derive(Debug, Clone, PartialEq)]
+enum Wanted {
+    Blank,
+    Studio,
+    File(PathBuf),
+}
+
+impl Wanted {
+    fn load(self) -> Sky {
+        match self {
+            Wanted::Blank => Sky::blank(),
+            Wanted::Studio => Sky::studio(GENERATED_SIZE.0, GENERATED_SIZE.1),
+            Wanted::File(path) => match load_image(&path) {
+                Ok(sky) => sky,
+                Err(e) => {
+                    // Falling back rather than failing: an unreadable file should not leave
+                    // the wearer in a black void with no way to change it.
+                    log::warn!("could not load {}: {e}", path.display());
+                    Sky::studio(GENERATED_SIZE.0, GENERATED_SIZE.1)
+                }
+            },
+        }
+    }
+}
+
+/// Environments loaded on a thread of their own, for a frame loop to pick up when ready.
+///
+/// Decoding a panorama is the slow part of changing the world: 90-130 ms for each of the
+/// 4000x2000 JPEGs on the Deck, measured, and more for anything bigger. Done where the choice
+/// is made, that stopped the renderer for seven to nine frames at 72 Hz, with the world stuck
+/// to the wearer's head until it finished. Here the old room stays up and keeps tracking while
+/// the new one decodes, and changes over when it is ready. Only the upload to the GPU is left
+/// to the frame loop, which is the one part that has to happen where the GL context is.
+pub struct SkyLoader {
+    to: Option<std::sync::mpsc::Sender<(u64, Wanted)>>,
+    from: std::sync::mpsc::Receiver<(u64, Sky)>,
+    /// Numbers each request, so that only the most recent one is ever shown.
+    asked: u64,
+    /// Where a request goes if there is no thread to send it to.
+    ready: Option<Sky>,
+}
+
+impl SkyLoader {
+    pub fn start() -> SkyLoader {
+        let (to, jobs) = std::sync::mpsc::channel::<(u64, Wanted)>();
+        let (done, from) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("environment".into())
+            .spawn(move || {
+                while let Ok(mut job) = jobs.recv() {
+                    // Only the newest of whatever queued up: a second choice made while the
+                    // first was decoding has already replaced it, and decoding it anyway
+                    // would put a room nobody wants on screen for a moment.
+                    while let Ok(newer) = jobs.try_recv() {
+                        job = newer;
+                    }
+                    let (number, wanted) = job;
+                    if done.send((number, wanted.load())).is_err() {
+                        return;
+                    }
+                }
+            });
+        let to = match spawned {
+            Ok(_) => Some(to),
+            Err(e) => {
+                log::warn!("no environment thread ({e}); changing it will stall the frame");
+                None
+            }
+        };
+        SkyLoader {
+            to,
+            from,
+            asked: 0,
+            ready: None,
+        }
+    }
+
+    /// Start loading whatever is selected now. Never waits, unless there is no thread.
+    pub fn load(&mut self, environments: &Environments) {
+        self.asked += 1;
+        let wanted = environments.wanted();
+        let Some(to) = &self.to else {
+            self.ready = Some(wanted.load());
+            return;
+        };
+        // A thread that has gone -- it panicked on a malformed file -- is no reason to stop
+        // being able to change the room.
+        if let Err(std::sync::mpsc::SendError((_, wanted))) = to.send((self.asked, wanted)) {
+            self.ready = Some(wanted.load());
+        }
+    }
+
+    /// The most recently asked-for environment, once, if it has finished loading.
+    ///
+    /// One asked for earlier and superseded is dropped rather than handed over, however it
+    /// arrives: it is not the room the wearer chose.
+    pub fn take(&mut self) -> Option<Sky> {
+        let mut latest = self.ready.take();
+        for (number, sky) in self.from.try_iter() {
+            if number == self.asked {
+                latest = Some(sky);
+            }
+        }
+        latest
+    }
 }
 
 /// Work out what a panorama file contains. See the table in the module docs.
@@ -836,5 +943,45 @@ mod tests {
                 .iter()
                 .any(|entry| entry.choice == EnvironmentChoice::Studio));
         }
+    }
+
+    /// Whatever the loader hands over within a generous deadline.
+    fn wait_for(loader: &mut SkyLoader) -> Option<Sky> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if let Some(sky) = loader.take() {
+                return Some(sky);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        None
+    }
+
+    #[test]
+    fn the_loader_hands_over_what_was_chosen() {
+        let mut loader = SkyLoader::start();
+        loader.load(&with_files(&[], EnvironmentChoice::Blank));
+        assert_eq!(wait_for(&mut loader), Some(Sky::blank()));
+        assert_eq!(loader.take(), None, "handed over twice");
+    }
+
+    #[test]
+    fn a_choice_made_while_another_is_loading_is_the_one_shown() {
+        // Studio takes real time to generate, so the second choice arrives while it is being
+        // made. Whether or not the worker gets to skip it, it must never reach the screen.
+        let mut loader = SkyLoader::start();
+        loader.load(&with_files(&[], EnvironmentChoice::Studio));
+        loader.load(&with_files(&[], EnvironmentChoice::Blank));
+        assert_eq!(wait_for(&mut loader), Some(Sky::blank()));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(loader.take(), None, "the superseded room turned up afterwards");
+    }
+
+    #[test]
+    fn an_unreadable_file_still_loads_something() {
+        let mut loader = SkyLoader::start();
+        loader.load(&with_files(&["/nowhere/at/all.jpg"], EnvironmentChoice::File(0)));
+        let sky = wait_for(&mut loader).expect("nothing was handed over");
+        assert_eq!((sky.width, sky.height), GENERATED_SIZE, "should fall back to the studio");
     }
 }
