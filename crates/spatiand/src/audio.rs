@@ -105,6 +105,11 @@ impl Audio {
 
     /// Remember which process was given which sink.
     pub fn launched(&mut self, pid: u32, slot: Slot) {
+        // A launched app is reaped when it exits, so its pid is free to be handed out again --
+        // and an app that never opened a window leaves an entry here that `forget` never
+        // clears. If a new launch is given that pid, the lookup must find the new slot, not
+        // the dead app's.
+        self.launched.retain(|(p, _)| *p != pid);
         self.launched.push((pid, slot));
         // Bounded, so a long session of opening and closing apps does not accumulate. The
         // oldest entries are the least likely to still be waiting for a window.
@@ -379,6 +384,17 @@ mod tests {
         assert_eq!(audio.status(7), None);
         audio.set_muted(7, true);
         audio.aim_all(&[win(7, 0.0, 1.1), sky(8, 1.0)], DQuat::IDENTITY);
+    }
+
+    #[test]
+    fn a_reused_pid_finds_the_new_launch_not_the_dead_one() {
+        // Launched apps are reaped now, so a pid can come round again while an entry for its
+        // last owner -- an app that exited without ever opening a window -- is still here.
+        // Finding the first match would send the new app's sound to the dead app's sink.
+        let mut audio = Audio::new(false, Directness::default());
+        audio.launched(4242, 1);
+        audio.launched(4242, 2);
+        assert_eq!(audio.slot_of_process(4242), Some(2));
     }
 
     /// The reported fault, as a rule about which window an app's sound follows.
