@@ -462,6 +462,16 @@ pub fn run(
     };
     let ppd = TextRenderer::px_per_degree(stereo.per_eye.0, stereo.h_fov_deg);
     scene.sync_apps(&mut renderer, &mut text, &shell, ppd)?;
+    // Icons load on a thread of their own and arrive a frame or two after they are asked for.
+    // A snapshot is the only frame there is, so it waits for them rather than drawing initials
+    // where they go -- which would be a picture of something the session never looks like.
+    scene.wait_for_icons(&mut renderer, std::time::Duration::from_secs(10));
+    scene.sync_apps(&mut renderer, &mut text, &shell, ppd)?;
+    for quad in windows.iter_mut() {
+        if let Some(app_id) = runtime.state.app_id_of(&quad.window) {
+            quad.icon = scene.window_icon(&mut renderer, &app_id);
+        }
+    }
     if keyboard.open {
         scene.sync_keyboard(&mut renderer, &mut text, &keyboard, ppd)?;
     }

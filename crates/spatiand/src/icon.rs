@@ -9,8 +9,19 @@
 //! Failure is always `None`, never an error. A missing or corrupt icon is a cosmetic problem
 //! and the launcher already has a fallback; refusing to open because one app out of forty has
 //! a bad icon would be absurd.
+//!
+//! ## Not on the frame loop
+//!
+//! Finding an icon means walking the theme's directories, and for a window, possibly reading
+//! every desktop file on the machine too: 1 to 25 ms, measured on the Deck. Rasterising an
+//! SVG took another 22 ms, most of it spent filling a font database, until [`fonts`] started
+//! filling one for the whole session. Both used to happen on the render thread, all at once,
+//! every time the launcher changed level. Opening a group of ten apps stopped the world for a
+//! quarter of a second, and it happened again on every visit. [`Loader`] does the work on a
+//! thread of its own, and the frame loop only uploads what comes back.
 
 use std::path::Path;
+use std::sync::{mpsc, Arc, OnceLock};
 
 use spatiand_render::text::TextImage;
 
@@ -34,7 +45,7 @@ fn load_svg(path: &Path, size: u32) -> Option<TextImage> {
     let mut options = usvg::Options::default();
     // Some icons reference their own directory for embedded images.
     options.resources_dir = path.parent().map(|p| p.to_path_buf());
-    options.fontdb_mut().load_system_fonts();
+    options.fontdb = fonts();
 
     let tree = usvg::Tree::from_data(&data, &options).ok()?;
     let tree_size = tree.size();
@@ -97,6 +108,104 @@ fn demultiply(premultiplied: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Every font on the system, found once for the whole session.
+///
+/// usvg needs a font database for the odd icon with text in it, and filling one means reading
+/// every font file on the machine: 751 of them on the Deck, 16 to 23 ms, measured. That used
+/// to be done again for every SVG. Rasterising all forty launcher icons took 870 ms; with one
+/// database shared between them it takes 95.
+fn fonts() -> Arc<usvg::fontdb::Database> {
+    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let mut fonts = usvg::fontdb::Database::new();
+            fonts.load_system_fonts();
+            Arc::new(fonts)
+        })
+        .clone()
+}
+
+/// Which icon. The two places that show icons name them differently.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Wanted {
+    /// A name from a desktop entry's `Icon=` line, looked up in the theme.
+    Named(String),
+    /// A window's application id, which has to be matched to an application first. See
+    /// [`spatiand_platform::icon_for_app`].
+    App(String),
+}
+
+impl Wanted {
+    fn load(&self, size: u32) -> Option<TextImage> {
+        let path = match self {
+            Wanted::Named(name) => spatiand_platform::resolve_icon(name),
+            Wanted::App(id) => spatiand_platform::icon_for_app(id),
+        }?;
+        load(&path, size)
+    }
+}
+
+/// Icons found and rasterised on a thread of their own. See the module notes for why.
+///
+/// In the order asked for, so whatever is on screen can be asked for first and arrive first.
+pub struct Loader {
+    to: Option<mpsc::Sender<(Wanted, u32)>>,
+    from: mpsc::Receiver<(Wanted, Option<TextImage>)>,
+    /// Icons loaded here and now, with no thread to hand them to.
+    ready: Vec<(Wanted, Option<TextImage>)>,
+}
+
+impl Loader {
+    pub fn start() -> Loader {
+        let (to, jobs) = mpsc::channel::<(Wanted, u32)>();
+        let (done, from) = mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("icons".into())
+            .spawn(move || {
+                while let Ok((wanted, size)) = jobs.recv() {
+                    let image = wanted.load(size);
+                    if done.send((wanted, image)).is_err() {
+                        return;
+                    }
+                }
+            });
+        let to = match spawned {
+            Ok(_) => Some(to),
+            Err(e) => {
+                log::warn!("no icon thread ({e}); icons will be loaded on the frame loop");
+                None
+            }
+        };
+        Loader {
+            to,
+            from,
+            ready: Vec::new(),
+        }
+    }
+
+    /// Ask for an icon at `size` x `size`. Never waits, unless there is no thread.
+    pub fn request(&mut self, wanted: Wanted, size: u32) {
+        let unsent = match &self.to {
+            Some(to) => to.send((wanted, size)).err().map(|e| e.0),
+            None => Some((wanted, size)),
+        };
+        // A thread that has gone -- resvg panicked on a malformed file -- still leaves every
+        // app with its icon, just the slow way.
+        if let Some((wanted, size)) = unsent {
+            let image = wanted.load(size);
+            self.ready.push((wanted, image));
+        }
+    }
+
+    /// Everything finished since the last call. `None` for an icon means there is none to
+    /// be had, which is an answer rather than a failure.
+    pub fn finished(&mut self) -> Vec<(Wanted, Option<TextImage>)> {
+        let mut finished = std::mem::take(&mut self.ready);
+        finished.extend(self.from.try_iter());
+        finished
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +264,50 @@ mod tests {
             &img.rgba[centre..centre + 4]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Everything the loader hands back within a generous deadline, until `count` have come.
+    fn collect(loader: &mut Loader, count: usize) -> Vec<(Wanted, Option<TextImage>)> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut out = Vec::new();
+        while out.len() < count && std::time::Instant::now() < deadline {
+            out.extend(loader.finished());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        out
+    }
+
+    #[test]
+    fn the_loader_answers_every_request_in_order_including_the_ones_with_no_icon() {
+        let dir = std::env::temp_dir().join("spatiand-icon-loader-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("square.svg");
+        std::fs::write(
+            &path,
+            br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>"##,
+        )
+        .unwrap();
+        let found = Wanted::Named(path.display().to_string());
+        let absent = Wanted::Named("/nonexistent/icon.svg".into());
+
+        let mut loader = Loader::start();
+        loader.request(found.clone(), 16);
+        loader.request(absent.clone(), 16);
+        let answers = collect(&mut loader, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(answers.len(), 2, "an icon was never answered");
+        assert_eq!(answers[0].0, found);
+        let image = answers[0].1.as_ref().expect("the file was there");
+        assert_eq!((image.width, image.height), (16, 16));
+        // Answered as absent rather than left unanswered: the launcher shows a letter for it
+        // for good, instead of waiting for it for the rest of the session.
+        assert_eq!(answers[1].0, absent);
+        assert!(answers[1].1.is_none());
+    }
+
+    #[test]
+    fn the_fonts_are_found_once() {
+        assert!(Arc::ptr_eq(&fonts(), &fonts()));
     }
 }

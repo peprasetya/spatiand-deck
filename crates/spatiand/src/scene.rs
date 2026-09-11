@@ -204,6 +204,17 @@ struct Texture {
     aspect: f32,
 }
 
+/// Where an icon has got to. See [`crate::icon::Loader`].
+#[derive(Clone, Copy)]
+enum Icon {
+    Loading,
+    /// Looked for, and there is none: a dialog, something started from a terminal, an entry
+    /// naming an icon that is not installed. Remembered, so it is looked for once rather than
+    /// once a frame.
+    Missing,
+    Ready(Texture),
+}
+
 /// One row of a menu, rasterised.
 struct RowTextures {
     label: Texture,
@@ -335,11 +346,29 @@ pub struct Scene {
 
     /// One per app in the launcher, in the same order.
     app_labels: Vec<Texture>,
-    /// The label the bubbles show inside the glass — currently the app's initial.
+    /// What each bubble shows inside the glass: its icon, or its initial while the icon loads
+    /// or where there is none.
     app_glyphs: Vec<Texture>,
+    /// The initials among `app_glyphs`, which belong to this level of the launcher and go when
+    /// it is rebuilt. The icons belong to `icons` and stay.
+    app_initials: Vec<u32>,
     /// Rebuilt only when the app list changes; rasterising twenty labels a frame would cost
     /// more than everything else here put together.
     labels_built_for: usize,
+    /// When some of the launcher's bubbles were built with an initial standing in for an icon
+    /// still loading, how many icons had arrived at the time. The glyphs are rebuilt once more
+    /// have.
+    glyphs_waiting_since: Option<u64>,
+
+    /// Every icon asked for this session, for the launcher and the title bars both.
+    ///
+    /// Kept for the session rather than rebuilt with the launcher's level: there are as many as
+    /// there are applications, and loading one again because a group was left and re-entered
+    /// was the whole cost of entering it.
+    icons: std::collections::HashMap<crate::icon::Wanted, Icon>,
+    icon_loader: crate::icon::Loader,
+    /// How many icons have arrived, for `glyphs_waiting_since`.
+    icons_received: u64,
 
     /// Rasterised window titles, keyed by the text itself.
     ///
@@ -347,9 +376,6 @@ pub struct Scene {
     /// lives (a browser tab, a file being edited) and two windows often share one. Bounded
     /// below so a client that rewrites its title every frame cannot grow this without limit.
     titles: std::collections::HashMap<String, Texture>,
-    /// Application icons for window title bars, by app id. `None` records "looked, found
-    /// nothing", so a window without an icon costs one lookup rather than one per frame.
-    window_icons: std::collections::HashMap<String, Option<Texture>>,
 
     /// One key drawn on its own and raised, for standing it off the face under the pointer.
     ///
@@ -493,9 +519,13 @@ impl Scene {
             glass,
             app_labels: Vec::new(),
             app_glyphs: Vec::new(),
+            app_initials: Vec::new(),
             labels_built_for: usize::MAX,
+            glyphs_waiting_since: None,
+            icons: std::collections::HashMap::new(),
+            icon_loader: crate::icon::Loader::start(),
+            icons_received: 0,
             titles: std::collections::HashMap::new(),
-            window_icons: std::collections::HashMap::new(),
             key_caps: std::collections::HashMap::new(),
             keys: None,
             keys_latches: (false, false, false, false),
@@ -650,7 +680,8 @@ impl Scene {
         );
     }
 
-    /// Rebuild the per-app textures if the app list has changed.
+    /// Rebuild the per-app textures if the app list has changed, or an icon it was waiting for
+    /// has arrived.
     pub fn sync_apps(
         &mut self,
         renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
@@ -658,6 +689,7 @@ impl Scene {
         shell: &Shell,
         px_per_degree: f32,
     ) -> Result<(), String> {
+        self.receive_icons(renderer);
         // Whatever the launcher is currently showing: groups at the top level, applications
         // inside one. Both are bubbles with a name and an icon, so the rest is identical.
         let launcher = shell.launcher();
@@ -680,90 +712,185 @@ impl Scene {
                 spatiand_shell::Level::Groups => 0,
                 spatiand_shell::Level::Apps(_) => 10_000,
             };
-        if fingerprint == self.labels_built_for {
+        let relabel = fingerprint != self.labels_built_for;
+        let icons_came = self
+            .glyphs_waiting_since
+            .is_some_and(|then| then != self.icons_received);
+        if !relabel && !icons_came {
             return Ok(());
         }
 
-        let labels: Vec<TextImage> = entries
-            .iter()
-            .map(|(name, _)| text.render(name, px_per_degree * 0.75, 512, [232, 238, 255, 255]))
-            .collect();
+        let labels: Vec<TextImage> = if relabel {
+            entries
+                .iter()
+                .map(|(name, _)| text.render(name, px_per_degree * 0.75, 512, [232, 238, 255, 255]))
+                .collect()
+        } else {
+            Vec::new()
+        };
         // The icon inside the glass: the system's own, so an app looks the same here as it
         // does on the desktop. Falling back to the initial rather than to a blank or a
         // question mark — plenty of entries name an icon that is not installed, and a letter
-        // is at least identifiable.
+        // is at least identifiable. The initial also stands in while an icon is loading, which
+        // after the first second of a session is almost never.
         let mut resolved = 0usize;
-        let glyphs: Vec<TextImage> = entries
-            .iter()
-            .map(|(name, icon)| {
-                let from_theme = icon
-                    .as_deref()
-                    .and_then(spatiand_platform::resolve_icon)
-                    .and_then(|path| crate::icon::load(&path, ICON_TEXTURE_PX));
-                match from_theme {
-                    Some(image) => {
-                        resolved += 1;
-                        image
-                    }
-                    None => {
-                        let initial = name
-                            .chars()
-                            .next()
-                            .unwrap_or('?')
-                            .to_uppercase()
-                            .to_string();
-                        text.render(&initial, px_per_degree * 4.0, 256, [255, 255, 255, 235])
-                    }
-                }
-            })
-            .collect();
-        log::info!(
-            "launcher icons: {resolved} of {} from the icon theme",
-            entries.len()
-        );
+        let mut waiting = false;
+        let mut glyphs: Vec<Result<Texture, TextImage>> = Vec::with_capacity(entries.len());
+        for (name, icon) in &entries {
+            let state = match icon {
+                Some(icon) => self.icon(crate::icon::Wanted::Named(icon.clone()), ICON_TEXTURE_PX),
+                None => Icon::Missing,
+            };
+            if let Icon::Ready(texture) = state {
+                resolved += 1;
+                glyphs.push(Ok(texture));
+                continue;
+            }
+            waiting |= matches!(state, Icon::Loading);
+            let initial = name
+                .chars()
+                .next()
+                .unwrap_or('?')
+                .to_uppercase()
+                .to_string();
+            glyphs.push(Err(text.render(&initial, px_per_degree * 4.0, 256, [255, 255, 255, 235])));
+        }
+        if relabel {
+            // Everything else the launcher can show, queued behind what is on screen, so that
+            // a group opened later finds its icons already there instead of starting on them.
+            let everything = launcher
+                .groups()
+                .iter()
+                .map(|g| g.icon.to_string())
+                .chain(launcher.apps().iter().filter_map(|a| a.icon.clone()));
+            for icon in everything {
+                self.icon(crate::icon::Wanted::Named(icon), ICON_TEXTURE_PX);
+            }
+        }
+        if !waiting {
+            log::info!(
+                "launcher icons: {resolved} of {} from the icon theme",
+                entries.len()
+            );
+        }
 
-        let old: Vec<u32> = self
-            .app_labels
-            .iter()
-            .chain(self.app_glyphs.iter())
-            .map(|t| t.id)
-            .collect();
-
-        let (new_labels, new_glyphs) = renderer
+        let old_labels: Vec<u32> = if relabel {
+            self.app_labels.iter().map(|t| t.id).collect()
+        } else {
+            Vec::new()
+        };
+        let old_initials = std::mem::take(&mut self.app_initials);
+        let (new_labels, new_glyphs, new_initials) = renderer
             .with_context(|gl| unsafe {
-                for id in &old {
+                // Only what this level owns. The icons are shared with every other level and
+                // with the title bars, and deleting one here would blank it everywhere.
+                for id in old_labels.iter().chain(&old_initials) {
                     gl.DeleteTextures(1, id);
                 }
-                let up = |images: &[TextImage]| -> Vec<Texture> {
-                    images
-                        .iter()
-                        .map(|i| Texture {
-                            id: upload_rgba(gl, i),
-                            aspect: i.width as f32 / i.height.max(1) as f32,
-                        })
-                        .collect()
+                let up = |image: &TextImage| Texture {
+                    id: upload_rgba(gl, image),
+                    aspect: image.width as f32 / image.height.max(1) as f32,
                 };
-                (up(&labels), up(&glyphs))
+                let labels: Vec<Texture> = labels.iter().map(up).collect();
+                let mut initials = Vec::new();
+                let glyphs: Vec<Texture> = glyphs
+                    .iter()
+                    .map(|glyph| match glyph {
+                        Ok(icon) => *icon,
+                        Err(initial) => {
+                            let texture = up(initial);
+                            initials.push(texture.id);
+                            texture
+                        }
+                    })
+                    .collect();
+                (labels, glyphs, initials)
             })
             .map_err(|e| format!("no GL context: {e}"))?;
 
-        self.app_labels = new_labels;
+        if relabel {
+            self.app_labels = new_labels;
+        }
         self.app_glyphs = new_glyphs;
+        self.app_initials = new_initials;
         self.labels_built_for = fingerprint;
+        self.glyphs_waiting_since = waiting.then_some(self.icons_received);
         Ok(())
     }
 
-    /// A texture for a window's application icon, loading it on first sight.
+    /// Where an icon has got to, asking the loader for it the first time it is wanted.
+    fn icon(&mut self, wanted: crate::icon::Wanted, size: u32) -> Icon {
+        let loader = &mut self.icon_loader;
+        *self.icons.entry(wanted).or_insert_with_key(|wanted| {
+            loader.request(wanted.clone(), size);
+            Icon::Loading
+        })
+    }
+
+    /// Upload whatever icons the loader has finished since the last call.
     ///
-    /// Cached by application id and never evicted, unlike the title cache: there are as many
-    /// entries as there are distinct applications ever opened in a session, which is a number
-    /// bounded by patience. Titles need eviction because a clock in a title bar would add one
-    /// per second.
+    /// All of them at once. That is forty at the start of a session, which is the one time
+    /// there are more than a couple, and each is a 256 KB texture.
+    fn receive_icons(&mut self, renderer: &mut smithay::backend::renderer::gles::GlesRenderer) {
+        let finished = self.icon_loader.finished();
+        if finished.is_empty() {
+            return;
+        }
+        let arrived = renderer.with_context(|gl| unsafe {
+            finished
+                .into_iter()
+                .map(|(wanted, image)| {
+                    let icon = match image {
+                        Some(image) => Icon::Ready(Texture {
+                            id: upload_rgba(gl, &image),
+                            aspect: image.width as f32 / image.height.max(1) as f32,
+                        }),
+                        None => Icon::Missing,
+                    };
+                    (wanted, icon)
+                })
+                .collect::<Vec<_>>()
+        });
+        match arrived {
+            Ok(arrived) => {
+                self.icons_received += arrived.len() as u64;
+                self.icons.extend(arrived);
+            }
+            Err(e) => log::warn!("could not upload icons: {e}"),
+        }
+    }
+
+    /// Wait until every icon asked for so far has arrived, or `within` has passed.
     ///
-    /// A `None` answer is cached too, as an absent texture. Plenty of windows have an app id
-    /// that matches no desktop entry — a dialog, something started from a terminal — and
-    /// re-reading the icon theme every frame to fail again would be the expensive way to draw
-    /// nothing.
+    /// For something drawing a single frame that has to have them in it -- the snapshot
+    /// backend. Nothing with a head to track should call this.
+    pub fn wait_for_icons(
+        &mut self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        within: std::time::Duration,
+    ) {
+        let deadline = std::time::Instant::now() + within;
+        while self.icons.values().any(|i| matches!(i, Icon::Loading)) {
+            if std::time::Instant::now() >= deadline {
+                log::warn!("gave up waiting for icons after {within:?}");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            self.receive_icons(renderer);
+        }
+    }
+
+    /// A texture for a window's application icon, once it has loaded.
+    ///
+    /// Asked for on first sight and `None` until it arrives a frame or two later, so the title
+    /// bar goes without one meanwhile. Finding it here instead stopped the frame for up to
+    /// 40 ms the first time each application opened a window -- the lookup can read every
+    /// desktop file on the machine, and then there is the SVG.
+    ///
+    /// Kept for the session and never evicted, unlike the title cache: there are as many as
+    /// there are distinct applications ever opened, a number bounded by patience, where a
+    /// clock in a title bar would add a title a second. Finding none is kept too, so a dialog
+    /// or something started from a terminal is looked for once rather than once a frame.
     pub fn window_icon(
         &mut self,
         renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
@@ -772,26 +899,14 @@ impl Scene {
         if app_id.is_empty() {
             return None;
         }
-        if let Some(cached) = self.window_icons.get(app_id) {
-            return cached.map(|t| TitleTexture {
+        self.receive_icons(renderer);
+        match self.icon(crate::icon::Wanted::App(app_id.to_string()), WINDOW_ICON_PX) {
+            Icon::Ready(t) => Some(TitleTexture {
                 id: t.id,
                 aspect: t.aspect,
-            });
+            }),
+            Icon::Loading | Icon::Missing => None,
         }
-        let loaded = spatiand_platform::icon_for_app(app_id)
-            .and_then(|path| crate::icon::load(&path, WINDOW_ICON_PX))
-            .and_then(|image| {
-                let aspect = image.width as f32 / image.height.max(1) as f32;
-                renderer
-                    .with_context(|gl| unsafe { upload_rgba(gl, &image) })
-                    .ok()
-                    .map(|id| Texture { id, aspect })
-            });
-        self.window_icons.insert(app_id.to_string(), loaded);
-        loaded.map(|t| TitleTexture {
-            id: t.id,
-            aspect: t.aspect,
-        })
     }
 
     /// A texture for a window title, rasterising it on first sight.
