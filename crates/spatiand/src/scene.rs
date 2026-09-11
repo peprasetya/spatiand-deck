@@ -114,8 +114,18 @@ pub struct WindowQuad {
     pub window: smithay::desktop::Window,
     pub surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
     pub texture: u32,
-    /// Surface size in pixels, for the aspect ratio.
+    /// The surface's size, in the surface's own logical pixels -- **not** the texture's.
+    ///
+    /// Everything about the window's shape comes from this: its aspect, the pointer
+    /// coordinates it is sent, and the size a resize asks it for. The two are usually the same
+    /// and were once treated as one, which is fine until a client says its buffer is not its
+    /// size. `wp_viewporter` exists to say exactly that -- a side-by-side window committing a
+    /// buffer twice as wide so that each eye gets its full width -- and so does a buffer scale.
+    /// Reading the texture here drew such a window twice as wide as it asked to be.
     pub pixels: (u32, u32),
+    /// Which part of the texture the surface is, as `(u0, u1, v0, v1)`. The whole of it unless
+    /// the client cropped with a viewport. Sampling reads this; nothing about shape does.
+    pub crop: [f32; 4],
     pub placement: crate::window::Placement,
     pub focused: bool,
     /// Rasterised title, if one has been built for this window.
@@ -171,7 +181,10 @@ pub struct PopupQuad {
     /// Top-left corner in the parent surface's pixels. May be negative: a menu is allowed to
     /// hang off the edge of the window that opened it, and frequently does.
     pub offset: (i32, i32),
+    /// The popup's logical size, like [`WindowQuad::pixels`] and for the same reasons.
     pub pixels: (u32, u32),
+    /// Which part of its texture the popup is. See [`WindowQuad::crop`].
+    pub crop: [f32; 4],
     /// True when the buffer has no alpha channel, so whatever is in those bits is meaningless
     /// and must not be blended against. See `u_opaque` in [`crate::gl`].
     pub opaque: bool,
@@ -1559,7 +1572,9 @@ impl Scene {
                 window.texture,
                 &mvp,
                 [1.0, 1.0, 1.0, window.fade],
-                window.xr.eye_rect(matches!(eye.side, EyeSide::Left)),
+                window
+                    .xr
+                    .eye_rect_within(window.crop, matches!(eye.side, EyeSide::Left)),
             );
 
             // Menus and dropdowns, on the window's own plane and a hair in front of it.
@@ -1607,9 +1622,9 @@ impl Scene {
                 // worse than the transparency costs. Only a buffer with no alpha channel at
                 // all is forced.
                 let draw = if popup.opaque {
-                    QuadPipeline::draw_opaque
+                    QuadPipeline::draw_opaque_rect
                 } else {
-                    QuadPipeline::draw
+                    QuadPipeline::draw_rect
                 };
                 draw(
                     &self.quads,
@@ -1617,7 +1632,7 @@ impl Scene {
                     popup.texture,
                     &(eye.view_projection() * model),
                     [1.0, 1.0, 1.0, window.fade],
-                    (0.0, 1.0),
+                    popup.crop,
                 );
             }
         }
@@ -2601,11 +2616,12 @@ pub fn collect_windows(
         }
         let context = renderer.context_id();
         let imported = with_renderer_surface_state(&surface, |st| {
-            st.texture::<smithay::backend::renderer::gles::GlesTexture>(context)
-                .map(|t| (t.tex_id(), t.width(), t.height()))
+            let texture = st.texture::<smithay::backend::renderer::gles::GlesTexture>(context)?;
+            let (size, crop) = shape_of(st)?;
+            Some((texture.tex_id(), size, crop, (texture.width(), texture.height())))
         })
         .flatten();
-        let Some((texture, width, height)) = imported else {
+        let Some((texture, (width, height), crop, buffer)) = imported else {
             // Mapped but nothing committed yet. Normal for the first frames after a launch --
             // and not normal at all if it never stops, which is why it is said once.
             if note_once(1, &surface) {
@@ -2653,11 +2669,14 @@ pub fn collect_windows(
                 continue;
             }
             let imported = with_renderer_surface_state(&popup_surface, |st| {
-                st.texture::<smithay::backend::renderer::gles::GlesTexture>(renderer.context_id())
-                    .map(|t| (t.tex_id(), t.width(), t.height(), has_no_alpha(t)))
+                let t = st.texture::<smithay::backend::renderer::gles::GlesTexture>(
+                    renderer.context_id(),
+                )?;
+                let ((pw, ph), crop) = shape_of(st)?;
+                Some((t.tex_id(), pw, ph, crop, has_no_alpha(t)))
             })
             .flatten();
-            let Some((texture, pw, ph, opaque)) = imported else {
+            let Some((texture, pw, ph, crop, opaque)) = imported else {
                 if note_once(4, &popup_surface) {
                     // Whether there is a buffer at all separates the two very different
                     // reasons this happens: a client that has not painted yet, and a buffer
@@ -2681,6 +2700,7 @@ pub fn collect_windows(
                 texture,
                 offset: (offset.x, offset.y),
                 pixels: (pw, ph),
+                crop,
                 opaque,
             });
         }
@@ -2705,13 +2725,14 @@ pub fn collect_windows(
                     continue;
                 }
                 let imported = with_renderer_surface_state(&popup_surface, |st| {
-                    st.texture::<smithay::backend::renderer::gles::GlesTexture>(
+                    let t = st.texture::<smithay::backend::renderer::gles::GlesTexture>(
                         renderer.context_id(),
-                    )
-                    .map(|t| (t.tex_id(), t.width(), t.height(), has_no_alpha(t)))
+                    )?;
+                    let ((pw, ph), crop) = shape_of(st)?;
+                    Some((t.tex_id(), pw, ph, crop, has_no_alpha(t)))
                 })
                 .flatten();
-                let Some((texture, pw, ph, opaque)) = imported else {
+                let Some((texture, pw, ph, crop, opaque)) = imported else {
                     if note_once(4, &popup_surface) {
                         log::info!("an X11 menu is open but has committed nothing to draw yet");
                     }
@@ -2732,6 +2753,7 @@ pub fn collect_windows(
                     texture,
                     offset: (loc.x - origin.x, loc.y - origin.y),
                     pixels: (pw, ph),
+                    crop,
                     opaque,
                 });
             }
@@ -2741,11 +2763,21 @@ pub fn collect_windows(
         // fullscreen-shaped application sizes itself from the output it can see, and the
         // difference between the two is exactly the kind of thing that shows up as a window
         // whose contents do not fit it.
+        //
+        // Both sizes when they differ, because that is the viewport (or a buffer scale) doing
+        // its job -- and "the window is the wrong shape" is otherwise a guess about which of
+        // the two numbers was used.
         if note_surface_size(&surface, (width, height)) {
-            log::info!(
-                "window surface is {width}x{height} ({})",
-                state.title_of(&window).unwrap_or_else(|| "untitled".into())
-            );
+            let title = state.title_of(&window).unwrap_or_else(|| "untitled".into());
+            if buffer == (width, height) {
+                log::info!("window surface is {width}x{height} ({title})");
+            } else {
+                log::info!(
+                    "window surface is {width}x{height}, from a {}x{} buffer ({title})",
+                    buffer.0,
+                    buffer.1
+                );
+            }
         }
         let xr = crate::xr::state_of(&surface);
         out.push(WindowQuad {
@@ -2753,6 +2785,7 @@ pub fn collect_windows(
             surface: surface.clone(),
             texture,
             pixels: (width, height),
+            crop,
             placement,
             focused: state.layout.is_focused(&window),
             // Both are filled in by the backend once it has a renderer to build textures with
@@ -2769,6 +2802,28 @@ pub fn collect_windows(
         });
     }
     out
+}
+
+/// A surface's logical size, and which part of its buffer it shows.
+///
+/// `None` until the surface has a buffer. The size is Smithay's `surface_size`, which is the
+/// viewport's destination when there is one and otherwise the buffer's size divided by its
+/// scale; the crop is the viewport's source rectangle, or the whole buffer.
+fn shape_of(
+    st: &smithay::backend::renderer::utils::RendererSurfaceState,
+) -> Option<((u32, u32), [f32; 4])> {
+    let size = st.surface_size()?;
+    let buffer = st.buffer_size()?;
+    let crop = st
+        .view()
+        .map(|v| {
+            crate::xr::crop_rect(
+                (v.src.loc.x, v.src.loc.y, v.src.size.w, v.src.size.h),
+                (buffer.w as f64, buffer.h as f64),
+            )
+        })
+        .unwrap_or([0.0, 1.0, 0.0, 1.0]);
+    Some(((size.w.max(1) as u32, size.h.max(1) as u32), crop))
 }
 
 /// Whether a texture's alpha channel means anything.

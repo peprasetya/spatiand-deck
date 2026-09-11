@@ -418,23 +418,23 @@ impl QuadPipeline {
         self.draw_inner(gl, texture, mvp, tint, rect, 1.0);
     }
 
-    /// The same, ignoring whatever the texture's alpha channel says.
+    /// Draw part of a texture, keeping its alpha.
     ///
-    /// For anything whose buffer has no real alpha -- see `u_opaque`. Separate from `draw`
-    /// rather than an argument to it because it is the rare case and there are two dozen call
-    /// sites that want the ordinary one.
+    /// The rectangle form of [`draw`](Self::draw), for a surface that respects its own
+    /// transparency -- a menu with rounded corners -- and has also been cropped by
+    /// `wp_viewporter`, so it samples less than the whole buffer.
     ///
     /// # Safety
-    /// Must be called with the GL context current, i.e. inside `with_context`.
-    pub unsafe fn draw_opaque(
+    /// Must be called with the GL context current.
+    pub unsafe fn draw_rect(
         &self,
         gl: &ffi::Gles2,
         texture: u32,
         mvp: &Mat4,
         tint: [f32; 4],
-        uv_range: (f32, f32),
+        rect: [f32; 4],
     ) {
-        self.draw_inner(gl, texture, mvp, tint, whole_height(uv_range), 1.0);
+        self.draw_inner(gl, texture, mvp, tint, rect, 0.0);
     }
 
     unsafe fn draw_inner(

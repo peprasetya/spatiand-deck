@@ -36,8 +36,10 @@ no probe at $PROBE. Build it inside the container:
   P=\$(pkg-config --variable=pkgdatadir wayland-protocols)
   wayland-scanner client-header "\$P/stable/xdg-shell/xdg-shell.xml" xdg-shell-client-protocol.h
   wayland-scanner private-code  "\$P/stable/xdg-shell/xdg-shell.xml" xdg-shell-protocol.c
+  wayland-scanner client-header "\$P/stable/viewporter/viewporter.xml" viewporter-client-protocol.h
+  wayland-scanner private-code  "\$P/stable/viewporter/viewporter.xml" viewporter-protocol.c
   cc -o stereo-probe $REPO/tools/stereo-probe.c xdg-shell-protocol.c \\
-     spatiand-xr-v1-protocol.c -I. \$(pkg-config --cflags --libs wayland-client)
+     spatiand-xr-v1-protocol.c viewporter-protocol.c -I. \$(pkg-config --cflags --libs wayland-client)
 EOF
     exit 1
 fi

@@ -33,8 +33,8 @@ use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output,
-    delegate_presentation, delegate_seat, delegate_shm, delegate_xdg_decoration,
-    delegate_xdg_shell,
+    delegate_presentation, delegate_seat, delegate_shm, delegate_viewporter,
+    delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use crate::window::WindowLayout;
@@ -80,6 +80,9 @@ pub struct Spatiand {
     ///
     /// Held only so the global outlives the compositor; nothing is read out of it.
     pub _presentation_state: smithay::wayland::presentation::PresentationState,
+    /// `wp_viewporter`: a surface saying its buffer is not its size. Held for the global's
+    /// lifetime only; the state it produces is read through each surface's renderer state.
+    pub _viewporter_state: smithay::wayland::viewporter::ViewporterState,
     /// Handing us a picture rather than a copy of one — see [`crate::dmabuf`].
     pub dmabuf_state: DmabufState,
     /// `None` until a backend has a renderer whose import formats can be advertised.
@@ -203,6 +206,18 @@ impl Spatiand {
             &dh,
             libc::CLOCK_MONOTONIC as u32,
         );
+        // `wp_viewporter`: a buffer that is not the surface's size.
+        //
+        // Asked for by a player whose window is side by side for its whole life. Each eye
+        // samples half the buffer, so a 1280-wide window gave each eye 640 pixels across a
+        // panel the glasses show at about 1350 -- and there was no way out from the client's
+        // side: a buffer twice as wide was drawn twice as wide, and one twice as tall was
+        // minified two to one and lost its thin strokes. With a destination the client commits
+        // 2560x800 and says it is 1280x800; shape and pointer coordinates come from the second,
+        // sampling from the first, and each eye gets 1280 pixels one to one.
+        //
+        // A client that never binds it is untouched: its surface is its buffer, as before.
+        let viewporter_state = smithay::wayland::viewporter::ViewporterState::new::<Self>(&dh);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -259,6 +274,7 @@ impl Spatiand {
             xdg_decoration_state,
             shm_state,
             _presentation_state: presentation_state,
+            _viewporter_state: viewporter_state,
             dmabuf_state,
             dmabuf_global: None,
             pending_dmabufs: Vec::new(),
@@ -1162,5 +1178,6 @@ delegate_xdg_decoration!(Spatiand);
 delegate_seat!(Spatiand);
 delegate_output!(Spatiand);
 delegate_presentation!(Spatiand);
+delegate_viewporter!(Spatiand);
 delegate_data_device!(Spatiand);
 smithay::delegate_xwayland_shell!(Spatiand);

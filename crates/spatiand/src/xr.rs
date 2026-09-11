@@ -115,6 +115,16 @@ impl XrState {
         }
     }
 
+    /// This eye's part of the surface, inside whatever part of the buffer the surface is.
+    ///
+    /// `crop` is [`crop_rect`] of the surface's viewport, or the whole buffer when it has none.
+    /// The eye layout is about the *surface's* contents, and a viewport's source rectangle is
+    /// what decides which pixels those are -- so a cropped side-by-side surface gives each eye
+    /// half of the crop, not half of the buffer with the crop applied afterwards.
+    pub fn eye_rect_within(&self, crop: [f32; 4], left_eye: bool) -> [f32; 4] {
+        within(crop, self.eye_rect(left_eye))
+    }
+
     /// Whether this surface stays where the wearer put it.
     ///
     /// False only for `head_locked` today, which is the one layer that moves itself. The
@@ -560,6 +570,39 @@ fn refusal(layer: Layer) -> Option<&'static str> {
     }
 }
 
+/// The part of a buffer a `wp_viewport` source rectangle picks out, as texture coordinates.
+///
+/// `src` is `(x, y, width, height)` and `buffer` the buffer's size, both in the buffer's
+/// logical units -- which is what Smithay's `SurfaceView::src` and `buffer_size` are. A
+/// surface with no viewport has a source rectangle that is the whole buffer, and gets
+/// `[0, 1, 0, 1]`, which is what every surface was drawn with before this existed.
+///
+/// Out of range is clamped rather than refused. The protocol makes a source outside the
+/// buffer a client error, and Smithay posts it, so nothing that reaches here should be -- but
+/// sampling outside a texture is undefined and a clamp costs nothing.
+pub fn crop_rect(src: (f64, f64, f64, f64), buffer: (f64, f64)) -> [f32; 4] {
+    let (bw, bh) = (buffer.0.max(1e-9), buffer.1.max(1e-9));
+    let u0 = (src.0 / bw).clamp(0.0, 1.0);
+    let u1 = ((src.0 + src.2) / bw).clamp(0.0, 1.0);
+    let v0 = (src.1 / bh).clamp(0.0, 1.0);
+    let v1 = ((src.1 + src.3) / bh).clamp(0.0, 1.0);
+    [u0 as f32, u1 as f32, v0 as f32, v1 as f32]
+}
+
+/// `inner`, a rectangle given in fractions of `outer`, as fractions of what `outer` is in.
+///
+/// Both are `(u0, u1, v0, v1)`. Composing them is how an eye's half of a surface finds its
+/// place in a buffer that the surface only uses part of.
+pub fn within(outer: [f32; 4], inner: [f32; 4]) -> [f32; 4] {
+    let (du, dv) = (outer[1] - outer[0], outer[3] - outer[2]);
+    [
+        outer[0] + inner[0] * du,
+        outer[0] + inner[1] * du,
+        outer[2] + inner[2] * dv,
+        outer[2] + inner[3] * dv,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,5 +692,57 @@ mod tests {
             };
             assert!(!state.is_window(), "{sky:?} would be drawn as a panel too");
         }
+    }
+
+    #[test]
+    fn no_viewport_is_the_whole_buffer() {
+        assert_eq!(crop_rect((0.0, 0.0, 2560.0, 800.0), (2560.0, 800.0)), [0.0, 1.0, 0.0, 1.0]);
+    }
+
+    /// The case the protocol was wanted for, and the one that has to change nothing at all.
+    ///
+    /// Vibrefy commits 2560x800 with a destination of 1280x800. A destination alone never
+    /// crops, so each eye must still get exactly half of the buffer -- 1280 pixels, one to one.
+    #[test]
+    fn a_destination_alone_leaves_each_eye_its_half_of_the_buffer() {
+        let sbs = XrState {
+            layout: EyeLayout::SideBySide,
+            ..Default::default()
+        };
+        let crop = crop_rect((0.0, 0.0, 2560.0, 800.0), (2560.0, 800.0));
+        assert_eq!(sbs.eye_rect_within(crop, true), [0.0, 0.5, 0.0, 1.0]);
+        assert_eq!(sbs.eye_rect_within(crop, false), [0.5, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_crop_is_the_part_of_the_buffer_it_names() {
+        let r = crop_rect((100.0, 50.0, 200.0, 100.0), (400.0, 200.0));
+        assert_eq!(r, [0.25, 0.75, 0.25, 0.75]);
+    }
+
+    /// Each eye gets half of the crop, not half of the buffer with the crop laid over it.
+    #[test]
+    fn a_cropped_side_by_side_surface_splits_the_crop() {
+        let sbs = XrState {
+            layout: EyeLayout::SideBySide,
+            ..Default::default()
+        };
+        let crop = [0.25, 0.75, 0.0, 1.0];
+        assert_eq!(sbs.eye_rect_within(crop, true), [0.25, 0.5, 0.0, 1.0]);
+        assert_eq!(sbs.eye_rect_within(crop, false), [0.5, 0.75, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_mono_surface_with_no_viewport_is_drawn_exactly_as_before() {
+        let mono = XrState::default();
+        let whole = [0.0, 1.0, 0.0, 1.0];
+        assert_eq!(mono.eye_rect_within(whole, true), mono.eye_rect(true));
+        assert_eq!(mono.eye_rect_within(whole, false), mono.eye_rect(false));
+    }
+
+    #[test]
+    fn a_source_past_the_edge_is_clamped_rather_than_sampled() {
+        let r = crop_rect((-10.0, 0.0, 500.0, 200.0), (400.0, 200.0));
+        assert_eq!(r, [0.0, 1.0, 0.0, 1.0]);
     }
 }

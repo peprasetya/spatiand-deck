@@ -23,6 +23,7 @@ document:
 | Launching, audio routing, per-window sinks, mono→7.1.4 | **Works** |
 | GPU buffers (`zwp_linux_dmabuf_v1` v4+, with the device named) | **Works** |
 | Frame timing (`wp_presentation`) | **Works** |
+| A buffer that is not the surface's size (`wp_viewporter`) | **Works** |
 | Menus, popups, X11 compatibility | **Works** |
 | Environment from image files | **Interim** |
 | `spatiand_xr_v1` — stereo layouts, head-locked, equirect | **Works** |
@@ -232,6 +233,56 @@ the sharpness changes. Send the source as it is; do not unsqueeze it yourself.
 Verified per eye rather than by eye: a probe paints one buffer red-left,
 blue-right, the compositor renders each eye separately, and the centre pixel
 reads (224, 32, 32) and (32, 64, 224) — the probe's own two colours.
+
+### Full resolution in each eye: `wp_viewporter`
+
+**Works.**
+
+The catch in "each eye gets its half" is that the half is half. A 1280×800
+side-by-side window gives each eye **640 pixels** across a panel the glasses
+show about 1350 wide, and every stroke of text in your interface pays for it.
+
+A client cannot fix that alone. Commit 2560×800 and the window is drawn twice
+as wide, because its shape came from the buffer. Commit 2560×1600 and the shape
+is right, but each eye's half is minified two to one vertically and thin
+horizontal lines drop out.
+
+So say the buffer is not your size:
+
+```
+wp_viewport.set_destination(1280, 800)   // what the window is
+wl_surface.attach(<2560x800 buffer>)    // what each eye samples half of
+wl_surface.commit()
+```
+
+The surface is then 1280×800: its shape, the pointer coordinates you are sent,
+and the size a resize asks you for all come from that. Each eye samples its
+half of the *buffer*, which is now 1280 wide, one to one. Draw your interface
+once into each half at full size instead of squashing it.
+
+Measured under the snapshot backend with a probe doing exactly this:
+
+| Buffer | Destination | Window drawn | Left eye | Right eye |
+|---|---|---|---|---|
+| 1280×800 | — | 1.60:1 | red | blue |
+| 2560×800 | — | **3.20:1** | red | blue |
+| 2560×800 | 1280×800 | 1.60:1 | red | blue |
+
+The third row covers the same pixels as the first, and a click at the centre of
+it arrives at (640, 400) — surface coordinates, not buffer ones.
+
+  * **A destination is all you need.** `set_source` (cropping) works too, and a
+    cropped side-by-side surface gives each eye half of the *crop* — the eye
+    layout describes the surface's contents, and the source rectangle is what
+    decides which pixels those are.
+  * **Buffer scale counts the same way.** A surface's size is its buffer's
+    divided by `wl_surface.set_buffer_scale`, as the core protocol says; that
+    was not honoured before this either.
+  * **Nothing changes if you do not bind it.** A surface with no viewport and
+    scale 1 is exactly its buffer, as it always was.
+  * The compositor logs both numbers when they differ —
+    `window surface is 1280x800, from a 2560x800 buffer` — which is the first
+    thing to check if your window comes out the wrong shape.
 
 ### Layer
 
@@ -516,6 +567,17 @@ solved.
     640 display pixels across it. Interfaces designed for a monitor at arm's
     length are unreadable here; ones designed for a television across a room are
     about right.
+  * **A window drawn much smaller than its buffer loses thin strokes.** Window
+    textures are sampled linearly with no mipmaps, which is fine to about two to
+    one and past that picks some one-pixel lines and skips others. A resize by
+    an edge never gets there, because you are asked for a new size. The
+    two-thumb gesture does -- it scales the window without a configure, on
+    purpose, as a zoom -- and so does pushing a window far away. Not fixed, and
+    deliberately: mipmapping an imported buffer means copying it into a texture
+    that owns its levels, every frame it changes, for every window. Viewporter
+    removed the case that forced it; if the zoom case turns out to matter in
+    practice, that copy is the fix, done only while a window is actually
+    minified.
   * **The session may be running with no head tracking at all** (glasses
     unplugged, calibration never run). Nothing about your application should
     depend on the wearer being able to turn their head to find something.

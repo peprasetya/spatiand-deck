@@ -9,8 +9,10 @@
 // rectangle for the left eye and a blue one for the right. Anything else -- both red, both
 // blue, or one window showing both halves squashed side by side -- is the bug.
 //
-//   cc -o stereo-probe stereo-probe.c xdg-shell-protocol.c spatiand-xr-v1-protocol.c \
-//      $(pkg-config --cflags --libs wayland-client)
+//   cc -o stereo-probe stereo-probe.c xdg-shell-protocol.c spatiand-xr-v1-protocol.c
+//      viewporter-protocol.c $(pkg-config --cflags --libs wayland-client)
+//   (one command; the line is broken here only because a backslash ending a // comment
+//   continues the comment, which the compiler warns about)
 //   SPATIAND_BACKEND=snapshot SPATIAND_CLIENT=./stereo-probe SPATIAND_SNAPSHOT_EYE=left ...
 //
 // SPATIAND_STEREO=tb makes it top-and-bottom instead, and SPATIAND_STEREO=swap swaps the eyes,
@@ -28,6 +30,13 @@
 //
 // SPATIAND_IDLE_MS=800 asks for that idle threshold instead of the compositor's default.
 //
+// SPATIAND_VIEWPORT=1280x800 says, through wp_viewporter, that the surface is that size
+// whatever the buffer is. With SPATIAND_PROBE_SIZE=2560x800 and SPATIAND_STEREO unset (side by
+// side) it is exactly what a media player does to give each eye its full width: a buffer
+// twice as wide, a window the ordinary shape. The compositor should draw a 1.6:1 window, not a
+// 3.2:1 one, and each eye should still get its own half -- red and blue -- of the buffer.
+// Built with viewporter-protocol.c alongside the others.
+//
 // SPATIAND_IDLE_FADE=1 asks the compositor to fade this surface out when the wearer stops
 // paying attention to it, which is what a transport bar over a film wants. Paired with the
 // harness's SPATIAND_IDLE_SECONDS it is the whole of that feature, end to end: the client says
@@ -42,6 +51,7 @@
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
 #include "spatiand-xr-v1-client-protocol.h"
+#include "viewporter-client-protocol.h"
 
 // Buffer size. `SPATIAND_PROBE_SIZE=1280x264` makes it the shape a media player's transport
 // bar takes -- same width as its window, a fifth of the height -- which is the case where a
@@ -62,6 +72,7 @@ static struct wl_compositor *compositor;
 static struct wl_shm *shm;
 static struct xdg_wm_base *wm_base;
 static struct spatiand_xr_v1 *xr;
+static struct wp_viewporter *viewporter;
 static struct wl_surface *surface;
 static struct xdg_surface *xdg_surface_;
 static struct spatiand_xr_surface_v1 *xr_surface;
@@ -177,6 +188,20 @@ static void surface_configure(void *d, struct xdg_surface *s, uint32_t serial) {
         fprintf(stderr, "probe: no spatiand_xr_v1 -- the compositor does not offer it\n");
     }
 
+    // A destination, if one was asked for. Double-buffered like everything else, so it lands
+    // in the same commit as the buffer it describes.
+    const char *dest = getenv("SPATIAND_VIEWPORT");
+    int dw, dh;
+    if (dest && sscanf(dest, "%dx%d", &dw, &dh) == 2 && dw > 0 && dh > 0) {
+        if (viewporter) {
+            struct wp_viewport *vp = wp_viewporter_get_viewport(viewporter, surface);
+            wp_viewport_set_destination(vp, dw, dh);
+            fprintf(stderr, "probe: %dx%d buffer, %dx%d surface\n", W, H, dw, dh);
+        } else {
+            fprintf(stderr, "probe: no wp_viewporter -- the compositor does not offer it\n");
+        }
+    }
+
     // The buffer and the layout in one commit, which is the point of the layout being
     // double-buffered: there is never a frame of one without the other.
     struct wl_callback *cb = wl_surface_frame(surface);
@@ -201,6 +226,8 @@ static void global(void *d, struct wl_registry *r, uint32_t name, const char *if
         uint32_t want = spatiand_xr_v1_interface.version;
         xr = wl_registry_bind(r, name, &spatiand_xr_v1_interface, ver < want ? ver : want);
     }
+    else if (!strcmp(iface, "wp_viewporter"))
+        viewporter = wl_registry_bind(r, name, &wp_viewporter_interface, 1);
     else if (!strcmp(iface, "xdg_wm_base")) {
         wm_base = wl_registry_bind(r, name, &xdg_wm_base_interface, 1);
         xdg_wm_base_add_listener(wm_base, &wm_base_listener, NULL);
