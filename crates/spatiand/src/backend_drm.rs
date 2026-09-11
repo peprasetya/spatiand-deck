@@ -2454,9 +2454,8 @@ pub fn run(
             if screenshot {
                 // Read back the frame we just drew rather than re-rendering it, so what lands
                 // in the file is exactly what was on the glass -- including both eyes.
-                match capture(&mut renderer, target_fbo, w as u32, h as u32) {
-                    Ok(path) => log::info!("screenshot saved to {}", path.display()),
-                    Err(e) => log::warn!("could not save a screenshot: {e}"),
+                if let Err(e) = capture(&mut renderer, target_fbo, w as u32, h as u32) {
+                    log::warn!("could not save a screenshot: {e}");
                 }
             }
 
@@ -3489,12 +3488,17 @@ pub fn settle_axes(
 /// point of it is to be found: with the world only visible inside the glasses, a photograph is
 /// impossible and describing a layout bug is slow and lossy. A file with a timestamp is the
 /// difference between "the text is off screen" and being able to see which text and by how far.
+///
+/// Only the readback is done here, because it needs the GL context. Encoding the PNG and
+/// writing it out is 65-70 ms for the glasses' 3840x1080, measured on the Deck, and done here
+/// it froze the world to the head for five frames at the moment the picture was taken -- so
+/// it goes to a thread of its own, which says where the file went when it is written.
 fn capture(
     renderer: &mut GlesRenderer,
     fbo: u32,
     width: u32,
     height: u32,
-) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut pixels = vec![0u8; (width * height * 4) as usize];
     renderer.with_context(|gl| unsafe {
         gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
@@ -3512,15 +3516,28 @@ fn capture(
 
     // The scene texture already holds the image flipped (see the note on flip_y), so reading
     // it back bottom-row-first flips it a second time and lands the right way up.
-    let dir = screenshot_directory();
-    std::fs::create_dir_all(&dir)?;
+    // Stamped now rather than when the thread gets to it, so two pictures taken in quick
+    // succession are named in the order they were taken.
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let path = dir.join(format!("spatiand-{stamp}.png"));
-    image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8)?;
-    Ok(path)
+    std::thread::Builder::new()
+        .name("screenshot".into())
+        .spawn(move || {
+            let save = || -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+                let dir = screenshot_directory();
+                std::fs::create_dir_all(&dir)?;
+                let path = dir.join(format!("spatiand-{stamp}.png"));
+                image::save_buffer(&path, &pixels, width, height, image::ColorType::Rgba8)?;
+                Ok(path)
+            };
+            match save() {
+                Ok(path) => log::info!("screenshot saved to {}", path.display()),
+                Err(e) => log::warn!("could not save a screenshot: {e}"),
+            }
+        })?;
+    Ok(())
 }
 
 /// Where screenshots go: `XDG_PICTURES_DIR/Screenshots` if the user has one, else the
