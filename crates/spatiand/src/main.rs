@@ -39,6 +39,7 @@ mod sidecar;
 mod state;
 mod status;
 mod system;
+mod volume_keys;
 mod waiting;
 mod window;
 mod xr;

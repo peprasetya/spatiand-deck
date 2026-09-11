@@ -299,6 +299,11 @@ pub fn run(
     };
     let mut audio = crate::sidecar::Audio::default();
     let mut slow_status = std::time::Instant::now();
+    // A volume button being held down, so that holding it keeps going -- and the thread that
+    // actually changes the volume, because asking the audio server takes 27 ms a call and the
+    // frame loop has 14 to spend. The sidecar's slider goes through it too.
+    let mut volume_repeat = crate::volume_keys::Repeat::default();
+    let mixer = crate::volume_keys::Mixer::start();
 
     // The shell — what is on screen and what a button means. Deliberately built once, outside
     // the output loop: unplugging the glasses must not close your launcher.
@@ -1560,7 +1565,9 @@ pub fn run(
 
             // A keyboard and a mouse, if there are any.
             //
-            // Keys go straight to whatever has focus, exactly as the on-screen keyboard's do.
+            // Keys go straight to whatever has focus, exactly as the on-screen keyboard's do --
+            // except the volume keys, which are the machine's and not the application's. The
+            // Deck's own rocker is one of those: to libinput it is a keyboard with two keys.
             // Mouse buttons and the wheel are held for the pointer section below, which is
             // where every other cursor is dealt with and where the ray has been built.
             let mut mouse_events = Vec::new();
@@ -1568,12 +1575,28 @@ pub fn run(
                 for event in d.poll() {
                     match event {
                         crate::desk::DeskEvent::Key { code, pressed } => {
+                            if let Some(key) = crate::volume_keys::Volume::of(code) {
+                                if pressed {
+                                    volume_repeat.press(key, std::time::Instant::now());
+                                    mixer.send(crate::volume_keys::Change::Key(key));
+                                } else {
+                                    volume_repeat.release(key);
+                                }
+                                continue;
+                            }
                             let now = started.elapsed().as_millis() as u32;
                             send_key_state(&mut runtime.state, code, pressed, now);
                         }
                         other => mouse_events.push(other),
                     }
                 }
+            }
+            if let Some(key) = volume_repeat.due(std::time::Instant::now()) {
+                mixer.send(crate::volume_keys::Change::Key(key));
+            }
+            // Whatever the worker last set, so the sidecar's slider follows the buttons.
+            if let Some(level) = mixer.take_level() {
+                levels.volume = Some(level);
             }
 
             // Windows that have come and gone since the last frame. Collected by the Wayland
@@ -2508,7 +2531,10 @@ pub fn run(
                             match knob {
                                 crate::sidecar::Knob::Volume => {
                                     levels.volume = Some(value);
-                                    crate::system::set_volume(value);
+                                    // Through the worker, like the buttons: a slider drag
+                                    // sends a value per touch sample, and each one used to
+                                    // stop the renderer for a call to the audio server.
+                                    mixer.send(crate::volume_keys::Change::Set(value));
                                 }
                                 crate::sidecar::Knob::Screen => {
                                     levels.screen = Some(value);

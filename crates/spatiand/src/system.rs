@@ -250,6 +250,27 @@ pub fn set_volume(level: f32) {
     }
 }
 
+/// Mute or unmute the output.
+pub fn set_muted(muted: bool) {
+    wpctl_mute(if muted { "1" } else { "0" });
+}
+
+/// Flip the output's mute, whichever way it is.
+pub fn toggle_mute() {
+    wpctl_mute("toggle");
+}
+
+fn wpctl_mute(how: &str) {
+    let result = std::process::Command::new("wpctl")
+        .args(["set-mute", "@DEFAULT_AUDIO_SINK@", how])
+        .status();
+    match result {
+        Ok(status) if !status.success() => log::warn!("wpctl set-mute {how} failed: {status}"),
+        Err(e) => log::warn!("could not run wpctl: {e}"),
+        _ => {}
+    }
+}
+
 /// `wpctl` prints `Volume: 0.45` or `Volume: 0.45 [MUTED]`.
 pub fn parse_volume(text: &str) -> Option<f32> {
     let value = text.split_whitespace().nth(1)?;
