@@ -1780,16 +1780,10 @@ pub fn run(
                                 // so the world-space size changes now and the pixels catch up
                                 // over the next frame or two. Waiting for the commit instead
                                 // would make the frame lag the pointer visibly.
-                                if let Some(toplevel) = window.toplevel() {
-                                    let size = smithay::utils::Size::from((
-                                        out.pixels.0 as i32,
-                                        out.pixels.1 as i32,
-                                    ));
-                                    if toplevel.current_state().size != Some(size) {
-                                        toplevel.with_pending_state(|s| s.size = Some(size));
-                                        toplevel.send_pending_configure();
-                                    }
-                                }
+                                runtime.state.request_size(
+                                    window,
+                                    (out.pixels.0 as i32, out.pixels.1 as i32).into(),
+                                );
                             }
                         }
                     }

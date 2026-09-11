@@ -54,6 +54,10 @@
 //! only photograph an application sitting there with no menu open, which proves nothing.
 //! `tools/popup-probe.c` is the matching minimal client.
 //!
+//! `SPATIAND_CLOSE=1` then does what the title bar's close button does, and says whether the
+//! window went. The button did nothing for X11 windows and only a headset could show it; with
+//! an X11 client this is that same check, over SSH.
+//!
 //! `SPATIAND_CLIENT` goes further and launches a real Wayland application into the snapshot:
 //! a full compositor runs, the client connects, commits a buffer, and the frame is rendered
 //! with that window in it. That is the only way to answer "what does an app actually look like
@@ -280,6 +284,9 @@ pub fn run(
             Ok(pid) => {
                 let deadline =
                     std::time::Instant::now() + std::time::Duration::from_secs_f32(seconds);
+                // Whether it ever drew, which is not the same as whether it is drawing now: a
+                // window that was asked to close and did has no window left to count.
+                let mut mapped = false;
                 while std::time::Instant::now() < deadline {
                     // Pumping the display is what lets the client bind globals, get its
                     // configure, and commit. Without this it blocks on the first roundtrip and
@@ -318,9 +325,18 @@ pub fn run(
                         windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
                         // A click, if one was asked for, and then time to answer it. A menu
                         // is two round trips away: the client has to be told, create the
-                        // popup, hear its configure, and commit a buffer.
-                        for at in requested_clicks() {
-                            click_on_the_window(&mut runtime.state, &windows, at);
+                        // popup, hear its configure, and commit a buffer. A close is the same
+                        // shape -- asked, then answered in the client's own time -- so it
+                        // gets the same wait rather than a pump of its own.
+                        let steps = requested_steps();
+                        let asked_to_close = steps.iter().any(|s| matches!(s, Step::Close));
+                        for step in steps {
+                            match step {
+                                Step::Click(u, v) => {
+                                    click_on_the_window(&mut runtime.state, &windows, (u, v))
+                                }
+                                Step::Close => close_the_window(&runtime.state, &windows),
+                            }
                             let answered =
                                 std::time::Instant::now() + std::time::Duration::from_secs(3);
                             while std::time::Instant::now() < answered {
@@ -342,10 +358,20 @@ pub fn run(
                             }
                             windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
                         }
+                        // Said either way, because a window still standing looks exactly like
+                        // one that was never asked -- and the answer is the point of asking.
+                        if asked_to_close {
+                            if windows.is_empty() {
+                                log::info!("the window closed when asked to");
+                            } else {
+                                log::warn!("asked the window to close; it is still open");
+                            }
+                        }
+                        mapped = true;
                         break;
                     }
                 }
-                if windows.is_empty() {
+                if !mapped {
                     log::warn!("{command:?} (pid {pid}) never committed a buffer");
                     log::warn!("  it may need a wayland flag, or it may have exited immediately");
                 }
@@ -802,6 +828,43 @@ fn requested_clicks() -> Vec<(f64, f64)> {
             Some((u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)))
         })
         .collect()
+}
+
+/// One scripted thing to do to the client's window, each followed by time for it to answer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Step {
+    /// `SPATIAND_CLICK`: a fraction across the window. See [`requested_clicks`].
+    Click(f64, f64),
+    /// `SPATIAND_CLOSE=1`: what the title bar's close button does. Always last, because
+    /// nothing after it has a window to happen to.
+    Close,
+}
+
+/// The clicks asked for, then the close if one was.
+fn requested_steps() -> Vec<Step> {
+    let mut steps: Vec<Step> = requested_clicks()
+        .into_iter()
+        .map(|(u, v)| Step::Click(u, v))
+        .collect();
+    if std::env::var("SPATIAND_CLOSE").as_deref() == Ok("1") {
+        steps.push(Step::Close);
+    }
+    steps
+}
+
+/// Do what the close button does to the first window, without a title bar or a finger.
+///
+/// Through [`Spatiand::close_window`], which is all the button does once its hit test has
+/// passed -- and the hit test is geometry, already tested as geometry in `pointer`. What could
+/// not be tested was the half after it: whether the application hears the request at all. For
+/// an X11 window it did not, and nothing short of a headset could show that.
+fn close_the_window(state: &Spatiand, windows: &[crate::scene::WindowQuad]) {
+    let Some(window) = windows.first() else {
+        log::warn!("asked to close a window with no window to close");
+        return;
+    };
+    log::info!("asking {:?} to close", state.display_title(&window.window));
+    state.close_window(&window.window);
 }
 
 /// Press and release a mouse button on the first window.

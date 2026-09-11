@@ -390,9 +390,50 @@ impl Spatiand {
     /// A request, not an order — that is the whole protocol. An application with unsaved work
     /// puts up its own dialog and stays, which is right, and is why this cannot report whether
     /// anything happened.
+    ///
+    /// Both protocols, and the X11 half was missing. An X11 window has no xdg toplevel, so
+    /// asking only for one found nothing and sent nothing: the close button on VLC -- which
+    /// only reaches us through XWayland -- did nothing at all, and the only way out was the
+    /// application's own menu. X11's request is `WM_DELETE_WINDOW`, which is the same polite
+    /// question; smithay destroys the window outright for the rare client that never said it
+    /// understands one, which is what every X window manager does.
     pub fn close_window(&self, window: &smithay::desktop::Window) {
-        if let Some(toplevel) = window.toplevel() {
+        if let Some(x11) = window.x11_surface() {
+            if let Err(e) = x11.close() {
+                log::warn!("could not ask an X11 window to close: {e}");
+            }
+        } else if let Some(toplevel) = window.toplevel() {
             toplevel.send_close();
+        }
+    }
+
+    /// Ask a window for a buffer of this many pixels.
+    ///
+    /// Only when the size is new: a resize drag asks every frame, and a configure the client
+    /// has already been sent is one more thing for it to answer for no reason.
+    ///
+    /// Both protocols, for the same reason as [`Self::close_window`]. Asking only an xdg
+    /// toplevel meant dragging an X11 window's corner grew its frame and left the application
+    /// drawing at its old size inside it -- stretched, because the quad is sized by the
+    /// wearer and the pixels by the client. X11 is told its size directly, at the origin like
+    /// every other X11 configure here, because there is no screen for a position to be on.
+    pub fn request_size(
+        &self,
+        window: &smithay::desktop::Window,
+        size: smithay::utils::Size<i32, Logical>,
+    ) {
+        if let Some(x11) = window.x11_surface() {
+            if x11.geometry().size != size {
+                if let Err(e) = x11.configure(smithay::utils::Rectangle::new((0, 0).into(), size))
+                {
+                    log::warn!("could not resize an X11 window: {e}");
+                }
+            }
+        } else if let Some(toplevel) = window.toplevel() {
+            if toplevel.current_state().size != Some(size) {
+                toplevel.with_pending_state(|s| s.size = Some(size));
+                toplevel.send_pending_configure();
+            }
         }
     }
 
@@ -400,10 +441,28 @@ impl Spatiand {
     ///
     /// Takes the window rather than a position, because raising reorders `Space::elements()`
     /// and any index taken before the raise refers to something else afterwards.
+    ///
+    /// An X11 window's keyboard focus is the surface XWayland draws it into. Looking only for
+    /// an xdg toplevel meant an X11 window could be clicked, raised and highlighted and still
+    /// never be given the keyboard, which stayed with whatever Wayland window had it last --
+    /// and XWayland is sent no keys at all while none of its surfaces has focus. It is also
+    /// raised in X's own stacking order, which is separate from ours and which nothing else
+    /// here touches: every X11 window is configured at the same X origin, so they all overlap
+    /// as far as X is concerned, and its idea of which is on top should be ours.
     pub fn focus_window(&mut self, window: &smithay::desktop::Window) {
         self.layout.focus(window);
         self.space.raise_element(window, true);
-        if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
+        let surface = if let Some(x11) = window.x11_surface() {
+            if let Some(wm) = self.xwm.as_mut() {
+                if let Err(e) = wm.raise_window(x11) {
+                    log::warn!("could not raise an X11 window: {e}");
+                }
+            }
+            x11.wl_surface()
+        } else {
+            window.toplevel().map(|t| t.wl_surface().clone())
+        };
+        if let Some(surface) = surface {
             if let Some(keyboard) = self.seat.get_keyboard() {
                 keyboard.set_focus(
                     self,
