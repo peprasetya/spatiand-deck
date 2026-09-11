@@ -758,6 +758,12 @@ pub fn run(
         // slider then said "dim" while the glasses were plainly bright, and the first thing a
         // drag did was dim them to match the handle. This is the reading that agrees with what
         // is in front of the wearer's eyes.
+        //
+        // It may still be early -- when the panel re-lights is the glasses' business, and the
+        // stereo mode appearing on the connector does not say it has happened. That is covered
+        // from the other side: the glasses' MCU thread reads the brightness again shortly after
+        // the switch and every couple of seconds after that, and any change arrives in the
+        // frame loop as `HmdEvent::Brightness`.
         if let Some(x) = hmd.as_mut() {
             match x.brightness() {
                 Ok(level) => {
@@ -1311,6 +1317,20 @@ pub fn run(
                             hmd = None;
                             break;
                         }
+                        // What the glasses are showing now, read by their MCU thread after a
+                        // temple button, after the panel re-lit for a mode switch, and every
+                        // couple of seconds otherwise. Never in the middle of a slider drag,
+                        // so this cannot pull the handle away from a finger.
+                        HmdEvent::Brightness(level) => {
+                            if levels.glasses != Some(level) {
+                                log::info!("glasses brightness now {:.0}%", level * 100.0);
+                            }
+                            levels.glasses = Some(level);
+                        }
+                        // The glasses would not take a brightness the slider sent. The row
+                        // goes, as it does for glasses that will not report one: a control
+                        // that visibly does nothing is worse than none.
+                        HmdEvent::BrightnessFailed => levels.glasses = None,
                         _ => {}
                     }
                 }
@@ -2557,13 +2577,18 @@ pub fn run(
                                 }
                                 crate::sidecar::Knob::Glasses => {
                                     // Show the finger's position straight away and correct it
-                                    // to whatever step the hardware settled on. The glasses
+                                    // to whatever step the hardware settles on. The glasses
                                     // have eight of them, so a drag that does not snap back
                                     // would let the handle sit between two settings that do
                                     // not exist.
+                                    //
+                                    // Asked for, not waited for: the glasses' MCU thread sends
+                                    // it. Waiting here for each ack -- up to 1.5 s -- stopped
+                                    // the world once per touch sample of the drag. A refusal
+                                    // comes back as `BrightnessFailed`, with the IMU samples.
                                     levels.glasses = Some(value);
                                     if let Some(h) = hmd.as_mut() {
-                                        match h.set_brightness(value) {
+                                        match h.request_brightness(value) {
                                             Ok(reached) => levels.glasses = Some(reached),
                                             Err(e) => {
                                                 log::warn!("could not set glasses brightness: {e}");

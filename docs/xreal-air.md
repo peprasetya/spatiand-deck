@@ -418,6 +418,24 @@ The mode is at **offset 23**, with `0x00` at offset 22 meaning success. Reading 
 the value - the obvious choice given §6's command layout - reports `mode 0x00` for every
 read, which looks like the device not answering rather than a layout mistake.
 
+**[verified]** `R_BRIGHTNESS` (`0x03`) is laid out the same way, and the same mistake was
+made with it: the driver read offset 22, got the status, and reported step 0, the dimmest,
+for every read. Captured on an Air with the panel at step 5, then after writing step 2 with
+`W_BRIGHTNESS` (`0x04`) and step 5 again:
+
+```
+R_BRIGHTNESS   len=22   payload 00 05 00 00 00 00   status 0, step 5    ack in  9 ms
+W_BRIGHTNESS 2 len=18   payload 00                  status 0            ack in 22 ms
+R_BRIGHTNESS   len=22   payload 00 02 00 00 00 00   status 0, step 2    ack in  9 ms
+W_BRIGHTNESS 5 len=18   payload 00                  status 0            ack in 22 ms
+R_BRIGHTNESS   len=22   payload 00 05 00 00 00 00   status 0, step 5    ack in  9 ms
+```
+
+The write takes a one-byte step and answers a one-byte status. Both were done on the MCU
+interface alone, alongside a running session that held the IMU, without disturbing it:
+hidraw gives every open file its own copy of the input reports, so a second reader of the
+MCU does not steal the first one's acks.
+
 ### Heartbeat
 
 The driver sends `P_HEARTBEAT` periodically. Whether the glasses revert or sleep without

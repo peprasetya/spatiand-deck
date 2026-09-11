@@ -12,6 +12,11 @@
 //!    failure. (Observed in the wild: `0x6C18`, which is not in the documented event list.)
 //! 3. **The magnetometer is offset binary with big-endian scalers**, alone among the three
 //!    sensor groups. XOR `0x8000`, then reinterpret those bits as signed.
+//!
+//! The MCU is spoken to from a thread of its own, which is the only thing that reads it. See
+//! [`mcu`] for why.
+
+mod mcu;
 
 use std::time::Duration;
 
@@ -29,17 +34,15 @@ const MSG_W_BRIGHTNESS: u16 = 0x0004;
 
 /// How many brightness steps the panel has, counting from zero.
 ///
-/// `docs/xreal-air.md` marks the brightness messages **[driver]** — read out of the vendor
-/// driver's headers rather than seen on a wire — so unlike the display modes this has not been
-/// confirmed against hardware. Everything here treats a refusal as ordinary: a headset that
-/// does not answer simply reports no brightness, and the sidecar leaves the row out rather
-/// than drawing a control that does nothing.
-///
-/// It belongs in `devices.toml` beside the display modes once someone has actually watched the
-/// glasses step through it; putting an unmeasured number in the table would give four rows the
-/// same authority as the one fact in there that was measured.
+/// Eight is what XREAL's own SDK reports (`GetBrightnessLevelNumber`, `docs/xreal-air.md`).
+/// The messages themselves have been seen on the wire on an Air: a read answered step 5, a
+/// write of step 2 read back as 2, and 5 again after writing it back. Whether every one of the
+/// eight is distinct on the panel has not been watched step by step, which is why this is not
+/// in `devices.toml` beside the display modes yet. Everything here treats a refusal as
+/// ordinary: a headset that does not answer simply reports no brightness, and the sidecar
+/// leaves the row out rather than drawing a control that does nothing.
 const BRIGHTNESS_LEVELS: u8 = 8;
-/// The dimmest step [`XrealAir::set_brightness`] will select.
+/// The dimmest step [`XrealGlasses::request_brightness`] will select.
 ///
 /// Not zero, and that is the entire reason this exists. Step 0 turns the panel off, and the
 /// control you would reach for to turn it back on is drawn *inside the glasses* — so the one
@@ -73,7 +76,7 @@ pub struct XrealGlasses {
     spec: &'static DeviceSpec,
     info: HmdInfo,
     imu: HidDevice,
-    mcu: HidDevice,
+    mcu: mcu::Mcu,
     mode: DisplayMode,
     /// Scratch buffer sized from the device spec, reused every poll so the ~1 kHz sample path
     /// does no allocation.
@@ -124,6 +127,7 @@ impl XrealGlasses {
             imu.path().display(),
             mcu.path().display()
         );
+        let mcu = mcu::Mcu::start(mcu, mcu::TIMING)?;
 
         let info = HmdInfo {
             name: spec.name.clone(),
@@ -183,48 +187,46 @@ impl XrealGlasses {
         (step.min(BRIGHTNESS_LEVELS - 1) as f32 / top).clamp(0.0, 1.0)
     }
 
+    /// The step in the payload of a reply to `R_BRIGHTNESS`.
+    ///
+    /// It comes after a status byte, as in every MCU reply -- `docs/xreal-air.md`, "Reply
+    /// layout is not command layout". Reading the first byte as the value, which is what the
+    /// command layout suggests, read the status instead: `0x00` for success, so step 0, the
+    /// dimmest, for every read. That is why the sidecar's slider sat at the bottom whatever
+    /// the glasses were showing.
+    fn brightness_in(payload: &[u8]) -> Result<u8> {
+        match payload {
+            [0, step, ..] => Ok(*step),
+            [status, ..] if *status != 0 => Err(HmdError::Protocol(format!(
+                "brightness read refused with status {status:#04x}"
+            ))),
+            _ => Err(HmdError::Protocol("brightness reply had no value".into())),
+        }
+    }
+
     /// The nearest raw step to a 0..1 request. May be 0; see [`DIMMEST_STEP`] for why
-    /// [`XrealAir::set_brightness`] will not send that.
+    /// [`XrealGlasses::request_brightness`] will not send that.
     fn unit_to_brightness(level: f32) -> u8 {
         let top = (BRIGHTNESS_LEVELS - 1).max(1) as f32;
         (level.clamp(0.0, 1.0) * top).round() as u8
     }
 
-    /// Send an MCU command and wait for the device to echo its msgid back.
+    /// Send an MCU command and wait for the device to echo its msgid back, returning the
+    /// reply's payload.
     ///
-    /// Async events arriving in the meantime are handled rather than dropped, so a button
-    /// press that happens to coincide with a mode change is not lost.
-    fn mcu_command(
-        &mut self,
-        msgid: u16,
-        data: &[u8],
-        what: &'static str,
-        pending: &mut Vec<HmdEvent>,
-    ) -> Result<Vec<u8>> {
-        self.mcu.write_report(&Self::mcu_packet(msgid, data))?;
+    /// Waits for as long as the device takes, up to `mcu::TIMING.ack`, so nothing on the
+    /// render thread should call it. Events that arrive meanwhile are kept for [`Hmd::poll`].
+    fn mcu_command(&mut self, msgid: u16, data: &[u8], what: &'static str) -> Result<Vec<u8>> {
+        self.mcu.exchange(msgid, data, what)
+    }
 
-        let deadline = std::time::Instant::now() + Duration::from_millis(1500);
-        let mut buf = [0u8; 64];
-        while std::time::Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let Some(n) = self.mcu.read_report(&mut buf, remaining)? else {
-                break;
-            };
-            if n <= MCU_MSGID_OFFSET + 1 {
-                continue;
-            }
-            let echoed = u16::from_le_bytes([buf[MCU_MSGID_OFFSET], buf[MCU_MSGID_OFFSET + 1]]);
-            if echoed == msgid {
-                // The payload of the reply, which a read command needs and a write ignores.
-                return Ok(buf.get(MCU_DATA_OFFSET..n).unwrap_or(&[]).to_vec());
-            }
-            if let Some(evt) = Self::decode_async(echoed, &buf[..n]) {
-                pending.push(evt);
-            } else {
-                log::trace!("MCU async push {echoed:#06x} while awaiting {what}");
-            }
+    /// The next event from the MCU thread, noting a mode change on the way past.
+    fn mcu_event(&mut self) -> Option<HmdEvent> {
+        let event = self.mcu.next_event()?;
+        if let HmdEvent::DisplayModeChanged(mode) = event {
+            self.mode = mode;
         }
-        Err(HmdError::NoAck { what, msgid })
+        Some(event)
     }
 
     fn decode_async(msgid: u16, packet: &[u8]) -> Option<HmdEvent> {
@@ -337,30 +339,23 @@ impl Hmd for XrealGlasses {
     }
 
     fn set_display_mode(&mut self, mode: DisplayMode) -> Result<DisplayMode> {
-        let mut pending = Vec::new();
         let (primary, fallback) = match mode {
             DisplayMode::Mono => (self.spec.mode_mono, None),
             DisplayMode::Stereo => (self.spec.mode_stereo, Some(self.spec.mode_stereo_fallback)),
         };
 
-        let mut err =
-            match self.mcu_command(MSG_W_DISP_MODE, &[primary], "display mode", &mut pending) {
-                Ok(_) => {
-                    self.mode = mode;
-                    return Ok(mode);
-                }
-                Err(e) => e,
-            };
+        let mut err = match self.mcu_command(MSG_W_DISP_MODE, &[primary], "display mode") {
+            Ok(_) => {
+                self.mode = mode;
+                return Ok(mode);
+            }
+            Err(e) => e,
+        };
         // The preferred stereo mode is the higher refresh rate. If the link cannot carry it,
         // a lower one is much better than staying flat, so try it before giving up.
         if let Some(alt) = fallback {
             log::warn!("display mode {primary:#04x} not acknowledged ({err}); trying {alt:#04x}");
-            match self.mcu_command(
-                MSG_W_DISP_MODE,
-                &[alt],
-                "display mode (fallback)",
-                &mut pending,
-            ) {
+            match self.mcu_command(MSG_W_DISP_MODE, &[alt], "display mode (fallback)") {
                 Ok(_) => {
                     self.mode = mode;
                     return Ok(mode);
@@ -376,34 +371,31 @@ impl Hmd for XrealGlasses {
     }
 
     fn brightness(&mut self) -> Result<f32> {
-        let mut pending = Vec::new();
-        let reply = self.mcu_command(MSG_R_BRIGHTNESS, &[], "read brightness", &mut pending)?;
-        // Async pushes that arrived while waiting are dropped here rather than queued. This is
-        // called from a settings path, not the event loop, and a button press is reported again
-        // by the device's own state on the next poll.
-        let raw = *reply
-            .first()
-            .ok_or_else(|| HmdError::Protocol("brightness reply had no payload".into()))?;
-        Ok(Self::brightness_to_unit(raw))
+        let reply = self.mcu_command(MSG_R_BRIGHTNESS, &[], "read brightness")?;
+        Ok(Self::brightness_to_unit(Self::brightness_in(&reply)?))
     }
 
-    fn set_brightness(&mut self, level: f32) -> Result<f32> {
+    fn request_brightness(&mut self, level: f32) -> Result<f32> {
         // Clamped here rather than in `unit_to_brightness`, which is the honest inverse of
         // `brightness_to_unit` and has to stay able to express step 0 — the glasses report it,
         // and reading it back as something else would be a lie about the hardware's state.
         // Refusing to *select* it is a different thing from pretending it cannot happen.
         let step = Self::unit_to_brightness(level).max(DIMMEST_STEP);
-        let mut pending = Vec::new();
-        self.mcu_command(MSG_W_BRIGHTNESS, &[step], "set brightness", &mut pending)?;
-        // Report the step actually asked for rather than reading it back. A second round trip
-        // costs another 1.5 s worst case on a control the wearer is dragging.
+        self.mcu.brightness(step)?;
+        // The step asked for, not one read back: that would be a second round trip, and the
+        // wearer is dragging. A refusal arrives later, through `poll`.
         Ok(Self::brightness_to_unit(step))
     }
 
     fn poll(&mut self, timeout: Duration) -> Result<Option<HmdEvent>> {
-        // Watch both interfaces at once: the IMU streams at ~1 kHz and the MCU speaks only
-        // occasionally, so polling them separately would either add latency to samples or
-        // spin on the MCU.
+        // Whatever the MCU thread has already passed over comes first. It is rare, and
+        // otherwise a stream of IMU samples could keep a button press waiting.
+        if let Some(event) = self.mcu_event() {
+            return Ok(Some(event));
+        }
+        // Wait on both at once: the IMU streams at ~1 kHz and the MCU speaks only
+        // occasionally, so waiting on them separately would either add latency to samples or
+        // leave an event sitting until the next one.
         let mut fds = [
             libc::pollfd {
                 fd: self.imu.as_raw_fd(),
@@ -411,7 +403,7 @@ impl Hmd for XrealGlasses {
                 revents: 0,
             },
             libc::pollfd {
-                fd: self.mcu.as_raw_fd(),
+                fd: self.mcu.ready_fd().unwrap_or(-1),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -432,12 +424,17 @@ impl Hmd for XrealGlasses {
             return Ok(None);
         }
 
-        // A hangup on either interface means the glasses were unplugged.
-        if fds
-            .iter()
-            .any(|f| f.revents & (libc::POLLHUP | libc::POLLERR) != 0)
-        {
+        // A hangup on the IMU means the glasses were unplugged. One on the MCU arrives from
+        // its thread as an event.
+        if fds[0].revents & (libc::POLLHUP | libc::POLLERR) != 0 {
             return Ok(Some(HmdEvent::Disconnected));
+        }
+
+        if fds[1].revents != 0 {
+            self.mcu.clear_ready();
+            if let Some(event) = self.mcu_event() {
+                return Ok(Some(event));
+            }
         }
 
         if fds[0].revents & libc::POLLIN != 0 {
@@ -452,24 +449,6 @@ impl Hmd for XrealGlasses {
             }
             // Acks, rejections and the zeroed warm-up packets all land here. Not an error;
             // the caller polls again.
-            return Ok(None);
-        }
-
-        if fds[1].revents & libc::POLLIN != 0 {
-            let mut buf = [0u8; 64];
-            if let Some(n) = self.mcu.read_report(&mut buf, Duration::ZERO)? {
-                if n > MCU_MSGID_OFFSET + 1 {
-                    let msgid =
-                        u16::from_le_bytes([buf[MCU_MSGID_OFFSET], buf[MCU_MSGID_OFFSET + 1]]);
-                    if let Some(evt) = Self::decode_async(msgid, &buf[..n]) {
-                        if let HmdEvent::DisplayModeChanged(m) = evt {
-                            self.mode = m;
-                        }
-                        return Ok(Some(evt));
-                    }
-                    log::trace!("MCU async push {msgid:#06x}");
-                }
-            }
         }
         Ok(None)
     }
@@ -485,9 +464,8 @@ impl Drop for XrealGlasses {
         // into half the screen — and the cause is not remotely obvious to whoever plugs them
         // in next. Restoring is best effort but worth attempting on every exit path.
         if self.mode == DisplayMode::Stereo {
-            let mut pending = Vec::new();
             let mono = self.spec.mode_mono;
-            let _ = self.mcu_command(MSG_W_DISP_MODE, &[mono], "restore mono", &mut pending);
+            let _ = self.mcu_command(MSG_W_DISP_MODE, &[mono], "restore mono");
         }
         if self.streaming {
             let _ = self.imu_control(false);
@@ -538,6 +516,17 @@ mod tests {
                 "the floor moved step {step}"
             );
         }
+    }
+
+    #[test]
+    fn the_brightness_is_the_byte_after_the_status() {
+        // The payload of a real reply from an Air showing step 5, from offset 22 on.
+        assert_eq!(XrealGlasses::brightness_in(&[0x00, 0x05, 0, 0, 0, 0]).unwrap(), 5);
+        // Read as the value, the status byte made every panel look as dim as it goes.
+        assert_ne!(XrealGlasses::brightness_in(&[0x00, 0x05]).unwrap(), 0);
+        assert!(XrealGlasses::brightness_in(&[0x01, 0x05]).is_err(), "a refusal is not a step");
+        assert!(XrealGlasses::brightness_in(&[0x00]).is_err());
+        assert!(XrealGlasses::brightness_in(&[]).is_err());
     }
 
     #[test]

@@ -91,6 +91,17 @@ pub enum HmdEvent {
     },
     /// The wearer changed the mode with a physical button, or the device changed it itself.
     DisplayModeChanged(DisplayMode),
+    /// The panel's brightness, 0..1, as the device reports it now, sent whenever that has
+    /// changed from what was last known.
+    ///
+    /// Not only after [`Hmd::request_brightness`]: the glasses' own buttons change it, and so
+    /// does a display mode switch, which re-lights the panel at a level of the device's
+    /// choosing and in its own time. A slider that only learnt the brightness when it set it
+    /// would be wrong after either.
+    Brightness(f32),
+    /// A brightness asked for with [`Hmd::request_brightness`] was not set. Treat the control
+    /// as absent, as when [`Hmd::brightness`] fails.
+    BrightnessFailed,
     Disconnected,
 }
 
@@ -165,12 +176,18 @@ pub trait Hmd: Send {
         Err(HmdError::Unsupported("brightness"))
     }
 
-    /// Set panel brightness from 0..1, returning the level actually reached.
+    /// Ask for a panel brightness from 0..1, without waiting for the device, and return the
+    /// level it will be at.
     ///
     /// Devices have a small number of steps rather than a continuum, so the value coming back
     /// is usually not the value going in. Returning it rather than assuming keeps the slider
     /// showing where the hardware really is.
-    fn set_brightness(&mut self, level: f32) -> Result<f32> {
+    ///
+    /// Not waited for, because the caller is a slider on the render thread sending one of
+    /// these per touch sample, and a device slow to answer would stop the world for each of
+    /// them. A device that then refuses says so with [`HmdEvent::BrightnessFailed`] through
+    /// [`Hmd::poll`]. An error here means there is no such control at all.
+    fn request_brightness(&mut self, level: f32) -> Result<f32> {
         let _ = level;
         Err(HmdError::Unsupported("brightness"))
     }
