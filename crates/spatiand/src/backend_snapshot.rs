@@ -331,6 +331,14 @@ pub fn run(
                                 display.flush_clients()?;
                                 event_loop
                                     .dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
+                                // The same two as the pumps above, and the missing pair was a
+                                // real gap rather than a tidy-up: a scripted client changes
+                                // shape during *this* phase -- a click is what drives it to
+                                // the player -- so a resize anchor could not be seen working
+                                // from a script at all, and a dmabuf committed in reply to a
+                                // click was never imported. All three pumps must stay alike.
+                                crate::dmabuf::settle(&mut runtime.state, &mut renderer);
+                                crate::window::apply_resize_anchors(&mut runtime.state);
                             }
                             windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
                         }
