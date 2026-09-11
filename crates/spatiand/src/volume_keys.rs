@@ -27,7 +27,23 @@
 //! eighty milliseconds a step: six frames at 72 Hz, with the world frozen to the head the
 //! whole time, repeated for as long as the button is held. [`Mixer`] does it on a thread of
 //! its own, in order, and reports the level back for the sidecar to show.
+//!
+//! ## Reading it back
+//!
+//! The sidecar also shows the volume as it stands, and lists the outputs and inputs, and all
+//! three used to be re-read on the frame loop every two seconds: `wpctl get-volume` at 27 ms
+//! and `wpctl status`, once per list, at 30 ms each. That is 87 ms every two seconds -- six
+//! frames at 72 Hz, a hitch in the world as regular as a clock, for as long as the sidecar is
+//! up, which on the Deck is always. The same thread does that now, and so does switching the
+//! default device, which is a call of its own followed by reading the volume again.
+//!
+//! The same thread rather than one beside it, because a reading is only true until the next
+//! change. Taken on another thread, a reading could start just before a button press and
+//! land just after its report, and the slider would show the old level for the next two
+//! seconds. On one thread a reading and a change cannot overlap, and a reading that something
+//! was asked for during is thrown away -- see [`publish`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,6 +64,15 @@ const REPEAT_DELAY: Duration = Duration::from_millis(400);
 /// Silence to full in about a second and a half: quick enough that nobody holds the button
 /// wondering whether it is working, slow enough to let go on the level wanted.
 const REPEAT_EVERY: Duration = Duration::from_millis(80);
+
+/// How long the worker waits, after the last thing it was asked to do, before reading the
+/// volume and the device lists again for the sidecar.
+///
+/// Soon enough that a headset plugged in, or a volume changed by something else, shows up
+/// while the wearer is still looking for it. Counted from the last change rather than kept to
+/// a clock, so nothing is read back in the middle of a slider drag: the finger is ahead of
+/// the sound server there, and a reading would drag the handle back to where it had been.
+const POLL_EVERY: Duration = Duration::from_secs(2);
 
 /// Evdev codes, from `linux/input-event-codes.h`.
 const KEY_MUTE: u32 = 113;
@@ -181,50 +206,196 @@ pub fn settle(current: f32, changes: &[Change]) -> (Option<f32>, bool, bool) {
     (level, toggle, unmute)
 }
 
-/// The volume, changed on a thread of its own. See the module notes for why.
+/// Something for the worker to do.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Job {
+    Volume(Change),
+    /// Make this device, by PipeWire node id, the default.
+    Default(u32),
+}
+
+/// What the worker hands back, each piece taken once by the frame loop.
+struct Shared {
+    /// The volume, as a button last set it or a poll last read it. `Some(None)` is a reading
+    /// that found none to read.
+    level: Mutex<Option<Option<f32>>>,
+    /// The outputs and inputs, as a poll last read them.
+    devices: Mutex<Option<crate::sidecar::Audio>>,
+    /// Whether the lists have been looked for since the last poll. See [`Mixer::take_devices`].
+    watching: AtomicBool,
+}
+
+/// The volume and the audio devices, changed and read on a thread of their own. See the
+/// module notes for why.
 pub struct Mixer {
-    to: mpsc::Sender<Change>,
-    /// The level most recently set, waiting to be picked up by the sidecar.
-    level: Arc<Mutex<Option<f32>>>,
+    to: mpsc::Sender<Job>,
+    shared: Arc<Shared>,
 }
 
 impl Mixer {
     pub fn start() -> Mixer {
-        let (to, from) = mpsc::channel::<Change>();
-        let level = Arc::new(Mutex::new(None));
-        let reported = level.clone();
+        let (to, from) = mpsc::channel::<Job>();
+        let shared = Arc::new(Shared {
+            level: Mutex::new(None),
+            devices: Mutex::new(None),
+            // Set from the start, so the first poll is not skipped for want of anyone having
+            // asked yet: the sidecar should have its lists when it is first drawn.
+            watching: AtomicBool::new(true),
+        });
+        let worker = shared.clone();
         let spawned = std::thread::Builder::new()
             .name("volume".into())
-            .spawn(move || {
-                while let Ok(first) = from.recv() {
-                    // Everything that queued up while the last change was being made, in one
-                    // go. A held button sends faster than two calls to the audio server
-                    // finish, and working through a backlog one call at a time would carry
-                    // on changing the volume after the button had been let go.
-                    let mut changes = vec![first];
-                    changes.extend(from.try_iter());
-                    apply(&changes, &reported);
-                }
-            });
+            .spawn(move || work(&from, &worker));
         if let Err(e) = spawned {
-            log::warn!("no volume thread ({e}); volume keys will do nothing");
+            log::warn!(
+                "no volume thread ({e}); volume keys will do nothing and the sidecar will \
+                 show no volume or devices"
+            );
         }
-        Mixer { to, level }
+        Mixer { to, shared }
     }
 
     /// Ask for a change. Never waits.
     pub fn send(&self, change: Change) {
-        let _ = self.to.send(change);
+        self.ask(Job::Volume(change));
     }
 
-    /// The level the worker last set, once, for the sidecar to show.
-    pub fn take_level(&self) -> Option<f32> {
-        self.level.lock().ok()?.take()
+    /// Make a device the default. Never waits.
+    ///
+    /// The volume is read again straight after, because the level shown belongs to whichever
+    /// output is the default and has to follow the choice.
+    pub fn choose_device(&self, id: u32) {
+        self.ask(Job::Default(id));
+        if let Ok(mut devices) = self.shared.devices.lock() {
+            devices.take();
+        }
+    }
+
+    /// Hand a job over, and drop any level still waiting to be picked up: it was set or read
+    /// before this job, which makes it out of date the moment the job is done. The other half
+    /// of [`publish`].
+    fn ask(&self, job: Job) {
+        let _ = self.to.send(job);
+        if let Ok(mut level) = self.shared.level.lock() {
+            level.take();
+        }
+    }
+
+    /// The volume the worker last set or read, once, for the sidecar to show. `Some(None)`
+    /// means it was read and there was none -- no sound server, or no output to be the
+    /// default.
+    pub fn take_level(&self) -> Option<Option<f32>> {
+        self.shared.level.lock().ok()?.take()
+    }
+
+    /// The outputs and inputs as last read, once.
+    ///
+    /// Also what keeps them being read. The sidecar calls this every frame it is up; with no
+    /// sidecar nothing does, and the worker stops asking the sound server for lists nobody
+    /// will see -- otherwise a session without a second screen would run `wpctl` twice every
+    /// two seconds for as long as it lasted.
+    pub fn take_devices(&self) -> Option<crate::sidecar::Audio> {
+        self.shared.watching.store(true, Ordering::Relaxed);
+        self.shared.devices.lock().ok()?.take()
     }
 }
 
-/// Make a batch of changes against the real audio server.
-fn apply(changes: &[Change], reported: &Mutex<Option<f32>>) {
+/// The worker: jobs as they arrive, and a poll once it has been [`POLL_EVERY`] since the last.
+fn work(from: &mpsc::Receiver<Job>, shared: &Shared) {
+    let mut backlog: Vec<Job> = Vec::new();
+    // Due straight away, so the sidecar has a volume and its lists before its first frame
+    // rather than two seconds into the session.
+    let mut next_poll = Instant::now();
+    loop {
+        if backlog.is_empty() {
+            match from.recv_timeout(next_poll.saturating_duration_since(Instant::now())) {
+                Ok(job) => backlog.push(job),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if shared.watching.swap(false, Ordering::Relaxed) {
+                        poll(from, shared, &mut backlog);
+                    }
+                    next_poll = Instant::now() + POLL_EVERY;
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        // Everything that queued up while the last job was being done, in one go. A held
+        // button sends faster than two calls to the audio server finish, and working through
+        // a backlog one call at a time would carry on changing the volume after the button
+        // had been let go.
+        backlog.extend(from.try_iter());
+        // Changes up to the next device switch, and the switch on its own pass: a step taken
+        // before the switch was a step on the old output. Whatever is left stays in the
+        // backlog, which is what tells `publish` that a report is already out of date.
+        let run = backlog
+            .iter()
+            .take_while(|job| matches!(job, Job::Volume(_)))
+            .count();
+        if run == 0 {
+            if let Job::Default(id) = backlog.remove(0) {
+                crate::system::set_default_device(id);
+                poll(from, shared, &mut backlog);
+            }
+        } else {
+            let changes: Vec<Change> = backlog
+                .drain(..run)
+                .filter_map(|job| match job {
+                    Job::Volume(change) => Some(change),
+                    Job::Default(_) => None,
+                })
+                .collect();
+            if let Some(level) = apply(&changes) {
+                publish(&shared.level, Some(level), from, &mut backlog);
+            }
+        }
+        next_poll = Instant::now() + POLL_EVERY;
+    }
+}
+
+/// Read the volume and both device lists, and hand them over.
+///
+/// The volume first, because it is what a device switch is waiting on. Abandoned as soon as
+/// anything is asked for: a button pressed mid-poll should not wait another 30 ms behind a
+/// list, and whatever was read next would be out of date before it was handed over.
+fn poll(from: &mpsc::Receiver<Job>, shared: &Shared, backlog: &mut Vec<Job>) {
+    publish(&shared.level, crate::system::volume(), from, backlog);
+    if !backlog.is_empty() {
+        return;
+    }
+    publish(&shared.devices, crate::system::audio_devices(), from, backlog);
+}
+
+/// Hand something the worker set or read to the frame loop -- unless a job arrived while it
+/// was being done, which makes it out of date.
+///
+/// A reading describes the sound server as it was before that job. Handed over anyway, it
+/// would put back what the job replaced: a device switch would have its tick jump back to the
+/// old device, and a slider set just as a poll finished would snap back to the old level and
+/// stay there until the next poll. Dropping it costs little: a button reports its own level,
+/// a switch is followed by a poll, a slider already shows where it is, and whatever is left
+/// the next poll puts right.
+///
+/// Checked with the slot locked, and [`Mixer::ask`] empties the slot after sending, so a
+/// stale value cannot slip past on either side: if the job was sent before this looks it is
+/// seen here, and if after, the frame loop throws the value away itself.
+fn publish<T>(
+    slot: &Mutex<Option<T>>,
+    value: T,
+    from: &mpsc::Receiver<Job>,
+    backlog: &mut Vec<Job>,
+) {
+    if let Ok(mut slot) = slot.lock() {
+        backlog.extend(from.try_iter());
+        if backlog.is_empty() {
+            *slot = Some(value);
+        }
+    }
+}
+
+/// Make a batch of changes against the real audio server, and return the level to show if a
+/// button moved it.
+fn apply(changes: &[Change]) -> Option<f32> {
     // Read only when a step needs somewhere to start from. A slider position is absolute and a
     // mute flip does not care, and each read is another 27 ms.
     let needs_current = changes
@@ -235,13 +406,14 @@ fn apply(changes: &[Change], reported: &Mutex<Option<f32>>) {
             Some(v) => v,
             None => {
                 log::warn!("a volume key was pressed but the volume cannot be read");
-                return;
+                return None;
             }
         }
     } else {
         0.0
     };
     let (level, toggle, unmute) = settle(current, changes);
+    let mut report = None;
     if let Some(level) = level {
         crate::system::set_volume(level);
         // Reported back only when a button moved it. A slider already shows where it is, and
@@ -249,9 +421,7 @@ fn apply(changes: &[Change], reported: &Mutex<Option<f32>>) {
         // back to a value it has already left, for a frame, on every batch.
         if needs_current {
             log::info!("volume {:.0}% -> {:.0}%", current * 100.0, level * 100.0);
-            if let Ok(mut slot) = reported.lock() {
-                *slot = Some(level);
-            }
+            report = Some(level);
         }
     }
     if unmute {
@@ -259,6 +429,7 @@ fn apply(changes: &[Change], reported: &Mutex<Option<f32>>) {
     } else if toggle {
         crate::system::toggle_mute();
     }
+    report
 }
 
 #[cfg(test)]
@@ -407,5 +578,61 @@ mod tests {
         assert!(approx(level.unwrap(), 0.35));
         let (level, _, _) = settle(0.9, &[Change::Set(1.7)]);
         assert!(approx(level.unwrap(), 1.0), "the slider cannot go past unity either");
+    }
+
+    /// A mixer with no worker behind it, so the frame loop's side can be tested without a
+    /// sound server. The receiver stands in for the worker's end of the queue.
+    fn idle_mixer() -> (Mixer, mpsc::Receiver<Job>) {
+        let (to, from) = mpsc::channel();
+        let shared = Arc::new(Shared {
+            level: Mutex::new(None),
+            devices: Mutex::new(None),
+            watching: AtomicBool::new(false),
+        });
+        (Mixer { to, shared }, from)
+    }
+
+    #[test]
+    fn a_reading_with_nothing_asked_for_is_handed_over() {
+        let (_mixer, from) = idle_mixer();
+        let slot = Mutex::new(None);
+        let mut backlog = Vec::new();
+        publish(&slot, Some(0.4), &from, &mut backlog);
+        assert_eq!(slot.lock().unwrap().take(), Some(Some(0.4)));
+    }
+
+    #[test]
+    fn a_reading_that_something_was_asked_for_during_is_dropped() {
+        // The wearer taps another output while the poll is reading the volume of the old one.
+        let (mixer, from) = idle_mixer();
+        mixer.choose_device(7);
+        let slot = Mutex::new(None);
+        let mut backlog = Vec::new();
+        publish(&slot, Some(0.4), &from, &mut backlog);
+        assert_eq!(*slot.lock().unwrap(), None, "the old output's volume was handed over");
+        assert_eq!(backlog, vec![Job::Default(7)], "the switch has to be kept to be done next");
+    }
+
+    #[test]
+    fn asking_for_something_drops_a_reading_already_handed_over() {
+        // The other order: the reading was published just before the tap, and has to go too.
+        let (mixer, _from) = idle_mixer();
+        *mixer.shared.level.lock().unwrap() = Some(Some(0.4));
+        mixer.send(Change::Set(0.8));
+        assert_eq!(mixer.take_level(), None, "the slider would snap back to 40%");
+
+        *mixer.shared.level.lock().unwrap() = Some(Some(0.4));
+        *mixer.shared.devices.lock().unwrap() = Some(crate::sidecar::Audio::default());
+        mixer.choose_device(7);
+        assert_eq!(mixer.take_level(), None);
+        assert_eq!(mixer.take_devices(), None, "the tick would jump back to the old output");
+    }
+
+    #[test]
+    fn only_a_sidecar_that_is_looking_keeps_the_lists_being_read() {
+        let (mixer, _from) = idle_mixer();
+        assert!(!mixer.shared.watching.load(Ordering::Relaxed));
+        mixer.take_devices();
+        assert!(mixer.shared.watching.load(Ordering::Relaxed));
     }
 }

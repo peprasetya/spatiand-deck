@@ -395,15 +395,21 @@ pub struct AudioDevice {
 ///
 /// Re-read rather than watched. A proper subscription would mean speaking the PipeWire wire
 /// protocol, which is a large dependency for a list that changes when somebody plugs in a
-/// headset — and the sidecar already wakes on a timer for the other readings, so this costs
-/// one more process on a tick that was happening anyway. Plugging in a USB or Bluetooth device
-/// shows up on the next tick, which is what "updates when something is connected" needs to
-/// mean here.
-pub fn audio_devices(direction: Direction) -> Vec<AudioDevice> {
+/// headset — and the volume worker already reads the volume on a timer, so this costs one more
+/// process on a tick that was happening anyway. Plugging in a USB or Bluetooth device shows up
+/// on the next tick, which is what "updates when something is connected" needs to mean here.
+///
+/// Both directions from one `wpctl status`. It takes 30 ms on the Deck, and asking once per
+/// direction was paying that twice for the same text.
+pub fn audio_devices() -> crate::sidecar::Audio {
     let Ok(out) = std::process::Command::new("wpctl").arg("status").output() else {
-        return Vec::new();
+        return crate::sidecar::Audio::default();
     };
-    parse_devices(&String::from_utf8_lossy(&out.stdout), direction)
+    let text = String::from_utf8_lossy(&out.stdout);
+    crate::sidecar::Audio {
+        outputs: parse_devices(&text, Direction::Output),
+        inputs: parse_devices(&text, Direction::Input),
+    }
 }
 
 /// Make a device the default, and move anything already playing over to it.

@@ -290,18 +290,21 @@ pub fn run(
     // went dead. The path is a fact we already have.
     let mut desk = crate::desk::Desk::new(&session, touchscreen_node.into_iter().collect());
     let backlight = crate::system::Backlight::find();
-    // What the sidecar shows and changes. Read here once so the panel has something to draw
-    // before the first two-second poll comes round; the glasses filled in when one is opened.
+    // What the sidecar shows and changes. The screen is read here once so the panel has
+    // something to draw before the first two-second poll comes round; the glasses are filled in
+    // when one is opened, and the volume and the audio devices by the mixer, which reads them
+    // as soon as it starts.
     let mut levels = crate::sidecar::Levels {
         screen: backlight.as_ref().and_then(|b| b.level()),
         glasses: None,
-        volume: crate::system::volume(),
+        volume: None,
     };
     let mut audio = crate::sidecar::Audio::default();
     let mut slow_status = std::time::Instant::now();
     // A volume button being held down, so that holding it keeps going -- and the thread that
     // actually changes the volume, because asking the audio server takes 27 ms a call and the
-    // frame loop has 14 to spend. The sidecar's slider goes through it too.
+    // frame loop has 14 to spend. The sidecar's slider, its device picker and its reading of
+    // the volume and the devices all go through it too.
     let mut volume_repeat = crate::volume_keys::Repeat::default();
     let mixer = crate::volume_keys::Mixer::start();
 
@@ -1594,9 +1597,10 @@ pub fn run(
             if let Some(key) = volume_repeat.due(std::time::Instant::now()) {
                 mixer.send(crate::volume_keys::Change::Key(key));
             }
-            // Whatever the worker last set, so the sidecar's slider follows the buttons.
+            // Whatever the worker last set or read, so the sidecar's slider follows the buttons
+            // and anything else that changes the volume.
             if let Some(level) = mixer.take_level() {
-                levels.volume = Some(level);
+                levels.volume = level;
             }
 
             // Windows that have come and gone since the last frame. Collected by the Wayland
@@ -2458,17 +2462,23 @@ pub fn run(
                 monitors.tick();
                 if slow_status.elapsed() >= Duration::from_secs(2) {
                     slow_status = std::time::Instant::now();
-                    levels.volume = crate::system::volume();
                     levels.screen = backlight.as_ref().and_then(|b| b.level());
-                    // Re-read on the same tick, which is how a headset or a Bluetooth speaker
-                    // plugged in mid-session turns up in the list without anything having to
-                    // watch for it.
-                    audio.outputs = crate::system::audio_devices(crate::system::Direction::Output);
-                    audio.inputs = crate::system::audio_devices(crate::system::Direction::Input);
+                    // Not the volume or the audio devices, which the mixer's thread re-reads:
+                    // the volume is picked up with the buttons' level, the lists just below.
+                    // Asking the sound server for them here took 87 ms every two seconds --
+                    // six frames at 72 Hz, a regular hitch in the world. See
+                    // `crate::volume_keys` for the numbers.
+                    //
                     // Not re-read from the glasses on this timer. Every MCU exchange waits up
                     // to 1.5 s for an ack, and doing that twice a second on the render thread
                     // would stall the frame loop far worse than a stale reading ever shows.
                     // The value is read once when the headset opens and tracked from there.
+                }
+                // Re-read every couple of seconds, which is how a headset or a Bluetooth
+                // speaker plugged in mid-session turns up in the list without anything having
+                // to watch for it. Taking them is also what keeps them being read.
+                if let Some(lists) = mixer.take_devices() {
+                    audio = lists;
                 }
 
                 // --- touch ---
@@ -2484,21 +2494,20 @@ pub fn run(
                             let knob = match action {
                                 crate::sidecar::Action::Moved(knob) => knob,
                                 crate::sidecar::Action::ChooseDevice(direction, id) => {
-                                    crate::system::set_default_device(id);
+                                    // On the mixer's thread, which reads the volume again
+                                    // straight after: the level shown belongs to whichever
+                                    // sink is default, so it has to follow the choice. Both
+                                    // calls used to be made here, 27 ms each.
+                                    mixer.choose_device(id);
                                     // Move the tick's mark straight away rather than waiting
-                                    // up to two seconds for the next poll to confirm it. A
-                                    // list that does not respond until later reads as a tap
-                                    // that missed, and the wearer taps again.
+                                    // for the worker to confirm it. A list that does not
+                                    // respond until later reads as a tap that missed, and the
+                                    // wearer taps again.
                                     for device in match direction {
                                         crate::system::Direction::Output => &mut audio.outputs,
                                         crate::system::Direction::Input => &mut audio.inputs,
                                     } {
                                         device.is_default = device.id == id;
-                                    }
-                                    // The volume shown belongs to whichever sink is default,
-                                    // so it has to follow the choice.
-                                    if direction == crate::system::Direction::Output {
-                                        levels.volume = crate::system::volume();
                                     }
                                     continue;
                                 }
