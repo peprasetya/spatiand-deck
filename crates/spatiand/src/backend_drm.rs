@@ -1064,9 +1064,10 @@ pub fn run(
                         if mode == Mode::World {
                             scene.forget_anchor();
                         } else {
-                            // Pin the menu to where the wearer is facing as it opens.
-                            let yaw = tracker.euler_degrees().yaw.to_radians() as f32;
-                            scene.anchor_menu(mode, yaw);
+                            // Pin the menu to where the wearer is looking as it opens -- up
+                            // and down as well as round -- from the orientation the view
+                            // itself is drawn with, recentring included.
+                            scene.anchor_menu(mode, tracker.recentred_orientation());
                         }
                     }
                     ShellEvent::Launch(app) => {
@@ -1116,12 +1117,15 @@ pub fn run(
                             .find(|w| runtime.state.layout.id_of(w) == Some(id))
                             .cloned();
                         if let Some(window) = window {
-                            let yaw = tracker.euler_degrees().yaw.to_radians();
-                            if let Some(mut placement) = runtime.state.layout.get(&window) {
-                                // Size and distance are the wearer's choices and are left
-                                // alone. Only where it sits changes.
-                                placement.yaw = yaw;
-                                placement.pitch = 0.0;
+                            if let Some(placement) = runtime.state.layout.get(&window) {
+                                // To the middle of where the wearer is looking, up and down as
+                                // well as round -- on the horizon it was out of sight to anyone
+                                // lying back. Size and distance are left alone; see
+                                // `brought_here`. The same direction a menu opens in.
+                                let placement = crate::window::brought_here(
+                                    placement,
+                                    tracker.recentred_orientation(),
+                                );
                                 runtime.state.layout.set(&window, placement);
                             }
                             runtime.state.focus_window(&window);
@@ -1773,8 +1777,9 @@ pub fn run(
                                     // from the point you took hold of rather than snapping its
                                     // centre to the ray.
                                     placement.yaw = d.y.atan2(d.x) + yaw_offset;
-                                    placement.pitch = (d.z.clamp(-1.0, 1.0).asin() + pitch_offset)
-                                        .clamp(-1.2, 1.2);
+                                    placement.pitch = crate::window::clamp_pitch(
+                                        d.z.clamp(-1.0, 1.0).asin() + pitch_offset,
+                                    );
                                     // The left thumb sets the distance while the right holds
                                     // the window. No click needed: reaching for a second
                                     // button while already holding something is awkward, and
@@ -1835,9 +1840,9 @@ pub fn run(
                                         // Pad units are roughly a radian of arc across, so the
                                         // window follows the thumbs at about the rate they move.
                                         placement.yaw -= delta.pan.0 as f64 * 0.6;
-                                        placement.pitch = (placement.pitch
-                                            + delta.pan.1 as f64 * 0.6)
-                                            .clamp(-1.2, 1.2);
+                                        placement.pitch = crate::window::clamp_pitch(
+                                            placement.pitch + delta.pan.1 as f64 * 0.6,
+                                        );
                                         placement.width =
                                             (placement.width * delta.scale as f64).clamp(0.3, 3.0);
                                         runtime.state.layout.set(&window, placement);

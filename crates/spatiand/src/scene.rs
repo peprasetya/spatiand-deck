@@ -412,13 +412,19 @@ pub struct Scene {
     menu_first: usize,
     menu_layout: Option<spatiand_render::panel::Layout>,
 
-    /// Yaw the open menu is pinned to.
+    /// Where the open menu is pinned: yaw, and pitch above the horizon, both in radians.
     ///
     /// Menus are *body-locked*: placed in front of you when they open, then left in the world
     /// so you can look around them. Head-locking a list you are trying to read makes it
     /// impossible to look at anything else; world-locking it from a fixed origin means opening
     /// it while facing away puts it behind you.
+    ///
+    /// Pitch as well as yaw, and that was learned lying down. With yaw alone every menu opened
+    /// on the horizon, which is in front of you sitting up and out of sight lying on your back
+    /// looking at the ceiling -- press the STEAM button and nothing appears, because it is
+    /// down past your feet. A menu is asked for where you are looking, so it opens there.
     anchor_yaw: f32,
+    anchor_pitch: f32,
     anchored_for: Option<Mode>,
     /// When the current menu opened, for the arrival animation.
     anchored_at: std::time::Instant,
@@ -537,6 +543,7 @@ impl Scene {
             menu_first: 0,
             menu_layout: None,
             anchor_yaw: 0.0,
+            anchor_pitch: 0.0,
             anchored_for: None,
             anchored_at: std::time::Instant::now(),
             closing: None,
@@ -576,12 +583,34 @@ impl Scene {
     }
 
     /// Pin an opening menu to the direction the wearer is currently facing.
-    pub fn anchor_menu(&mut self, mode: Mode, current_yaw: f32) {
+    ///
+    /// `head` is the orientation the view is drawn from. See [`crate::window::facing`] for how
+    /// a direction is read out of it, which is not the obvious way -- and which is shared with
+    /// bringing a window to you, so a menu and a window asked for together land together.
+    pub fn anchor_menu(&mut self, mode: Mode, head: glam::DQuat) {
         if self.anchored_for != Some(mode) {
-            self.anchor_yaw = current_yaw;
+            let (yaw, pitch) = crate::window::facing(head);
+            (self.anchor_yaw, self.anchor_pitch) = (yaw as f32, pitch as f32);
             self.anchored_for = Some(mode);
             self.anchored_at = std::time::Instant::now();
             self.closing = None;
+        }
+    }
+
+    /// Treat the open menu as having finished arriving.
+    ///
+    /// For the snapshot backend, whose one frame should show a menu the way a wearer sees it a
+    /// moment after opening. It never did. Its arrival clock ran from whenever the scene
+    /// happened to be built, which lands inside the 0.28 s the menu takes to arrive, so every
+    /// snapshot caught the card still growing and the bubbles still small -- by an amount that
+    /// depended on how long startup took. Measured: the same binary drawn at once and drawn
+    /// after five seconds differed in 198 thousand of the HUD's pixels. That made comparing two
+    /// builds meaningless, because the timing difference swamped anything real; with this, an
+    /// unchanged menu compares identical, pixel for pixel.
+    pub fn finish_arrival(&mut self) {
+        let long_ago = std::time::Duration::from_secs(60);
+        if let Some(then) = std::time::Instant::now().checked_sub(long_ago) {
+            self.anchored_at = then;
         }
     }
 
@@ -1064,7 +1093,9 @@ impl Scene {
 
         let placement = crate::window::Placement {
             yaw: window.yaw,
-            pitch: window.pitch - drop,
+            // Clamped, now that a window may sit nearly overhead or underfoot: below a window
+            // near the floor is past vertical, where the keyboard would face away.
+            pitch: crate::window::clamp_pitch(window.pitch - drop),
             radius: window.radius,
             width: width as f64,
         };
@@ -1962,8 +1993,12 @@ impl Scene {
         );
 
         for (index, placement) in launcher.placements() {
-            let yaw = placement.yaw + self.anchor_yaw;
-            let orientation = Quat::from_rotation_z(yaw) * Quat::from_rotation_y(-placement.pitch);
+            // The grid's own yaw and pitch are offsets from the anchor, laid out in the anchor's
+            // frame -- so a launcher opened looking up is the same grid, tipped, rather than
+            // one pinched together as its columns converge towards the zenith.
+            let orientation = self.anchor_quat()
+                * Quat::from_rotation_z(placement.yaw)
+                * Quat::from_rotation_y(-placement.pitch);
             let centre = self.menu_origin() + orientation * Vec3::X * placement.radius;
             let appear = self.appear_progress(index);
             if appear <= 0.001 {
@@ -2003,7 +2038,8 @@ impl Scene {
             let side = (COLUMN_SPACING_DEG_LOCAL * 2.2).to_radians();
             for page in 0..pages {
                 let offset = page as f32 - (pages as f32 - 1.0) * 0.5;
-                let orientation = Quat::from_rotation_z(self.anchor_yaw - side)
+                let orientation = self.anchor_quat()
+                    * Quat::from_rotation_z(-side)
                     * Quat::from_rotation_y(offset * spacing);
                 let centre = self.menu_origin()
                     + orientation * Vec3::X * spatiand_shell::launcher::ARC_RADIUS_M;
@@ -2025,14 +2061,17 @@ impl Scene {
             let Some(label) = self.app_labels.get(index) else {
                 continue;
             };
-            let yaw = placement.yaw + self.anchor_yaw;
-            let orientation = Quat::from_rotation_z(yaw) * Quat::from_rotation_y(-placement.pitch);
+            let orientation = self.anchor_quat()
+                * Quat::from_rotation_z(placement.yaw)
+                * Quat::from_rotation_y(-placement.pitch);
             // Clear of the glass even when the bubble is the focused one and 18% larger --
             // measured against that, not against the resting size, or the label rides up onto
             // the icon of whichever bubble you are actually looking at.
             let drop = BUBBLE_DIAMETER_M * 0.5 * placement.scale + 0.022;
-            let centre =
-                self.menu_origin() + orientation * Vec3::X * placement.radius - Vec3::Z * drop;
+            // Down the bubble's own face, not the world's: with the launcher tipped up towards
+            // the ceiling, world-down would push the label through the glass towards the eye.
+            let centre = self.menu_origin() + orientation * Vec3::X * placement.radius
+                - orientation * Vec3::Z * drop;
             let height = 0.022f32;
             let width = height * label.aspect.max(0.01);
             let model = self.panel_model(centre, orientation, width, height);
@@ -2225,8 +2264,14 @@ impl Scene {
         Mat4::from_translation(centre) * Mat4::from_quat(orientation) * basis
     }
 
+    /// The menu's frame: turned to the anchor's yaw, then tipped up to its pitch.
+    ///
+    /// The same yaw-then-pitch order a window's placement uses, so a menu tipped up faces the
+    /// eye exactly as a window placed up there would. No roll: the wearer said the sideways
+    /// part was right, and a card that tilted with a tilted head would stay crooked in the
+    /// world once the head straightened.
     fn anchor_quat(&self) -> Quat {
-        Quat::from_rotation_z(self.anchor_yaw)
+        Quat::from_rotation_z(self.anchor_yaw) * Quat::from_rotation_y(-self.anchor_pitch)
     }
 
     /// Centre of a body-locked menu, in world space.
@@ -3117,6 +3162,7 @@ pub fn window_quad(placement: &crate::window::Placement, aspect: f64) -> Quad {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]

@@ -409,7 +409,7 @@ pub fn resize(
     Resized {
         placement: crate::window::Placement {
             yaw: start.yaw - shift_right / start.radius,
-            pitch: start.pitch - shift_down / start.radius,
+            pitch: crate::window::clamp_pitch(start.pitch - shift_down / start.radius),
             radius: start.radius,
             width,
         },

@@ -81,13 +81,66 @@ impl Placement {
     }
 }
 
-/// How far above or below the horizon a window may be pushed, in radians.
+/// How far above or below the horizon anything may be put, in radians: 89 degrees.
 ///
-/// A little over sixty degrees. Pitch does not wrap the way yaw does — a window taken past
-/// vertical ends up facing away from a viewer who, being 3DoF, can only ever be at the centre
-/// of the sphere. Recentring is the one operation that can move every window at once, so it is
-/// also the one that can put them all somewhere unreachable.
-const PITCH_LIMIT: f64 = 1.1;
+/// Pitch does not wrap the way yaw does -- a window taken past vertical ends up facing away
+/// from a viewer who, being 3DoF, can only ever be at the centre of the sphere. So there has
+/// to be a limit, and it has to be *short of* vertical rather than at it, where the frame a
+/// window is built in has no heading left to turn by.
+///
+/// It was a little over sixty degrees, with a drag and the two-thumb gesture each clamping to
+/// a different number of their own, and that was wrong for someone lying down. On your back
+/// the ceiling is where you look, and a window asked for there -- brought to you, or dragged
+/// up -- stopped a quarter turn short and hung off the bottom of the view. One number now,
+/// used by everything that sets a pitch, so no two ways of placing a window can disagree about
+/// where it is allowed to go.
+pub const PITCH_LIMIT: f64 = 89.0 * std::f64::consts::PI / 180.0;
+
+/// A pitch kept inside [`PITCH_LIMIT`].
+pub fn clamp_pitch(pitch: f64) -> f64 {
+    pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT)
+}
+
+/// The yaw, and the pitch above the horizon, of wherever `head` is looking. Radians.
+///
+/// Read from the head's forward and up directions together rather than from Euler angles,
+/// because Euler angles fail in exactly the position this is for. Lying on your back and
+/// looking straight up, forward is vertical, so the compass heading of forward is undefined:
+/// Euler yaw there is whatever the head's roll happens to make it, and anything placed by it
+/// would come up spun round in the plane of the ceiling.
+///
+/// The top of the head does not have that problem -- lying back, it points the way you were
+/// facing, reversed. For a head with no roll, forward and up both lie in the one vertical plane
+/// that contains the heading, and `up.z * forward.xy - forward.z * up.xy` is exactly the
+/// heading's direction at every pitch: all forward when upright, all up when vertical, and the
+/// right mixture in between. With some roll it is the nearest heading. Roll itself is left out
+/// on purpose: something that tilted with a tilted head would stay crooked in the room once the
+/// head straightened, and the wearer confirmed that would be disorienting.
+///
+/// Used for menus opening and for a window being brought to you, so the two always agree.
+pub fn facing(head: DQuat) -> (f64, f64) {
+    let forward = head * DVec3::X;
+    let up = head * DVec3::Z;
+    let heading = up.z * forward.truncate() - forward.z * up.truncate();
+    let yaw = heading.y.atan2(heading.x);
+    let pitch = clamp_pitch(forward.z.clamp(-1.0, 1.0).asin());
+    (yaw, pitch)
+}
+
+/// `placement`, moved to the middle of where `head` is looking.
+///
+/// For bringing a window to the wearer. Only the direction changes -- size and distance are the
+/// wearer's choices and stay as they were. Centred vertically as well as horizontally: the
+/// horizon is in front of you sitting up and out of sight lying down, and a window asked for is
+/// wanted where you are looking.
+pub fn brought_here(placement: Placement, head: DQuat) -> Placement {
+    let (yaw, pitch) = facing(head);
+    Placement {
+        yaw,
+        pitch,
+        ..placement
+    }
+}
 
 /// Per-window spatial state, alongside Smithay's `Space`.
 #[derive(Debug, Default)]
@@ -221,7 +274,7 @@ impl WindowLayout {
             placement.yaw += yaw;
             // Clamped, because pitch is not an angle that wraps: a window pushed past
             // vertical would face away from a viewer who can only be at the centre.
-            placement.pitch = (placement.pitch + pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+            placement.pitch = clamp_pitch(placement.pitch + pitch);
         }
     }
 
@@ -339,7 +392,8 @@ pub fn apply_resize_anchors(state: &mut crate::state::Spatiand) {
                 // Small-angle: the quad faces the wearer at a fixed radius, so a rise of d
                 // metres is d/radius radians of pitch. At the sizes involved -- a few degrees
                 // -- the error against the exact answer is far below what anyone can see.
-                placement.pitch += anchor.drift() * grew / placement.radius.max(0.01);
+                placement.pitch =
+                    clamp_pitch(placement.pitch + anchor.drift() * grew / placement.radius.max(0.01));
                 log::info!(
                     "a surface changed height {was:.3} -> {now:.3} m with a {anchor:?} anchor; \
                      moved it {:.1} deg",
@@ -655,5 +709,112 @@ mod tests {
             !body.contains("toplevel()"),
             "identity in this module must not depend on a window being an xdg one"
         );
+    }
+}
+
+#[cfg(test)]
+mod facing_tests {
+    use super::*;
+
+    /// A head turned to `yaw` and then tipped up by `up`, both in degrees, with no roll --
+    /// built the way the snapshot backend and a window's placement build one.
+    fn head(yaw: f64, up: f64) -> DQuat {
+        DQuat::from_axis_angle(DVec3::Z, yaw.to_radians())
+            * DQuat::from_axis_angle(DVec3::Y, -up.to_radians())
+    }
+
+    fn degrees((yaw, pitch): (f64, f64)) -> (f64, f64) {
+        (yaw.to_degrees(), pitch.to_degrees())
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        // Headings wrap, so compare them round the circle.
+        let d = (a - b).rem_euclid(360.0);
+        d.min(360.0 - d) < 0.01
+    }
+
+    #[test]
+    fn sitting_up_it_is_the_same_yaw_as_before_and_no_pitch() {
+        // The part the wearer said was already right must not move.
+        for yaw in [0.0, 37.0, -120.0, 179.0] {
+            let (y, p) = degrees(facing(head(yaw, 0.0)));
+            assert!(close(y, yaw), "yaw {yaw} came back as {y}");
+            assert!(p.abs() < 0.01, "an upright head should give no pitch, got {p}");
+        }
+    }
+
+    #[test]
+    fn looking_up_or_down_is_where_it_goes() {
+        for up in [-60.0, -20.0, 30.0, 75.0] {
+            let (y, p) = degrees(facing(head(40.0, up)));
+            assert!(close(y, 40.0), "tipping {up} changed the heading to {y}");
+            assert!((p - up).abs() < 0.01, "tipping {up} gave pitch {p}");
+        }
+    }
+
+    /// The reported case, and the one Euler angles cannot do.
+    ///
+    /// Lying flat looking at the ceiling, forward is vertical and has no compass heading at
+    /// all -- yet what is placed there still has to come up the right way round, with its top
+    /// towards the top of the wearer's head.
+    #[test]
+    fn lying_flat_on_your_back_keeps_the_heading() {
+        for yaw in [0.0, 90.0, -135.0] {
+            let (y, p) = degrees(facing(head(yaw, 90.0)));
+            assert!(close(y, yaw), "flat on the back at heading {yaw}, got {y}");
+            assert!(p > 88.0, "should be all but vertical, got {p}");
+        }
+        // And the same face down.
+        let (y, p) = degrees(facing(head(-30.0, -90.0)));
+        assert!(close(y, -30.0), "face down at heading -30, got {y}");
+        assert!(p < -88.0);
+    }
+
+    #[test]
+    fn a_little_roll_does_not_spin_it_round() {
+        let rolled = head(60.0, 20.0) * DQuat::from_axis_angle(DVec3::X, 10f64.to_radians());
+        let (y, p) = degrees(facing(rolled));
+        assert!((y - 60.0).abs() < 4.0, "ten degrees of roll moved the heading to {y}");
+        assert!((p - 20.0).abs() < 0.5, "roll changed the pitch to {p}");
+    }
+
+    #[test]
+    fn nothing_is_ever_put_at_or_past_vertical() {
+        let (_, p) = facing(head(0.0, 90.0));
+        assert!(p <= PITCH_LIMIT + 1e-12);
+        assert!(clamp_pitch(10.0) <= PITCH_LIMIT);
+        assert!(clamp_pitch(-10.0) >= -PITCH_LIMIT);
+    }
+
+    /// "Bring window here", lying down: the window lands in the middle of the view.
+    #[test]
+    fn a_window_brought_here_is_centred_where_you_look() {
+        let before = Placement {
+            yaw: 2.0,
+            pitch: 0.0,
+            radius: 1.7,
+            width: 0.9,
+        };
+        for (yaw, up) in [(0.0, 0.0), (-50.0, 35.0), (120.0, 80.0), (10.0, -45.0)] {
+            let h = head(yaw, up);
+            let after = brought_here(before, h);
+            let gaze = h * DVec3::X;
+            let centre = after.position().normalize();
+            assert!(
+                centre.dot(gaze) > 0.9999,
+                "looking {yaw} round and {up} up, the window's centre was off the gaze"
+            );
+            assert_eq!((after.radius, after.width), (before.radius, before.width));
+        }
+    }
+
+    /// Straight up is as close as it is allowed to get, and still in the middle of the view.
+    #[test]
+    fn a_window_brought_to_the_ceiling_stops_just_short_of_vertical() {
+        let h = head(30.0, 90.0);
+        let after = brought_here(Placement::default(), h);
+        assert!((after.pitch - PITCH_LIMIT).abs() < 1e-9);
+        // One degree off dead centre, which is well inside any field of view.
+        assert!(after.position().normalize().dot(h * DVec3::X) > 89f64.to_radians().sin());
     }
 }

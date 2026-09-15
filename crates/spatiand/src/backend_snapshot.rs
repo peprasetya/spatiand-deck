@@ -257,6 +257,17 @@ pub fn run(
         }
         _ => {}
     }
+    // Anchor it the way a session does when a menu opens: to where the head is pointing,
+    // pitch included. Without this every menu here opened at yaw 0 on the horizon whatever
+    // SPATIAND_SNAPSHOT_YAW and _PITCH said -- so a menu opened looking up could not be seen
+    // from here at all, which is the one thing worth checking about it.
+    if shell.menu_is_open() {
+        let head = DQuat::from_axis_angle(DVec3::Z, yaw_deg.to_radians())
+            * DQuat::from_axis_angle(DVec3::Y, pitch_deg.to_radians());
+        scene.anchor_menu(shell.mode(), head);
+        // And show it arrived, as a wearer sees it a moment later -- see `finish_arrival`.
+        scene.finish_arrival();
+    }
 
     let mut keyboard = spatiand_shell::Keyboard::default();
     if view == View::Keyboard {

@@ -304,8 +304,9 @@ pub fn run(
                         if mode == spatiand_shell::Mode::World {
                             scene.forget_anchor();
                         } else {
-                            scene
-                                .anchor_menu(mode, tracker.euler_degrees().yaw.to_radians() as f32);
+                            // Where the head is pointing, pitch included -- see
+                            // `crate::window::facing`.
+                            scene.anchor_menu(mode, tracker.recentred_orientation());
                         }
                     }
                     ShellEvent::Launch(app) => {
