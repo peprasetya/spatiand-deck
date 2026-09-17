@@ -623,6 +623,8 @@ pub fn run(
         say!(crate::startup::Stage::Link);
 
         let mut pending_flip = false;
+        // A screenshot asked for while no frame was being drawn. See the draw below.
+        let mut screenshot_owed = false;
 
         // Present one blank frame before doing anything else.
         //
@@ -858,6 +860,8 @@ pub fn run(
         // without asking someone to stare at the glasses.
         let mut frames = 0u32;
         let mut skipped = 0u32;
+        // Scene draws, which should match frames presented: see the draw under `flip_waiting`.
+        let mut draws = 0u32;
         let mut last_report = std::time::Instant::now();
         // Presentation feedback for the frame currently on its way to the glass, answered
         // when its flip completes. See `Spatiand::take_presentation_feedback`.
@@ -2120,7 +2124,22 @@ pub fn run(
                                     (None, Some(left), _) => Some(left),
                                     (None, None, mouse) => mouse,
                                 };
-                            if let Some(a) = cursor_aim {
+                            // Except a thumb resting over a game played with the gamepad: that
+                            // game hears hover as the wearer picking up a mouse, and stalls
+                            // switching over. It still gets the pointer the moment something
+                            // is clicked, since every click moves the cursor first. A real
+                            // mouse is always reported -- somebody using one means it.
+                            let over_pad_game = (right_aim.is_some() || left_aim.is_some())
+                                && controls.drives_pad()
+                                && cursor_aim.is_some_and(|a| {
+                                    a.popup.is_none()
+                                        && a.hit
+                                            .and_then(|(i, _)| windows.get(i))
+                                            .is_some_and(|w| w.focused)
+                                });
+                            let withdrawn =
+                                over_pad_game && pointers.withdraw(&mut runtime.state, time_ms);
+                            if let (false, Some(a)) = (withdrawn, cursor_aim) {
                                 pointers.motion(&mut runtime.state, a, &windows, time_ms);
                             }
                             // The left pad is the wheel, and it turns whatever the cursor is
@@ -2576,7 +2595,20 @@ pub fn run(
             }
 
             // --- draw the scene into the offscreen texture ---
-            {
+            //
+            // Only when there is somewhere for it to go. While the last frame is still on its
+            // way to the glasses, this loop keeps turning every few milliseconds so input stays
+            // fresh -- and it used to draw the whole stereo scene on every one of those turns
+            // and throw it away: 380 waits for flip for 144 frames shown in two seconds, about
+            // 260 full draws a second to show 72, on the one GPU the game in front is also
+            // using. The frame that reaches the glasses is drawn on the turn its predecessor's
+            // flip completes, exactly as before, so nothing is added to the head's latency.
+            //
+            // Nothing dispatches the event loop between here and the flip check under
+            // `--- present ---`, so the answer read now is the one that check will see.
+            let flip_waiting = pending_flip && !vblank.borrow().contains(&crtc);
+            if !flip_waiting {
+                draws += 1;
                 let snapshot = panel;
                 let scene = &scene;
                 let shell = &shell;
@@ -2755,7 +2787,11 @@ pub fn run(
                 })?;
             }
 
-            if screenshot {
+            // Owed until a frame is actually drawn: a request made on a turn that drew nothing
+            // would otherwise read back the previous frame's pixels, or be lost.
+            screenshot_owed |= screenshot;
+            if screenshot_owed && !flip_waiting {
+                screenshot_owed = false;
                 // Read back the frame we just drew rather than re-rendering it, so what lands
                 // in the file is exactly what was on the glass -- including both eyes.
                 if let Err(e) = capture(&mut renderer, target_fbo, w as u32, h as u32) {
@@ -2885,41 +2921,44 @@ pub fn run(
                         }
                     }
                 }
-                let prepared = ui.prepare(
-                    &mut renderer,
-                    &mut text,
-                    &monitors,
-                    &status_text,
-                    levels,
-                    &audio,
-                    &keyboard,
-                );
-                let (sw, sh) = (side.size.0 as i32, side.size.1 as i32);
-                let fbo = side.fbo;
-                let quads = scene.quads();
-                let rounded = scene.rounded();
-                // Borrowed for the draw closure, which cannot also take `keyboard` mutably.
-                let keyboard_for_panel = &keyboard;
-                renderer.with_context(|gl| unsafe {
-                    gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
-                    gl.Disable(ffi::SCISSOR_TEST);
-                    gl.Viewport(0, 0, sw, sh);
-                    gl.ClearColor(0.02, 0.03, 0.05, 1.0);
-                    gl.Clear(ffi::COLOR_BUFFER_BIT);
-                    ui.draw(
-                        gl,
-                        quads,
-                        rounded,
+                // Drawn only on a turn that can present it, for the same reason as the
+                // glasses' scene: a panel drawn while its last frame is still flipping is
+                // thrown away, and this loop turns several times a frame.
+                if !side.pending {
+                    let prepared = ui.prepare(
+                        &mut renderer,
+                        &mut text,
                         &monitors,
+                        &status_text,
                         levels,
                         &audio,
-                        keyboard_for_panel,
-                        &prepared,
+                        &keyboard,
                     );
-                    gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
-                })?;
+                    let (sw, sh) = (side.size.0 as i32, side.size.1 as i32);
+                    let fbo = side.fbo;
+                    let quads = scene.quads();
+                    let rounded = scene.rounded();
+                    // Borrowed for the draw closure, which cannot also take `keyboard` mutably.
+                    let keyboard_for_panel = &keyboard;
+                    renderer.with_context(|gl| unsafe {
+                        gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+                        gl.Disable(ffi::SCISSOR_TEST);
+                        gl.Viewport(0, 0, sw, sh);
+                        gl.ClearColor(0.02, 0.03, 0.05, 1.0);
+                        gl.Clear(ffi::COLOR_BUFFER_BIT);
+                        ui.draw(
+                            gl,
+                            quads,
+                            rounded,
+                            &monitors,
+                            levels,
+                            &audio,
+                            keyboard_for_panel,
+                            &prepared,
+                        );
+                        gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+                    })?;
 
-                if !side.pending {
                     let element = TextureRenderElement::from_static_texture(
                         Id::new(),
                         renderer.context_id(),
@@ -3105,11 +3144,13 @@ pub fn run(
                     .map(|w| format!("; {w}"))
                     .unwrap_or_default();
                 log::info!(
-                    "presented {frames} frames in {secs:.1}s ({:.0} fps), {skipped} waits for flip{window}",
+                    "presented {frames} frames in {secs:.1}s ({:.0} fps), {skipped} waits for flip, \
+                     {draws} scene draws{window}",
                     frames as f32 / secs
                 );
                 frames = 0;
                 skipped = 0;
+                draws = 0;
                 last_report = std::time::Instant::now();
             }
 

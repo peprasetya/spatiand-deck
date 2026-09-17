@@ -735,6 +735,41 @@ impl PointerState {
         pointer.frame(state);
     }
 
+    /// Take the pointer off whatever it was on, without moving it anywhere new.
+    ///
+    /// For a laser passing over a game played with the gamepad. Such a game treats pointer
+    /// motion as the wearer switching to a mouse: it swaps its prompts, shows a cursor, and
+    /// stalls doing so -- measured in Stumble Guys as frames missing for 160 to 290 ms, most
+    /// of all when its cursor came or went. Leaving is said once and then nothing more is
+    /// sent, so a window the laser came from is not left believing it is still hovered.
+    ///
+    /// Refused while a button is held, returning `false` so the caller moves the pointer as
+    /// usual: a held button grabs the pointer to the window it went down on, and motion sent
+    /// "nowhere" during that grab lands on the window at its top-left corner instead.
+    pub fn withdraw(&mut self, state: &mut Spatiand, time_ms: u32) -> bool {
+        if !self.held.is_empty() {
+            return false;
+        }
+        let Some(pointer) = state.seat.get_pointer() else {
+            return true;
+        };
+        if pointer.current_focus().is_none() {
+            return true;
+        }
+        self.last_focus = None;
+        pointer.motion(
+            state,
+            None,
+            &MotionEvent {
+                location: Point::from((0.0, 0.0)),
+                serial: SERIAL_COUNTER.next_serial(),
+                time: time_ms,
+            },
+        );
+        pointer.frame(state);
+        true
+    }
+
     /// Close every open menu.
     ///
     /// Ordinarily a client does this itself when its popup grab is broken. Spatiand does not

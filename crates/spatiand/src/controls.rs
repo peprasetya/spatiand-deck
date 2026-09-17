@@ -270,6 +270,12 @@ impl Controls {
         self.engine.binds(button)
     }
 
+    /// Is the application in front played with the virtual gamepad? See
+    /// [`spatiand_mapper::engine::Engine::drives_pad`].
+    pub fn drives_pad(&self) -> bool {
+        self.engine.drives_pad()
+    }
+
     pub fn editor_open(&self) -> bool {
         self.editor.is_some()
     }

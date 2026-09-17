@@ -154,6 +154,37 @@ impl Engine {
             .is_some_and(|binding| !binding.is_empty())
     }
 
+    /// Does the layout in force play the virtual gamepad?
+    ///
+    /// Asked by the pointer. A game played with a pad reacts to the mouse moving over it --
+    /// it swaps its button prompts, shows a cursor, and stalls while it does -- so a laser
+    /// merely passing over such a game should not be reported to it as a mouse.
+    pub fn drives_pad(&self) -> bool {
+        let plays_pad = |action: &Action| {
+            matches!(
+                action,
+                Action::Pad { .. } | Action::Stick { .. } | Action::Trigger { .. }
+            )
+        };
+        self.effective
+            .buttons
+            .values()
+            .flat_map(|binding| &binding.activators)
+            .flat_map(|activator| &activator.actions)
+            .any(plays_pad)
+            || self
+                .effective
+                .groups
+                .values()
+                .any(|group| {
+                    matches!(
+                        group.mode,
+                        crate::layout::Mode::Joystick { .. }
+                            | crate::layout::Mode::Trigger { output: Some(_), .. }
+                    )
+                })
+    }
+
     /// Let go of everything, as when a menu opens over the game.
     pub fn reset(&mut self) {
         self.held_layers.clear();
@@ -870,6 +901,19 @@ mod tests {
     use crate::templates;
 
     const FRAME: f64 = 1.0 / 72.0;
+
+    #[test]
+    fn a_gamepad_layout_plays_the_pad_and_the_desktop_does_not() {
+        // The effective controls are worked out on a step, which the session takes every frame.
+        let drives = |layout| {
+            let mut engine = Engine::new(layout);
+            engine.step(&Snapshot::default(), FRAME);
+            engine.drives_pad()
+        };
+        assert!(drives(templates::gamepad()));
+        assert!(!drives(templates::desktop()));
+        assert!(!drives(templates::keyboard_and_mouse()));
+    }
 
     fn layout_of(controls: Controls) -> Layout {
         Layout {
