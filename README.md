@@ -54,10 +54,15 @@ framebuffer twice as wide as the world.
 
 **Input.** The Deck's trackpads are two pointers with laser beams. The D-pad
 types arrow keys into the focused window, A is enter, B is escape. A window switcher
-in the HUD brings any window to the centre of your view. The shoulder buttons
-and the four back paddles are deliberately bound to nothing, so they are there
-for applications and games. A USB or
+in the HUD brings any window to the centre of your view. A USB or
 Bluetooth keyboard types; a mouse is a third pointer that fades when idle.
+
+**Games.** Every control, the four back paddles included, is remappable per
+application in Settings → Controller layout, and what a game sees is one
+gamepad wearing Steam's own virtual gamepad identity, so Proton games launched
+through Steam pick it up. A Steam game starts on a plain gamepad layout,
+anything else on the desktop one. A game gets a stereo sink placed on its
+window. See [docs/input-mapper.md](docs/input-mapper.md).
 
 **The panel** is a touch sidecar: volume, brightness, audio device, a second
 keyboard, and the way out.
@@ -74,10 +79,10 @@ Listed because finding out by hitting them is worse.
   * **OpenXR.** Spatiand is not an OpenXR runtime and does not pretend to be
     one. [docs/openxr.md](docs/openxr.md) sets out what would have to be true
     and which of the three possible routes is worth taking.
-  * **Games.** The plan reserves a virtual gamepad and an escape gesture for
-    this. Neither is built. A game will run and be unplayable.
-  * **Per-application input mapping.** The controller mapping is one fixed
-    table, not something you can change.
+  * **Games stutter while you point at them.** A game plays with the virtual
+    gamepad, but resting a thumb on a trackpad over it makes Stumble Guys
+    stutter until a few seconds after the thumb lifts. The session log now
+    measures the game's own frame gaps to find out why.
   * **Object audio.** Atmos and DTS:X never reach the OS as objects on Linux, so
     what arrives is channels. Real object audio needs a protocol an application
     would have to speak; it does not exist yet.
@@ -158,6 +163,7 @@ on purpose — it is shown precisely when there is no headset to ask.
 | `spatiand-hmd` | headset: IMU, display modes, buttons |
 | `spatiand-track` | head tracking: filter, bias, magnetic anchor, prediction |
 | `spatiand-input` | controller, touchscreen, gestures, scroll |
+| `spatiand-mapper` | controller layouts: bindings, templates, the editor's model |
 | `spatiand-render` | GLES 3.2: stereo cameras, skybox, glass, text |
 | `spatiand-shell` | scene graph, launcher, HUD, keyboard |
 | `spatiand-audio` | spatial audio: geometry, HRTF, PipeWire |
@@ -171,6 +177,7 @@ on purpose — it is shown precisely when there is no headset to ask.
 |---|---|
 | [docs/apps.md](docs/apps.md) | Writing an application for Spatiand: window sizing, audio layouts, and the stereo and immersive-video protocols as they are specified so far |
 | [docs/x11.md](docs/x11.md) | Why X11 runs and is not supported |
+| [docs/input-mapper.md](docs/input-mapper.md) | Controller layouts and the virtual gamepad a game sees |
 | [docs/openxr.md](docs/openxr.md) | Why Spatiand is not an OpenXR runtime, what it would take, and the order to do it in |
 | [docs/install.md](docs/install.md) | Installing a release, and what to check when it goes wrong |
 | [docs/xreal-air.md](docs/xreal-air.md) | The glasses' protocol, verified against hardware. Probably the most reusable thing here |
