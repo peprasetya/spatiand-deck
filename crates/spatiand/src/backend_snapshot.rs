@@ -15,7 +15,7 @@
 //! ```
 //!
 //! `SPATIAND_VIEW` is `world`, `hud`, `environment`, `files`, `launcher`, `keyboard`,
-//! `calibrate` or `sidecar`; `SPATIAND_SNAPSHOT_SIZE` is
+//! `calibrate`, `controller` or `sidecar`; `SPATIAND_SNAPSHOT_SIZE` is
 //! `WIDTHxHEIGHT` and defaults to one eye of the glasses (1920x1080). `SPATIAND_SNAPSHOT_YAW`
 //! turns the head and `SPATIAND_SNAPSHOT_PITCH` tips it down, both in degrees -- which is how
 //! the arc's edges and anything hanging below the eye line get checked.
@@ -104,6 +104,9 @@ enum View {
     /// The Deck's own panel rather than the glasses, so the sidecar can be looked at without
     /// a Deck to look at. Honours `SPATIAND_VIEW_PAGE=keyboard` for its second page.
     Sidecar,
+    /// The controller layout editor, on a made-up game, with the controller picture beside it.
+    /// `SPATIAND_VIEW_PAGE=<row label>` opens that row first, so a deeper page can be looked at.
+    Controller,
 }
 
 impl View {
@@ -117,6 +120,7 @@ impl View {
             Ok("waiting") => Self::Waiting,
             Ok("keyboard") => Self::Keyboard,
             Ok("sidecar") => Self::Sidecar,
+            Ok("controller") => Self::Controller,
             _ => Self::World,
         }
     }
@@ -255,8 +259,43 @@ pub fn run(
                 shell.show_directory(browser.label(), browser.entries());
             }
         }
+        // Through the HUD row, as a wearer reaches it, so the snapshot cannot show a state
+        // they could not get to.
+        View::Controller => {
+            shell.handle(Intent::ToggleHud);
+            for _ in 0..shell.hud().items().len() {
+                if shell.hud().activate() == spatiand_shell::HudAction::ControllerLayout {
+                    break;
+                }
+                shell.handle(Intent::Navigate(spatiand_shell::NavDirection::Down));
+            }
+            shell.handle(Intent::Accept);
+        }
         _ => {}
     }
+    // The layout being edited. A real session edits whatever has focus; here it is a game with
+    // the gamepad template, which is what a game gets before anyone changes anything.
+    let mut editor = (view == View::Controller).then(|| {
+        let mut editor = spatiand_mapper::Editor::new(
+            spatiand_mapper::AppKey::Steam(1677740),
+            "Stumble Guys",
+            spatiand_mapper::templates::gamepad(),
+        );
+        if let Ok(wanted) = std::env::var("SPATIAND_VIEW_PAGE") {
+            let row = editor
+                .view()
+                .rows
+                .iter()
+                .position(|r| r.label.eq_ignore_ascii_case(&wanted));
+            match row {
+                Some(row) => {
+                    editor.click(row);
+                }
+                None => log::warn!("no row called {wanted:?} on the editor's first page"),
+            }
+        }
+        editor
+    });
     // Anchor it the way a session does when a menu opens: to where the head is pointing,
     // pitch included. Without this every menu here opened at yaw 0 on the horizon whatever
     // SPATIAND_SNAPSHOT_YAW and _PITCH said -- so a menu opened looking up could not be seen
@@ -310,6 +349,11 @@ pub fn run(
                     // Noticing a shape change needs to have seen the shape before, so this runs
                     // on every pump here exactly as it does every frame in a session.
                     crate::window::apply_resize_anchors(&mut runtime.state);
+                    // A session settles the keyboard focus every frame, so a pump that stands
+                    // in for a session has to do it too -- otherwise the harness can only
+                    // ever photograph a window that was clicked.
+                    runtime.state.settle_keyboard_focus();
+                    runtime.state.fit_screen_to_windows();
                     windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
                     if !windows.is_empty() {
                         // The first buffer a toolkit commits is usually blank -- it has the
@@ -332,6 +376,11 @@ pub fn run(
                             // Noticing a shape change needs to have seen the shape before, so this runs
                             // on every pump here exactly as it does every frame in a session.
                             crate::window::apply_resize_anchors(&mut runtime.state);
+                    // A session settles the keyboard focus every frame, so a pump that stands
+                    // in for a session has to do it too -- otherwise the harness can only
+                    // ever photograph a window that was clicked.
+                    runtime.state.settle_keyboard_focus();
+                    runtime.state.fit_screen_to_windows();
                         }
                         windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
                         // A click, if one was asked for, and then time to answer it. A menu
@@ -346,6 +395,7 @@ pub fn run(
                                 Step::Click(u, v) => {
                                     click_on_the_window(&mut runtime.state, &windows, (u, v))
                                 }
+                                Step::Key(code) => press_key(&mut runtime.state, code),
                                 Step::Close => close_the_window(&runtime.state, &windows),
                             }
                             let answered =
@@ -366,6 +416,11 @@ pub fn run(
                                 // click was never imported. All three pumps must stay alike.
                                 crate::dmabuf::settle(&mut runtime.state, &mut renderer);
                                 crate::window::apply_resize_anchors(&mut runtime.state);
+                    // A session settles the keyboard focus every frame, so a pump that stands
+                    // in for a session has to do it too -- otherwise the harness can only
+                    // ever photograph a window that was clicked.
+                    runtime.state.settle_keyboard_focus();
+                    runtime.state.fit_screen_to_windows();
                             }
                             windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
                         }
@@ -518,12 +573,27 @@ pub fn run(
         &crate::status::line(runtime.state.window_count()),
         ppd,
     )?;
+    let editor_view = editor.as_mut().map(|e| e.view());
+    // The editor shares the view with its controller picture, so its card is smaller.
+    scene.set_compact_card(editor_view.is_some());
+    let menu_model = match editor_view.as_ref() {
+        Some(view) => Some(crate::menu::from_editor(view)),
+        None => crate::menu::model(&shell),
+    };
     scene.sync_menu(
         &mut renderer,
         &mut text,
-        crate::menu::model(&shell).as_ref(),
+        menu_model.as_ref(),
         ppd,
         (stereo.h_fov_deg, stereo.v_fov_deg()),
+    )?;
+    scene.sync_diagram(
+        &mut renderer,
+        &mut text,
+        editor_view
+            .as_ref()
+            .map(|v| v.callouts.as_slice())
+            .unwrap_or(&[]),
     )?;
 
     // The head-locked panel, when there is one to draw.
@@ -856,21 +926,66 @@ fn requested_clicks() -> Vec<(f64, f64)> {
 enum Step {
     /// `SPATIAND_CLICK`: a fraction across the window. See [`requested_clicks`].
     Click(f64, f64),
+    /// `SPATIAND_KEY`: an evdev key code, pressed and released. See [`requested_keys`].
+    Key(u32),
     /// `SPATIAND_CLOSE=1`: what the title bar's close button does. Always last, because
     /// nothing after it has a window to happen to.
     Close,
 }
 
-/// The clicks asked for, then the close if one was.
+/// Keys to press, as evdev codes separated by commas: `SPATIAND_KEY=30,28` types `a` and Enter.
+///
+/// Evdev rather than characters because that is what everything upstream of the compositor
+/// speaks -- a Bluetooth keyboard, the Deck's own buttons and the on-screen keyboard all
+/// arrive as codes -- so a test that starts from a code tests the path a person's keystroke
+/// actually takes.
+fn requested_keys() -> Vec<u32> {
+    let Ok(raw) = std::env::var("SPATIAND_KEY") else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .filter_map(|code| code.trim().parse().ok())
+        .collect()
+}
+
+/// The clicks asked for, then the keys, then the close if one was.
 fn requested_steps() -> Vec<Step> {
     let mut steps: Vec<Step> = requested_clicks()
         .into_iter()
         .map(|(u, v)| Step::Click(u, v))
         .collect();
+    steps.extend(requested_keys().into_iter().map(Step::Key));
     if std::env::var("SPATIAND_CLOSE").as_deref() == Ok("1") {
         steps.push(Step::Close);
     }
     steps
+}
+
+/// Press and release one key on the seat, as a keyboard does.
+///
+/// Goes in at exactly the point a real key does -- the seat's keyboard, with the evdev-to-X11
+/// offset applied once -- so what it proves is the whole path: focus, the Wayland keyboard,
+/// and for an X11 client XWayland's own idea of which window should receive it.
+fn press_key(state: &mut Spatiand, code: u32) {
+    use smithay::backend::input::KeyState;
+    use smithay::input::keyboard::{FilterResult, Keycode};
+    use smithay::utils::SERIAL_COUNTER;
+
+    let Some(keyboard) = state.seat.get_keyboard() else {
+        log::warn!("asked to press a key with no keyboard on the seat");
+        return;
+    };
+    log::info!("pressing evdev key {code}");
+    for (key_state, time) in [(KeyState::Pressed, 300u32), (KeyState::Released, 360)] {
+        keyboard.input::<(), _>(
+            state,
+            Keycode::new(code + 8),
+            key_state,
+            SERIAL_COUNTER.next_serial(),
+            time,
+            |_, _, _| FilterResult::Forward,
+        );
+    }
 }
 
 /// Do what the close button does to the first window, without a title bar or a finger.

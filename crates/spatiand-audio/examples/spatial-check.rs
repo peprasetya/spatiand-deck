@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use spatiand_audio::render::Directness;
-use spatiand_audio::server::{routing_env, sink_name, Engine, Head};
+use spatiand_audio::server::{routing_env, sink_name, Engine, Head, Width};
 use spatiand_audio::stage::{place, Layout, Stage};
 
 const RATE: u32 = 48_000;
@@ -31,7 +31,13 @@ fn main() {
     };
     // Entirely spatial, so what is measured is the placement rather than the blend.
     let engine = Engine::start(RATE, Head::Measured, Directness::SPATIAL);
-    engine.open(SLOT);
+    // The widest sink, because what this example is for is hearing channels placed around the
+    // room. `SPATIAND_WIDTH=stereo` opens the sink a game is given instead -- see `Width`.
+    let width = match std::env::var("SPATIAND_WIDTH").as_deref() {
+        Ok("stereo") => Width::Stereo,
+        _ => Width::Full,
+    };
+    engine.open(SLOT, width);
     std::thread::sleep(Duration::from_millis(500));
 
     println!("sink:  {}", sink_name(SLOT));

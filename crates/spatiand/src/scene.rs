@@ -432,6 +432,19 @@ pub struct Scene {
     /// for a moment after the shell has already moved on -- without it, closing is a hard cut,
     /// which in a 3D space reads as a glitch rather than as a dismissal.
     closing: Option<(Mode, std::time::Instant)>,
+
+    /// The controller picture beside the layout editor, and the labels it was drawn with.
+    diagram: Option<Texture>,
+    diagram_key: String,
+    diagram_shown: bool,
+
+    /// An open radial menu: one texture per item, and which item the thumb is on.
+    radial_labels: Vec<Texture>,
+    radial_key: String,
+    radial_selected: Option<usize>,
+    radial_shown: bool,
+    /// A smaller card, to leave room above it for the controller picture.
+    compact_card: bool,
 }
 
 /// How long bubbles take to arrive, and to leave.
@@ -547,7 +560,52 @@ impl Scene {
             anchored_for: None,
             anchored_at: std::time::Instant::now(),
             closing: None,
+            diagram: None,
+            diagram_key: String::new(),
+            diagram_shown: false,
+            radial_labels: Vec::new(),
+            radial_key: String::new(),
+            radial_selected: None,
+            radial_shown: false,
+            compact_card: false,
         })
+    }
+
+    /// Draw the card smaller, because something is sharing the view with it.
+    ///
+    /// The layout editor is the case: its controller picture hangs above the card, and at the
+    /// card's usual size the pair is taller than the glasses' field, so the picture is only
+    /// visible by looking up at it.
+    pub fn set_compact_card(&mut self, compact: bool) {
+        self.compact_card = compact;
+    }
+
+    /// How much of the horizontal field the card spans.
+    fn card_fraction(&self) -> f64 {
+        if self.compact_card {
+            CARD_FOV_FRACTION * 0.78
+        } else {
+            CARD_FOV_FRACTION
+        }
+    }
+
+    /// How far down to move the card so that it and the picture above it are centred on the
+    /// view together. Zero when there is no picture.
+    fn card_shift(&self, card_width: f32) -> f32 {
+        let (Some(picture), true) = (self.diagram.as_ref(), self.diagram_shown) else {
+            return 0.0;
+        };
+        let height = card_width / picture.aspect.max(0.01);
+        (height + card_width * 0.03) * 0.5
+    }
+
+    /// How much of the vertical field it may grow to before it scrolls.
+    fn height_fraction(&self) -> f64 {
+        if self.compact_card {
+            CARD_HEIGHT_FRACTION * 0.75
+        } else {
+            CARD_HEIGHT_FRACTION
+        }
     }
 
     pub fn quads(&self) -> &QuadPipeline {
@@ -1325,6 +1383,178 @@ impl Scene {
         );
     }
 
+    /// Rebuild the controller picture if its labels changed. No labels hides it: the editor's
+    /// deeper pages are about one control and have nothing to point at.
+    pub fn sync_diagram(
+        &mut self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        text: &mut TextRenderer,
+        callouts: &[(spatiand_mapper::editor::Callout, String)],
+    ) -> Result<(), String> {
+        self.diagram_shown = !callouts.is_empty();
+        if callouts.is_empty() {
+            return Ok(());
+        }
+        let key = format!("{callouts:?}");
+        if key == self.diagram_key && self.diagram.is_some() {
+            return Ok(());
+        }
+        self.diagram_key = key;
+        let image = crate::diagram::render(text, callouts, 0.75);
+        let old = self.diagram.take();
+        self.diagram = Some(
+            renderer
+                .with_context(|gl| unsafe {
+                    if let Some(t) = old {
+                        gl.DeleteTextures(1, &t.id);
+                    }
+                    Texture {
+                        id: upload_rgba(gl, &image),
+                        aspect: image.width as f32 / image.height.max(1) as f32,
+                    }
+                })
+                .map_err(|e| format!("no GL context: {e}"))?,
+        );
+        Ok(())
+    }
+
+    /// The picture, directly above the editor's card and in the same plane.
+    ///
+    /// Above rather than beside, which is where Steam puts its controller: a headset's field is
+    /// far wider than it is tall in degrees *of card*, and a picture set beside a card this wide
+    /// is off the side of the view. Stacked, the wearer reads the list and glances up.
+    ///
+    /// # Safety
+    /// Context must be current.
+    unsafe fn draw_diagram(&self, gl: &ffi::Gles2, eye: &Eye, fov: (f64, f64)) {
+        use spatiand_render::panel;
+
+        let (Some(picture), true) = (self.diagram.as_ref(), self.diagram_shown) else {
+            return;
+        };
+        let Some(layout) = self.menu_layout.as_ref() else {
+            return;
+        };
+        let appear = self.appear_progress(0).clamp(0.0, 1.0);
+        if appear <= 0.001 {
+            return;
+        }
+        let card_width =
+            2.0 * MENU_DISTANCE * ((fov.0 * self.card_fraction() / 2.0).to_radians().tan() as f32);
+        let width = card_width;
+        let height = width / picture.aspect.max(0.01);
+        let quat = self.anchor_quat();
+        let up = quat * Vec3::Z;
+        // Off the card's own top edge, which moves with the number of rows.
+        let card_half = layout.height * (card_width / panel::WIDTH) * 0.5;
+        let centre = self.menu_centre(MENU_DISTANCE)
+            + up * (card_half + height * 0.5 + card_width * 0.03 - self.card_shift(card_width));
+        let model = self.panel_model(centre, quat, width, height);
+        self.quads.draw(
+            gl,
+            picture.id,
+            &(eye.view_projection() * model),
+            [1.0, 1.0, 1.0, appear],
+            (0.0, 1.0),
+        );
+    }
+
+    /// Rebuild a radial menu's labels if they changed.
+    pub fn sync_radial(
+        &mut self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        text: &mut TextRenderer,
+        radial: Option<&spatiand_mapper::RadialView>,
+        px_per_degree: f32,
+    ) -> Result<(), String> {
+        let Some(view) = radial else {
+            self.radial_shown = false;
+            self.radial_selected = None;
+            return Ok(());
+        };
+        self.radial_shown = true;
+        self.radial_selected = view.selected;
+        let key = view.labels.join("\u{1f}");
+        if key == self.radial_key && self.radial_labels.len() == view.labels.len() {
+            return Ok(());
+        }
+        self.radial_key = key;
+        let images: Vec<TextImage> = view
+            .labels
+            .iter()
+            .map(|l| text.render(l, px_per_degree * 1.1, 900, [236, 242, 252, 255]))
+            .collect();
+        let old = std::mem::take(&mut self.radial_labels);
+        self.radial_labels = renderer
+            .with_context(|gl| unsafe {
+                for t in old {
+                    gl.DeleteTextures(1, &t.id);
+                }
+                images
+                    .iter()
+                    .map(|image| Texture {
+                        id: upload_rgba(gl, image),
+                        aspect: image.width as f32 / image.height.max(1) as f32,
+                    })
+                    .collect()
+            })
+            .map_err(|e| format!("no GL context: {e}"))?;
+        Ok(())
+    }
+
+    /// A radial menu, locked to the head: items round a ring in the middle of the view, item 0
+    /// at the top and counting clockwise, the one under the thumb lit.
+    ///
+    /// # Safety
+    /// Context must be current.
+    pub unsafe fn draw_radial(&self, gl: &ffi::Gles2, eye: &Eye, orientation: glam::DQuat) {
+        if !self.radial_shown || self.radial_labels.is_empty() {
+            return;
+        }
+        let head = Quat::from_xyzw(
+            orientation.x as f32,
+            orientation.y as f32,
+            orientation.z as f32,
+            orientation.w as f32,
+        );
+        let cfg = spatiand_render::StereoConfig::default();
+        let origin = head * Vec3::new(cfg.neck_forward_m as f32, 0.0, cfg.neck_up_m as f32);
+        let distance = 1.4f32;
+        let ring_degrees = 8.5f32;
+        let text_height = 2.0 * distance * 1.4f32.to_radians().tan();
+        let count = self.radial_labels.len();
+        for (index, label) in self.radial_labels.iter().enumerate() {
+            let turn = index as f32 / count as f32 * std::f32::consts::TAU;
+            // +Y is left, so a positive sine (to the right) is a negative yaw.
+            let yaw = -(ring_degrees * turn.sin()).to_radians();
+            let pitch = (ring_degrees * turn.cos()).to_radians();
+            let direction = head * (Quat::from_rotation_z(yaw) * Quat::from_rotation_y(-pitch));
+            let centre = origin + direction * Vec3::X * distance;
+            let width = text_height * label.aspect.max(0.01);
+            let lit = self.radial_selected == Some(index);
+            let plate = self.panel_model(centre, direction, width + text_height * 0.9, text_height * 1.6);
+            self.rounded.draw(
+                gl,
+                &(eye.view_projection() * plate),
+                if lit {
+                    [0.30, 0.52, 0.92, 0.92]
+                } else {
+                    [0.03, 0.04, 0.08, 0.72]
+                },
+                (width * 400.0 + text_height * 360.0, text_height * 640.0),
+                text_height * 320.0,
+            );
+            let model = self.panel_model(centre, direction, width, text_height);
+            self.quads.draw(
+                gl,
+                label.id,
+                &(eye.view_projection() * model),
+                [1.0, 1.0, 1.0, 1.0],
+                (0.0, 1.0),
+            );
+        }
+    }
+
     /// Rasterise the open menu, and work out where its pieces go.
     ///
     /// `model` is `None` in the world and in a launcher that has bubbles to show; the textures
@@ -1351,7 +1581,7 @@ impl Scene {
         // Device pixels per logical panel pixel. Everything is laid out in logical pixels and
         // rasterised at the resolution the wearer's eye actually gets, so the type is sharp
         // rather than a small bitmap scaled up to fill the card.
-        let card_deg = (fov.0 * CARD_FOV_FRACTION) as f32;
+        let card_deg = (fov.0 * self.card_fraction()) as f32;
         let scale = (card_deg * px_per_degree / panel::WIDTH).max(0.05);
 
         let stale = self
@@ -1439,7 +1669,7 @@ impl Scene {
         }
 
         // The card is as tall as its contents up to this, and scrolls beyond it.
-        let budget = (fov.1 * CARD_HEIGHT_FRACTION) as f32 * (panel::WIDTH / card_deg);
+        let budget = (fov.1 * self.height_fraction()) as f32 * (panel::WIDTH / card_deg);
         let layout = panel::Layout::new(
             &panel::Menu {
                 rows: model.rows.len(),
@@ -1805,6 +2035,10 @@ impl Scene {
             Mode::Hud | Mode::Environment | Mode::Files | Mode::Switcher => {
                 self.draw_card(gl, eye, fov)
             }
+            Mode::Controller => {
+                self.draw_card(gl, eye, fov);
+                self.draw_diagram(gl, eye, fov);
+            }
             Mode::Launcher => self.draw_launcher(gl, eye, shell, fov),
         }
     }
@@ -1829,13 +2063,15 @@ impl Scene {
         // reads as it coming towards you rather than fading up out of nothing — small enough
         // that nobody watching it a hundredth time has to wait for it.
         let card_width =
-            2.0 * MENU_DISTANCE * ((fov.0 * CARD_FOV_FRACTION / 2.0).to_radians().tan() as f32);
+            2.0 * MENU_DISTANCE * ((fov.0 * self.card_fraction() / 2.0).to_radians().tan() as f32);
         let metres = (card_width / panel::WIDTH) * (0.97 + 0.03 * appear);
 
-        let centre = self.menu_centre(MENU_DISTANCE);
         let quat = self.anchor_quat();
         let right = quat * -Vec3::Y;
         let up = quat * Vec3::Z;
+        // Down by half of whatever hangs above it, so the pair reads as one panel in the middle
+        // of the view rather than as a card with something disappearing off the top.
+        let centre = self.menu_centre(MENU_DISTANCE) - up * self.card_shift(card_width);
         let vp = eye.view_projection();
 
         // A logical rectangle, as a model matrix on the card's plane.

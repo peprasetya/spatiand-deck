@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use spatiand_hmd::hid::{self, HidDevice};
 
+pub mod gamepad;
 pub mod gesture;
 pub mod haptics;
 pub mod layout;
@@ -34,6 +35,7 @@ mod scroll_trace;
 pub mod takeover;
 pub mod touch;
 pub mod trigger;
+pub mod virtual_pad;
 
 pub use gesture::{GestureDelta, TwoPadGesture};
 pub use haptics::{Feel, Pad as HapticPad};
@@ -212,6 +214,13 @@ impl DeckController {
     pub fn pulse(&self, pad: haptics::Pad, feel: haptics::Feel) {
         if let Err(e) = haptics::pulse(&self.device, pad, feel) {
             log::debug!("haptic pulse failed: {e}");
+        }
+    }
+
+    /// Run the body motors, as a game's rumble asks. `(0, 0)` stops them.
+    pub fn rumble(&self, strong: u16, weak: u16) {
+        if let Err(e) = haptics::rumble(&self.device, strong, weak) {
+            log::debug!("rumble failed: {e}");
         }
     }
 }

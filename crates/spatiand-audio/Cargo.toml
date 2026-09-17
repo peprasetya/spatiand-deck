@@ -17,7 +17,10 @@ libloading = "0.8"
 # development one with no PipeWire at all -- and so that a platform with a different audio
 # server is a new module here rather than a fork of the crate.
 [target.'cfg(target_os = "linux")'.dependencies]
-pipewire = { version = "0.8", optional = true }
+# `v0_3_49` is what exposes `Buffer::requested`, which is how many frames the graph is
+# asking for this cycle. The bindings gate it because the field arrived in PipeWire
+# 0.3.49; SteamOS ships 1.6, and everything this runs on is far past it.
+pipewire = { version = "0.8", optional = true, features = ["v0_3_49"] }
 
 [dev-dependencies]
 env_logger.workspace = true

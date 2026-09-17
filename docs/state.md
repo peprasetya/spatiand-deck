@@ -84,10 +84,24 @@ Everything above has tests and builds; these two have never had a finger or a th
 
 ### Games
 
-The uinput virtual Xbox pad and gamescope. Designed for from the start — the input router owns
-the controller exclusively and synthesises a pad, so a game never contends with us — but none
-of it is built. `docs/steam-deck-controller.md` §3 explains why exclusivity is forced rather
-than chosen.
+Gamescope. The rest of what this section used to promise is built: see
+`docs/input-mapper.md`. Every control is remappable per application in a Steam-style editor,
+the Deck, any Bluetooth pad and the glasses' gyro and temple buttons all feed it, and the game
+sees one virtual Xbox pad and nothing else. Steam runs alongside with `-nojoy`, which is what
+lets a Steam game be launched at all while Spatiand owns the controller.
+
+Not yet played: a real game, on the glasses, with a person holding the Deck. Everything up to
+that is checked — the layouts and the engine by 47 tests, the pad by `--ignored` against the
+kernel and by asking SDL what it can see, the editor by `SPATIAND_VIEW=controller`, and the
+hiding of the physical pads from Proton by rendering what Wine enumerated.
+
+The first attempt to play one found three separate faults, none of them in the mapper: an X11
+window was never given X's own input focus, so a Wine game believed it was in the background
+and ignored the pad and the keyboard both; a window bigger than the X screen had a corner its
+pointer could not reach; and a window's audio sink was closed by the first window of its app to
+disappear, which for a game launched through Steam is the window Steam puts up while it
+prepares the game. All three are fixed and measured — see [x11.md](x11.md) and the list
+below — but the game itself still has to be played.
 
 ### Smaller, and genuinely optional
 
@@ -119,6 +133,37 @@ Worth keeping, because each was invisible from the outside and none would be gue
 - MCU length fields count themselves. The controller's do not.
 - One degree is about 2% of a window's height at 2.2 m. Anything sized as a fraction of
   something else needs checking in degrees before it is called a target.
+- An X11 window's focus is two things: the Wayland surface XWayland draws it into, and X's own
+  input focus. Giving the seat the surface does the first and silently skips the second, and
+  the symptom is not "no keyboard" but "this game ignores its gamepad" — Wine decides it is in
+  the background. `xdpyinfo | grep focus` is the whole diagnosis: `PointerRoot` means nobody
+  set it.
+- A sink belongs to a process, not to a window, and the two do not end together. Closing it
+  when the first window goes takes the sound away from an app that opens a splash and then a
+  window — which is every game launched through Steam.
+- One sink, several windows, and the aim has to pick one of them. Size alone picked Steam's
+  window over the game's, because they are the same size and the tie went to the older — so a
+  game straight ahead sounded from wherever Steam was standing. Between windows that look
+  alike it is now the focused one; size still wins when one window is much bigger, which is
+  the case that rule was written for.
+- A game mixes for the device it is shown. Offered a 7.1.4 sink, Stumble Guys mixed for twelve
+  speakers and what arrived had its front-right channel silent and its music somewhere between
+  the centre and the LFE — recorded off the sink's own monitor, so that was the game's own mix
+  before anything here touched it. A window's sink is now as wide as the application can use
+  well: two channels for a game, the full layout for something playing a mix it did not make.
+- Steam tells every game it launches which controllers Steam Input handles — several hundred
+  ids, every real pad among them — and Proton believes it. A virtual pad wearing a real
+  controller's identity is therefore invisible to the game; wearing Steam's own virtual gamepad
+  identity, `winedevice.exe` opens it within seconds. Same device, same buttons, different name.
+- A PipeWire buffer is as big as the largest quantum it was negotiated against, not as big as
+  the quantum in force. `Buffer::requested()` is how many frames the graph actually wants this
+  cycle, and filling the buffer instead drains the queue faster than the app fills it.
+- `/proc/<pid>/environ` is *empty*, not missing, for a process that has been started and has
+  not finished starting. Anything that identifies a process by its environment has to be able
+  to wait.
+- Steam's container shares this machine's process numbering (one `NSpid`, the initial
+  namespace) and passes `PULSE_SINK` and `PIPEWIRE_PROPS` through untouched. Both were worth
+  measuring before believing: they are what ties a game's window and its sound back to us.
 - **Build in the `holo` distrobox, not `spatiand`.** Both were made from `archlinux:latest`,
   but at different times, and that tag moves: `holo` has glibc 2.41, `spatiand` has 2.44, and
   SteamOS has 2.41. A binary from the newer box builds and links perfectly and then dies at

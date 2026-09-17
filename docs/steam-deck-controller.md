@@ -49,7 +49,11 @@ reporting off. Only the sequence counter moves. **[verified]**
 Stopping Steam and reconfiguring the device ourselves produces full reports immediately.
 
 **Consequence for the design:** spatial mode must own the controller exclusively, and must
-not run concurrently with Game Mode. This is the origin of the input-arbitration design —
+not run concurrently with Game Mode.
+
+**But Steam itself can run alongside**, which is what makes launching a Steam game from a
+spatial session possible: `steam -nojoy` holds no controller at all and still launches games.
+See `docs/input-mapper.md` §2. **[verified]** This is the origin of the input-arbitration design —
 it is forced by the hardware, not a preference.
 
 Restarting Steam from a plain SSH shell fails silently; it needs the session environment.

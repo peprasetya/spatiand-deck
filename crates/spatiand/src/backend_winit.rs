@@ -348,6 +348,20 @@ pub fn run(
                             runtime.state.focus_window(&window);
                         }
                     }
+                    // The layout engine and its editor belong to the real session: this
+                    // backend is a window on someone else's desktop and owns no controller.
+                    ShellEvent::Controller(_) => {}
+                    ShellEvent::CloseWindow(id) => {
+                        let window = runtime
+                            .state
+                            .space
+                            .elements()
+                            .find(|w| runtime.state.layout.id_of(w) == Some(id))
+                            .cloned();
+                        if let Some(window) = window {
+                            runtime.state.close_window(&window);
+                        }
+                    }
                     ShellEvent::Hud(action) => match action {
                         HudAction::OpenSwitcher => {
                             shell.set_windows(runtime.state.open_windows())
@@ -381,6 +395,7 @@ pub fn run(
                         // Nothing to hand back in a window on someone else's desktop.
                         HudAction::ToggleKeyboard
                         | HudAction::ReturnToDesktop
+                        | HudAction::ControllerLayout
                         | HudAction::Screenshot => {
                             log::info!("{action:?} does nothing in the nested backend");
                         }
@@ -553,6 +568,9 @@ pub fn run(
         let screen = runtime.state.screen.clone();
         runtime.state.send_frames(&screen, Duration::ZERO);
         runtime.state.space.refresh();
+        // As in a session: whatever the layout says is focused is what the keyboard talks to.
+        runtime.state.settle_keyboard_focus();
+        runtime.state.fit_screen_to_windows();
         display.dispatch_clients(&mut runtime.state)?;
         display.flush_clients()?;
 

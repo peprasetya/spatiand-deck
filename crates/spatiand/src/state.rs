@@ -8,11 +8,12 @@
 
 use smithay::desktop::{PopupKind, PopupManager, Space};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
+use smithay::input::keyboard::KeyboardTarget;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface};
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle};
-use smithay::utils::{Logical, Point, Serial, Transform};
+use smithay::utils::{Logical, Point, Serial, Size, Transform};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, is_sync_subsurface, CompositorClientState, CompositorHandler, CompositorState,
@@ -36,6 +37,12 @@ use smithay::{
     delegate_presentation, delegate_seat, delegate_shm, delegate_viewporter,
     delegate_xdg_decoration, delegate_xdg_shell,
 };
+
+use smithay::input::pointer::PointerHandle;
+use smithay::wayland::pointer_constraints::{
+    with_pointer_constraint, PointerConstraintsHandler, PointerConstraintsState,
+};
+use smithay::wayland::relative_pointer::RelativePointerManagerState;
 
 use crate::window::WindowLayout;
 
@@ -83,6 +90,11 @@ pub struct Spatiand {
     /// `wp_viewporter`: a surface saying its buffer is not its size. Held for the global's
     /// lifetime only; the state it produces is read through each surface's renderer state.
     pub _viewporter_state: smithay::wayland::viewporter::ViewporterState,
+    /// `zwp_relative_pointer_v1`: mouse motion as movement rather than a position, which is what
+    /// a game turning its camera reads. Held for the global's lifetime only.
+    pub _relative_pointer_state: RelativePointerManagerState,
+    /// `zwp_pointer_constraints_v1`: a game locking the pointer in place while it looks around.
+    pub _pointer_constraints_state: PointerConstraintsState,
     /// Handing us a picture rather than a copy of one — see [`crate::dmabuf`].
     pub dmabuf_state: DmabufState,
     /// `None` until a backend has a renderer whose import formats can be advertised.
@@ -125,6 +137,12 @@ pub struct Spatiand {
     /// their parent's own surface, which is what they look like everywhere else and what the
     /// Wayland path already does.
     pub x11_popups: Vec<smithay::xwayland::X11Surface>,
+    /// What the keyboard was last pointed at, so the reconcile below only acts on a change.
+    ///
+    /// See [`Spatiand::settle_keyboard_focus`].
+    pub focus_settled: Option<KeyboardFocus>,
+    /// How evenly the window in front is drawing. See [`crate::cadence`].
+    pub cadence: crate::cadence::Cadence,
     /// The X11 window manager, once the X server has finished starting.
     ///
     /// `None` before then, and for the whole session if no X server could be started — which
@@ -218,6 +236,12 @@ impl Spatiand {
         //
         // A client that never binds it is untouched: its surface is its buffer, as before.
         let viewporter_state = smithay::wayland::viewporter::ViewporterState::new::<Self>(&dh);
+        // Mouse-look. A game driven by a layout's mouse output -- a trackpad or the gyro as a
+        // mouse -- turns its camera by relative motion and locks the pointer so it never reaches
+        // the edge of the window. Without these, XWayland has nothing to turn a pointer grab
+        // into and the camera stops at the window's border.
+        let relative_pointer_state = RelativePointerManagerState::new::<Self>(&dh);
+        let pointer_constraints_state = PointerConstraintsState::new::<Self>(&dh);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let data_device_state = DataDeviceState::new::<Self>(&dh);
@@ -275,6 +299,8 @@ impl Spatiand {
             shm_state,
             _presentation_state: presentation_state,
             _viewporter_state: viewporter_state,
+            _relative_pointer_state: relative_pointer_state,
+            _pointer_constraints_state: pointer_constraints_state,
             dmabuf_state,
             dmabuf_global: None,
             pending_dmabufs: Vec::new(),
@@ -291,6 +317,8 @@ impl Spatiand {
             popups: PopupManager::default(),
             x11_pids: std::collections::HashMap::new(),
             x11_popups: Vec::new(),
+            focus_settled: None,
+            cadence: Default::default(),
             xwm: None,
             xwayland_shell_state,
             xr_surfaces: Vec::new(),
@@ -325,21 +353,19 @@ impl Spatiand {
 
     /// What to write on a window's title bar.
     ///
-    /// Never empty, and X11 windows say so. Running under XWayland is not a detail the wearer
-    /// can be expected to infer from a window misbehaving: X11 support here is a compatibility
-    /// path, not a supported one, and the honest thing is for the window itself to say which
-    /// it is. See `docs/x11.md`.
+    /// Never empty: a window with no title of its own is labelled by its application, and
+    /// failing that as untitled.
+    ///
+    /// X11 windows used to be marked "unsupported" here, as a warning that they were running
+    /// through a compatibility layer that did not do everything. They are no longer marked,
+    /// because it is no longer true: closing, focusing, resizing, menus and process ids all
+    /// work through XWayland now, and a label saying otherwise only makes a working window
+    /// look broken.
     pub fn display_title(&self, window: &smithay::desktop::Window) -> String {
-        let own = self
-            .title_of(window)
+        self.title_of(window)
             .filter(|t| !t.trim().is_empty())
             .or_else(|| self.app_id_of(window))
-            .unwrap_or_else(|| "Untitled".into());
-        if window.x11_surface().is_some() {
-            format!("{own}   ·   X11 (unsupported)")
-        } else {
-            own
-        }
+            .unwrap_or_else(|| "Untitled".into())
     }
 
     /// The title a client has set.
@@ -370,6 +396,22 @@ impl Spatiand {
     /// Not the title: a title is whatever the application decided to write there this second,
     /// and changes with the open document. The app id is stable for the window's whole life,
     /// which is what a texture cache needs as a key.
+    /// The process a window belongs to: the Wayland connection's credentials, or for an X11
+    /// window the process id remembered when it mapped.
+    pub fn pid_of(&self, window: &smithay::desktop::Window) -> Option<u32> {
+        if let Some(x11) = window.x11_surface() {
+            return self.x11_pids.get(&x11.window_id()).copied().flatten();
+        }
+        use smithay::reexports::wayland_server::Resource;
+        window
+            .toplevel()?
+            .wl_surface()
+            .client()?
+            .get_credentials(&self.display_handle)
+            .ok()
+            .map(|c| c.pid as u32)
+    }
+
     pub fn app_id_of(&self, window: &smithay::desktop::Window) -> Option<String> {
         if let Some(x11) = window.x11_surface() {
             // X11's nearest equivalent, and the one desktop files are matched against.
@@ -449,27 +491,95 @@ impl Spatiand {
     /// raised in X's own stacking order, which is separate from ours and which nothing else
     /// here touches: every X11 window is configured at the same X origin, so they all overlap
     /// as far as X is concerned, and its idea of which is on top should be ours.
+    /// Make the seat's keyboard focus agree with the window the layout says is focused.
+    ///
+    /// Run once a frame, and it closes a gap that was there from the beginning: a window
+    /// arriving took focus in the *layout* — which is what draws the highlight, aims the
+    /// pointer and chooses the controller mapping — and nothing told the seat. Only a click
+    /// did that. So an application launched from the launcher and never clicked inside had no
+    /// keyboard focus at all: a Bluetooth keyboard typed into the window that was in front
+    /// before it, or into nothing, and a game with the X11 focus never set believed it was in
+    /// the background and ignored its controller too.
+    ///
+    /// Reconciled against the last focus this set rather than against the seat's current one,
+    /// because a client that has taken a keyboard grab for a menu *should* hold the keyboard
+    /// and its grab declines to give it back. Comparing against the seat would disagree with
+    /// the grab every frame and ask for the focus again on each one.
+    pub fn settle_keyboard_focus(&mut self) {
+        let focused = self
+            .space
+            .elements()
+            .find(|w| self.layout.is_focused(w))
+            .cloned();
+        let wanted = focused.as_ref().and_then(Self::keyboard_target);
+        if wanted == self.focus_settled {
+            return;
+        }
+        match focused.filter(|_| wanted.is_some()) {
+            Some(window) => self.focus_window(&window),
+            // Nothing left to type into. Saying so matters for an X11 window: the focus it was
+            // given lives in the X server and outlives the window unless it is taken back.
+            None => {
+                if let Some(keyboard) = self.seat.get_keyboard() {
+                    keyboard.set_focus(self, None, smithay::utils::SERIAL_COUNTER.next_serial());
+                }
+                self.focus_settled = None;
+            }
+        }
+    }
+
+    /// What the seat should be given for a window: the X11 window itself where there is one.
+    fn keyboard_target(window: &smithay::desktop::Window) -> Option<KeyboardFocus> {
+        if let Some(x11) = window.x11_surface() {
+            // An X11 window with no surface yet cannot be typed into: XWayland has nothing to
+            // deliver to. It gets the keyboard on the frame after its surface arrives.
+            return x11
+                .wl_surface()
+                .map(|_| KeyboardFocus::X11(x11.clone()));
+        }
+        window
+            .toplevel()
+            .map(|t| KeyboardFocus::Wayland(t.wl_surface().clone()))
+    }
+
     pub fn focus_window(&mut self, window: &smithay::desktop::Window) {
         self.layout.focus(window);
         self.space.raise_element(window, true);
-        let surface = if let Some(x11) = window.x11_surface() {
+        if let Some(x11) = window.x11_surface() {
             if let Some(wm) = self.xwm.as_mut() {
                 if let Err(e) = wm.raise_window(x11) {
                     log::warn!("could not raise an X11 window: {e}");
                 }
             }
-            x11.wl_surface()
-        } else {
-            window.toplevel().map(|t| t.wl_surface().clone())
-        };
-        if let Some(surface) = surface {
-            if let Some(keyboard) = self.seat.get_keyboard() {
-                keyboard.set_focus(
-                    self,
-                    Some(surface),
-                    smithay::utils::SERIAL_COUNTER.next_serial(),
-                );
+        }
+        let target = Self::keyboard_target(window);
+        if let Some(target) = target {
+            let Some(keyboard) = self.seat.get_keyboard() else {
+                return;
+            };
+            // The window losing the keyboard is told so, which for an X11 window means taking
+            // `_NET_WM_STATE_FOCUSED` off it. Smithay's `leave` gives back X's input focus but
+            // not that property, and a Wine window left wearing it believes it is still in
+            // front: two windows both convinced they are focused is how a game ends up
+            // ignoring a keyboard that is being typed on.
+            if let Some(KeyboardFocus::X11(old)) = keyboard.current_focus() {
+                if KeyboardFocus::X11(old.clone()) != target {
+                    if let Err(e) = old.set_activated(false) {
+                        log::warn!("could not unfocus an X11 window: {e}");
+                    }
+                }
             }
+            if let KeyboardFocus::X11(x11) = &target {
+                if let Err(e) = x11.set_activated(true) {
+                    log::warn!("could not activate an X11 window: {e}");
+                }
+            }
+            self.focus_settled = Some(target.clone());
+            keyboard.set_focus(
+                self,
+                Some(target),
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+            );
         }
     }
 
@@ -603,6 +713,50 @@ impl Spatiand {
         self.screen.set_preferred(mode);
     }
 
+    /// Keep the screen at least as big as the biggest X11 window.
+    ///
+    /// X11 has a screen and a pointer that lives on it, and a pointer cannot leave it. XWayland
+    /// takes its screen from the outputs it is shown, which here is one output the size of a
+    /// window — so an X11 window dragged bigger than that had a corner the pointer could not
+    /// reach. Measured on the Deck: a window 1804x1174 on a screen `xdpyinfo` reported as
+    /// 1280x800, with the compositor sending a click at 1786,1162 and the X server putting the
+    /// cursor wherever its edge was instead. The application draws its own cursor from what the
+    /// X server tells it, which is why the window resized and the pointer did not follow.
+    ///
+    /// Grown to fit rather than simply made huge, because the screen's size is also the answer
+    /// to "how big is the display": Wine hands it to a Windows game as the desktop size, and a
+    /// game that opens at the desktop size would then open at whatever arbitrary maximum was
+    /// chosen here. A screen that is exactly as big as the largest window is both true and the
+    /// smallest thing that works.
+    ///
+    /// It shrinks back, so closing a large window does not leave every game after it opening at
+    /// that size for the rest of the session.
+    pub fn fit_screen_to_windows(&mut self) {
+        // A mode is in physical pixels and a window's geometry is logical, and here they are
+        // the same number: a surface's pixels are stretched across a quad, never scaled.
+        let size: Size<i32, smithay::utils::Physical> = screen_size_for(
+            self.space
+                .elements()
+                .filter_map(|w| w.x11_surface())
+                .map(|x11| {
+                    let size = x11.geometry().size;
+                    (size.w, size.h)
+                }),
+        )
+        .into();
+        let current = self.screen.current_mode();
+        if current.map(|m| m.size) == Some(size) {
+            return;
+        }
+        let mode = OutputMode {
+            size,
+            refresh: current.map(|m| m.refresh).unwrap_or(60_000),
+        };
+        log::info!("the screen X11 sees is now {}x{}", size.w, size.h);
+        self.screen.change_current_state(Some(mode), None, None, None);
+        self.screen.set_preferred(mode);
+    }
+
     /// The surface under a point, for pointer focus.
     pub fn surface_under(
         &self,
@@ -679,6 +833,9 @@ impl CompositorHandler for Spatiand {
                 .cloned()
             {
                 window.on_commit();
+                if self.layout.is_focused(&window) {
+                    self.cadence.drew(&root, std::time::Instant::now());
+                }
             }
         }
 
@@ -1165,10 +1322,134 @@ impl Spatiand {
     }
 }
 
+/// How big the screen has to be to hold these X11 windows.
+///
+/// Rounded up in steps rather than fitted exactly, because a resize drag changes a window's
+/// size on almost every frame and every change is broadcast to every client as a mode change.
+/// In steps, dragging a window across half the room crosses two or three of them.
+fn screen_size_for(windows: impl Iterator<Item = (i32, i32)>) -> (i32, i32) {
+    /// Wide enough that a drag crosses one now and then, small enough that the screen is never
+    /// far bigger than the window that asked for it.
+    const STEP: i32 = 256;
+
+    // Rounded up by hand: `div_ceil` is not stable on the compiler this builds with.
+    let up = |n: i32| (n + STEP - 1) / STEP * STEP;
+    let mut size = DEFAULT_WINDOW_SIZE;
+    for (w, h) in windows {
+        size.0 = size.0.max(up(w));
+        size.1 = size.1.max(up(h));
+    }
+    size
+}
+
 // --- seat ---
 
+/// What the keyboard is pointed at: a Wayland surface, or an X11 window.
+///
+/// It was the surface in both cases, and for an X11 window that is only half of it. XWayland
+/// draws every X window into a Wayland surface, so handing the seat that surface delivers the
+/// keys *to the X server* — where they stop, because X decides which of its own windows gets a
+/// key from its own input focus, and nothing here had ever set it. Measured with `xdpyinfo`
+/// against a window that had been clicked, raised and given the keyboard: `focus: PointerRoot`,
+/// which means "whatever the cursor happens to be over" — so an application that hides or
+/// grabs the cursor, which is every full-screen game, received nothing at all.
+///
+/// Smithay's [`X11Surface`](smithay::xwayland::X11Surface) is itself a `KeyboardTarget`, and
+/// its `enter` does the three things the X side needs: `SetInputFocus` to the window,
+/// `WM_TAKE_FOCUS` to a client that asked to be told, and the focused state on the window. The
+/// last two are what Wine reads to decide whether its window is in the foreground, and a game
+/// that believes it is in the background ignores the *gamepad* as well as the keyboard. That
+/// is how this came to light: a mapped controller that worked everywhere except in the game it
+/// was mapped for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeyboardFocus {
+    Wayland(WlSurface),
+    X11(smithay::xwayland::X11Surface),
+}
+
+impl smithay::utils::IsAlive for KeyboardFocus {
+    fn alive(&self) -> bool {
+        match self {
+            KeyboardFocus::Wayland(surface) => surface.alive(),
+            KeyboardFocus::X11(x11) => x11.alive(),
+        }
+    }
+}
+
+impl smithay::wayland::seat::WaylandFocus for KeyboardFocus {
+    fn wl_surface(&self) -> Option<std::borrow::Cow<'_, WlSurface>> {
+        use smithay::wayland::seat::WaylandFocus;
+        match self {
+            KeyboardFocus::Wayland(surface) => Some(std::borrow::Cow::Borrowed(surface)),
+            // Named explicitly: `X11Surface` has an inherent `wl_surface` of its own that
+            // hands back an owned surface, and it is the one that would be picked here.
+            KeyboardFocus::X11(x11) => WaylandFocus::wl_surface(x11),
+        }
+    }
+}
+
+impl smithay::input::keyboard::KeyboardTarget<Spatiand> for KeyboardFocus {
+    fn enter(
+        &self,
+        seat: &Seat<Spatiand>,
+        data: &mut Spatiand,
+        keys: Vec<smithay::input::keyboard::KeysymHandle<'_>>,
+        serial: Serial,
+    ) {
+        match self {
+            KeyboardFocus::Wayland(surface) => {
+                KeyboardTarget::enter(surface, seat, data, keys, serial)
+            }
+            KeyboardFocus::X11(x11) => KeyboardTarget::enter(x11, seat, data, keys, serial),
+        }
+    }
+
+    fn leave(&self, seat: &Seat<Spatiand>, data: &mut Spatiand, serial: Serial) {
+        match self {
+            KeyboardFocus::Wayland(surface) => KeyboardTarget::leave(surface, seat, data, serial),
+            KeyboardFocus::X11(x11) => KeyboardTarget::leave(x11, seat, data, serial),
+        }
+    }
+
+    fn key(
+        &self,
+        seat: &Seat<Spatiand>,
+        data: &mut Spatiand,
+        key: smithay::input::keyboard::KeysymHandle<'_>,
+        state: smithay::backend::input::KeyState,
+        serial: Serial,
+        time: u32,
+    ) {
+        match self {
+            KeyboardFocus::Wayland(surface) => {
+                KeyboardTarget::key(surface, seat, data, key, state, serial, time)
+            }
+            KeyboardFocus::X11(x11) => {
+                KeyboardTarget::key(x11, seat, data, key, state, serial, time)
+            }
+        }
+    }
+
+    fn modifiers(
+        &self,
+        seat: &Seat<Spatiand>,
+        data: &mut Spatiand,
+        modifiers: smithay::input::keyboard::ModifiersState,
+        serial: Serial,
+    ) {
+        match self {
+            KeyboardFocus::Wayland(surface) => {
+                KeyboardTarget::modifiers(surface, seat, data, modifiers, serial)
+            }
+            KeyboardFocus::X11(x11) => {
+                KeyboardTarget::modifiers(x11, seat, data, modifiers, serial)
+            }
+        }
+    }
+}
+
 impl SeatHandler for Spatiand {
-    type KeyboardFocus = WlSurface;
+    type KeyboardFocus = KeyboardFocus;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
 
@@ -1176,12 +1457,16 @@ impl SeatHandler for Spatiand {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&KeyboardFocus>) {}
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
-        _image: smithay::input::pointer::CursorImageStatus,
+        image: smithay::input::pointer::CursorImageStatus,
     ) {
+        // Not drawn -- the room has its own reticle -- but counted: a game that shows its
+        // cursor when the mouse moves has switched into a mode of its own. See `crate::cadence`.
+        self.cadence
+            .cursor(!matches!(image, smithay::input::pointer::CursorImageStatus::Hidden));
     }
 }
 
@@ -1240,3 +1525,75 @@ delegate_presentation!(Spatiand);
 delegate_viewporter!(Spatiand);
 delegate_data_device!(Spatiand);
 smithay::delegate_xwayland_shell!(Spatiand);
+
+// --- pointer lock and relative motion ---
+
+impl PointerConstraintsHandler for Spatiand {
+    /// A lock is granted at once to the surface the pointer is over. There is no desktop
+    /// cursor here for a lock to take away from anyone: the pointer only reaches a game through
+    /// its layout, and a game asks for the lock precisely so that it can read that motion.
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        if pointer.current_focus().as_ref() == Some(surface) {
+            with_pointer_constraint(surface, pointer, |constraint| {
+                if let Some(constraint) = constraint {
+                    constraint.activate();
+                }
+            });
+        }
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+    }
+}
+
+smithay::delegate_pointer_constraints!(Spatiand);
+smithay::delegate_relative_pointer!(Spatiand);
+
+#[cfg(test)]
+mod screen_tests {
+    use super::{screen_size_for, DEFAULT_WINDOW_SIZE};
+
+    #[test]
+    fn with_nothing_open_the_screen_is_a_windows_size() {
+        assert_eq!(screen_size_for(std::iter::empty()), DEFAULT_WINDOW_SIZE);
+    }
+
+    #[test]
+    fn a_small_window_does_not_shrink_the_screen() {
+        // The default is a floor, not a starting point: a game handed a 320x240 desktop
+        // because somebody opened a small X11 window is worse than one handed a normal one.
+        assert_eq!(
+            screen_size_for([(320, 240)].into_iter()),
+            DEFAULT_WINDOW_SIZE
+        );
+    }
+
+    #[test]
+    fn a_window_bigger_than_the_screen_grows_it_past_itself() {
+        // Past, not to: the pointer has to reach the far corner, and a screen exactly as wide
+        // as the window leaves the last pixel column on the boundary.
+        let (w, h) = screen_size_for([(1804, 1174)].into_iter());
+        assert!(w >= 1804 && h >= 1174, "{w}x{h} does not hold the window");
+    }
+
+    #[test]
+    fn a_drag_of_a_few_pixels_does_not_change_the_screen() {
+        // What the rounding is for: a resize drag changes the window on nearly every frame,
+        // and every screen change is sent to every client on the machine.
+        let first = screen_size_for([(1500, 900)].into_iter());
+        for width in 1501..1530 {
+            assert_eq!(screen_size_for([(width, 900)].into_iter()), first);
+        }
+    }
+
+    #[test]
+    fn the_widest_and_the_tallest_window_are_both_held() {
+        let (w, h) = screen_size_for([(2000, 600), (900, 1500)].into_iter());
+        assert!(w >= 2000 && h >= 1500, "{w}x{h} loses one of them");
+    }
+}

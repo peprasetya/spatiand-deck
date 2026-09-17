@@ -29,8 +29,10 @@
 //! thumb still and pressing A is the accurate way to click on something small.
 
 use smithay::backend::input::{Axis, AxisSource};
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
+use smithay::wayland::pointer_constraints::with_pointer_constraint;
 
 use spatiand_render::ray::{intersect_plane, pick, Quad, Ray};
 use spatiand_render::Hit;
@@ -491,6 +493,8 @@ pub struct PointerState {
     held: Vec<u32>,
     /// Which window the cursor was last over, to notice when it leaves.
     last_focus: Option<usize>,
+    /// Where a controller layout's mouse is inside the focused window, surface pixels.
+    mapped_cursor: Option<(f64, f64)>,
 }
 
 /// A ray plus what it currently hits.
@@ -715,6 +719,9 @@ impl PointerState {
             self.last_focus = index_now;
         }
 
+        if focus.is_some() {
+            state.cadence.pointed();
+        }
         let location = local.unwrap_or_else(|| Point::from((0.0, 0.0)));
         pointer.motion(
             state,
@@ -863,6 +870,64 @@ impl PointerState {
 
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// Move a controller layout's mouse, inside the window in front of the wearer.
+    ///
+    /// Two things at once, because games read one and everything else reads the other. The
+    /// movement goes out as relative motion, which is what a game turning its camera listens
+    /// for. Unless the game has locked the pointer, a cursor position kept inside the window
+    /// follows it too, so a menu in the same game can still be pointed at and clicked.
+    ///
+    /// Sent even for no movement at all: a click with nowhere to go is lost, and this is what
+    /// gives the pointer a surface before a layout's first click arrives.
+    pub fn nudge(
+        &mut self,
+        state: &mut Spatiand,
+        surface: &WlSurface,
+        size: (f64, f64),
+        dx: f64,
+        dy: f64,
+        time_ms: u32,
+    ) {
+        let Some(pointer) = state.seat.get_pointer() else {
+            return;
+        };
+        let locked = with_pointer_constraint(surface, &pointer, |c| c.is_some_and(|c| c.is_active()));
+        let focus = Some((surface.clone(), Point::from((0.0, 0.0))));
+        if dx != 0.0 || dy != 0.0 {
+            state.attention.stir();
+            pointer.relative_motion(
+                state,
+                focus.clone(),
+                &RelativeMotionEvent {
+                    delta: (dx, dy).into(),
+                    delta_unaccel: (dx, dy).into(),
+                    utime: time_ms as u64 * 1000,
+                },
+            );
+        }
+        if !locked {
+            let (x, y) = self
+                .mapped_cursor
+                .unwrap_or((size.0 / 2.0, size.1 / 2.0));
+            let next = (
+                (x + dx).clamp(0.0, (size.0 - 1.0).max(0.0)),
+                (y + dy).clamp(0.0, (size.1 - 1.0).max(0.0)),
+            );
+            self.mapped_cursor = Some(next);
+            state.cadence.pointed();
+            pointer.motion(
+                state,
+                focus,
+                &MotionEvent {
+                    location: next.into(),
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: time_ms,
+                },
+            );
+        }
+        pointer.frame(state);
     }
 }
 

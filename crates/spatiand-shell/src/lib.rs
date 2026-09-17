@@ -53,6 +53,11 @@ pub enum Intent {
     /// row of the HUD away. The intent exists so that binding it later is a line in a table --
     /// on a keyboard's Alt-Tab, say, where the key costs nobody anything.
     ToggleSwitcher,
+    /// Close whatever the list has selected — the Y button, in the window list.
+    ///
+    /// Only the window list has anything to close, and elsewhere this does nothing rather than
+    /// something surprising. Y is otherwise the focused application's, like every other button.
+    Close,
 }
 
 /// Which surface owns the wearer's attention.
@@ -69,6 +74,17 @@ pub enum Mode {
     Launcher,
     /// The list of open windows.
     Switcher,
+    /// The controller layout editor. The shell only routes the controls to it; what it shows
+    /// and what a press does belong to the compositor's layout engine.
+    Controller,
+}
+
+/// A menu control, passed through to the controller layout editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerIntent {
+    Navigate(Direction),
+    Accept,
+    Back,
 }
 
 /// Something the compositor has to act on.
@@ -91,6 +107,11 @@ pub enum ShellEvent {
     ///
     /// Carries the compositor's own window id, which the shell only ever passes back.
     FocusWindow(usize),
+    /// A control for the layout editor, which the compositor owns.
+    Controller(ControllerIntent),
+    /// Ask this window to close itself, politely. The list stays open: closing several is one
+    /// press each, and the compositor hands back a fresh list as they go.
+    CloseWindow(usize),
 }
 
 pub struct Shell {
@@ -170,6 +191,15 @@ impl Shell {
         self.mode != Mode::World
     }
 
+    /// The editor has closed itself; go back to the world.
+    pub fn close_controller(&mut self) -> Option<ShellEvent> {
+        if self.mode == Mode::Controller {
+            self.enter(Mode::World)
+        } else {
+            None
+        }
+    }
+
     fn enter(&mut self, mode: Mode) -> Option<ShellEvent> {
         if self.mode == mode {
             return None;
@@ -213,6 +243,12 @@ impl Shell {
                 };
                 self.enter(target)
             }
+            // Nothing else in the shell has a "close" -- an environment or a file is not a thing
+            // you close, and the HUD's rows are actions.
+            Intent::Close => match self.mode {
+                Mode::Switcher => self.switcher.activate().map(ShellEvent::CloseWindow),
+                _ => None,
+            },
             Intent::Back => match self.mode {
                 // B in the world is deliberately inert. The way out of Spatiand is an explicit
                 // row in the HUD, because a stray press of B closing the whole session — with
@@ -221,6 +257,8 @@ impl Shell {
                 // Inside the launcher, B climbs out of a group first and only closes the
                 // launcher once already at the top.
                 Mode::Launcher if self.launcher.back() => None,
+                // The editor climbs its own pages and says when it is done.
+                Mode::Controller => Some(ShellEvent::Controller(ControllerIntent::Back)),
                 // These two came from somewhere, and backing out returns there. Dropping
                 // straight to the world would mean re-opening the HUD to make a second try at
                 // a setting you have just decided against — the browser especially, which you
@@ -230,12 +268,16 @@ impl Shell {
                 _ => self.enter(Mode::World),
             },
             Intent::Navigate(direction) => {
+                if self.mode == Mode::Controller {
+                    return Some(ShellEvent::Controller(ControllerIntent::Navigate(direction)));
+                }
                 match self.mode {
                     Mode::Hud => self.hud.step(direction),
                     Mode::Environment => self.environments.step(direction),
                     Mode::Files => self.files.step(direction),
                     Mode::Launcher => self.launcher.step(direction),
                     Mode::Switcher => self.switcher.step(direction),
+                    Mode::Controller => false,
                     // In the world the D-pad will move focus between windows; until windows
                     // are drawn there is nothing to move between.
                     Mode::World => false,
@@ -255,6 +297,7 @@ impl Shell {
                         // doing something, and the compositor answers the event by filling
                         // that list in.
                         HudAction::OpenSwitcher => self.mode = Mode::Switcher,
+                        HudAction::ControllerLayout => self.mode = Mode::Controller,
                         // Everything else takes you back to the world, settings panels
                         // included: staying on the menu after recentring hides the thing you
                         // just changed, and staying on it after opening Wi-Fi leaves a menu
@@ -298,6 +341,7 @@ impl Shell {
                     self.mode = Mode::World;
                     Some(ShellEvent::FocusWindow(id))
                 }
+                Mode::Controller => Some(ShellEvent::Controller(ControllerIntent::Accept)),
                 Mode::World => None,
             },
         }

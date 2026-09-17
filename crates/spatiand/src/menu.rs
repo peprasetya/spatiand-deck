@@ -180,11 +180,33 @@ pub fn model(shell: &Shell) -> Option<MenuModel> {
                     })
                     .collect(),
                 cursor: switcher.cursor(),
-                detail: "Choosing a window brings it to the centre of your view.".into(),
-                footer: FOOTER_SELECT.into(),
+                detail: "Choosing a window brings it to the centre of your view. Y closes one; \
+                         hold Y to force an application that will not close to quit."
+                    .into(),
+                footer: "A select    Y close    B back".into(),
             })
         }
         Mode::Launcher => None,
+        // The editor is drawn from its own view; see `from_editor`.
+        Mode::Controller => None,
+    }
+}
+
+/// The layout editor's page, as a card like every other menu.
+pub fn from_editor(view: &spatiand_mapper::editor::View) -> MenuModel {
+    MenuModel {
+        title: view.title.clone(),
+        rows: view
+            .rows
+            .iter()
+            .map(|r| MenuRow {
+                label: r.label.clone(),
+                trailing: r.value.clone(),
+            })
+            .collect(),
+        cursor: view.cursor,
+        detail: view.detail.clone(),
+        footer: view.footer.clone(),
     }
 }
 

@@ -83,6 +83,40 @@ pub const PULSE_ROUTING_ENV: &str = "PULSE_SINK";
 /// small is a dropout whenever the graph hiccups.
 const QUEUE_FRAMES: usize = 12_000;
 
+/// How wide a window's sink should be.
+///
+/// Not a preference: it decides what an application is *told* the output is, and an
+/// application that adapts to its output will believe it.
+///
+/// **A game mixes for the device it is given.** Offered a 7.1.4 sink, Stumble Guys mixed for
+/// twelve speakers — and what arrived was a mix with its front-right channel silent and its
+/// music somewhere between the centre and the low-frequency channel. Recorded off the sink's
+/// own monitor while it played, so this is what the game sent, before anything here touched
+/// it. There are no twelve speakers; there is a window and a pair of ears, and asking a game
+/// to imagine a room it cannot hear is how an afternoon's music gets lost.
+///
+/// **A film carries a mix somebody else made.** Its 5.1 was authored for a room, and taking it
+/// at full width is the whole point of placing channels: the surrounds go behind the wearer
+/// because that is where the mix says they are.
+///
+/// So the width follows the application, decided once when it is launched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Width {
+    /// Two channels, placed at the window's edges. What a game should be given.
+    Stereo,
+    /// As wide as anything can be placed, for an app playing a mix it did not make.
+    Full,
+}
+
+impl Width {
+    pub fn layout(self) -> Layout {
+        match self {
+            Width::Stereo => Layout::Stereo,
+            Width::Full => Layout::Surround714,
+        }
+    }
+}
+
 /// Identifies one window's audio, for as long as that window exists.
 pub type Slot = u64;
 
@@ -171,6 +205,12 @@ struct SlotState {
     /// What it is actually using of that, as a layout code, or 0 for silence.
     sounding: AtomicU32,
     dropped: AtomicU32,
+    /// How many times the output callback found the queue short *while the app was
+    /// producing*. See the note on [`crate::ring::Ring`]: a run of these is a stutter.
+    starved: AtomicU32,
+    /// Bumped every time the app hands over audio, so the output side can tell a window whose
+    /// app has gone quiet from one whose sound is not arriving fast enough.
+    fed: AtomicU32,
 }
 
 impl SlotState {
@@ -184,6 +224,8 @@ impl SlotState {
             layout: AtomicU32::new(0),
             sounding: AtomicU32::new(0),
             dropped: AtomicU32::new(0),
+            starved: AtomicU32::new(0),
+            fed: AtomicU32::new(0),
         }
     }
 
@@ -221,7 +263,7 @@ fn layout_from_code(code: u32) -> Option<Layout> {
 }
 
 enum Command {
-    Open(Slot),
+    Open(Slot, Layout),
     Close(Slot),
     Aim {
         slot: Slot,
@@ -290,8 +332,10 @@ impl Engine {
     ///
     /// The sink appears in the audio graph named [`sink_name`]; an app launched with
     /// [`routing_env`] will find it.
-    pub fn open(&self, slot: Slot) {
-        let _ = self.to_loop.send(Command::Open(slot));
+    /// `width` is how many channels the sink offers, and it is a decision about the app that
+    /// will play into it rather than about the machine — see [`Width`].
+    pub fn open(&self, slot: Slot, width: Width) {
+        let _ = self.to_loop.send(Command::Open(slot, width.layout()));
     }
 
     /// Take a window's sink away, when the window has gone.
@@ -378,11 +422,11 @@ fn run(
         let core = core.clone();
         move |command| match command {
             Command::Stop => mainloop.quit(),
-            Command::Open(slot) => {
+            Command::Open(slot, width) => {
                 if nodes.borrow().contains_key(&slot) {
                     return;
                 }
-                match open_slot(&core, slot, rate, head, *directness.borrow()) {
+                match open_slot(&core, slot, rate, head, *directness.borrow(), width) {
                     Ok(node) => {
                         if let Ok(mut s) = slots.lock() {
                             s.insert(slot, Arc::clone(&node.state));
@@ -489,6 +533,10 @@ struct SinkData {
 struct OutData {
     state: Arc<SlotState>,
     scratch: Vec<f32>,
+    /// The value of `SlotState::fed` at the last output cycle, so this one can tell whether
+    /// the app has produced anything since. A queue that runs dry while nothing is being put
+    /// into it is a silent window, not a fault.
+    last_fed: u32,
 }
 
 fn open_slot(
@@ -497,6 +545,7 @@ fn open_slot(
     rate: u32,
     head: Head,
     directness: Directness,
+    width: Layout,
 ) -> Result<Node, pw::Error> {
     let state = Arc::new(SlotState::new());
     let name = sink_name(slot);
@@ -618,6 +667,7 @@ fn open_slot(
                 Ordering::Relaxed,
             );
 
+            data.state.fed.fetch_add(1, Ordering::Relaxed);
             let dropped = data.state.queue.write(&data.output);
             if dropped > 0 {
                 let total = data.state.dropped.fetch_add(1, Ordering::Relaxed);
@@ -632,7 +682,7 @@ fn open_slot(
         })
         .register()?;
 
-    let format = format_pod(Layout::Surround714, rate);
+    let format = format_pod(width, rate);
     let mut params = [Pod::from_bytes(&format).expect("a serialised format is a pod")];
     sink.connect(
         spa::utils::Direction::Input,
@@ -658,11 +708,19 @@ fn open_slot(
         .add_local_listener_with_user_data(OutData {
             state: Arc::clone(&state),
             scratch: Vec::new(),
+            last_fed: 0,
         })
         .process(|stream, data| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
+            // How many frames the graph is asking for this cycle, which is not the same as how
+            // many the buffer can hold: a buffer is sized for the largest quantum it was
+            // negotiated against, and the quantum in force changes whenever something joins
+            // the graph asking for a shorter one -- which a game does. Filling the buffer
+            // regardless takes more out of the queue every cycle than the app puts in, and
+            // what comes out of that is a stutter rather than a sound.
+            let wanted = buffer.requested() as usize;
             let datas = buffer.datas_mut();
             let Some(first) = datas.first_mut() else {
                 return;
@@ -670,11 +728,26 @@ fn open_slot(
             const STRIDE: usize = 8; // two channels of f32
             let frames = match first.data() {
                 Some(slice) => {
-                    let frames = slice.len() / STRIDE;
+                    let room = slice.len() / STRIDE;
+                    let frames = if wanted > 0 { wanted.min(room) } else { room };
                     data.scratch.resize(frames * 2, 0.0);
                     // Short reads come back as silence rather than as a stall: making the
                     // sound card wait would take out every other window's audio too.
-                    data.state.queue.read(&mut data.scratch);
+                    let short = data.state.queue.read(&mut data.scratch);
+                    let fed = data.state.fed.load(Ordering::Relaxed);
+                    let producing = fed != data.last_fed;
+                    data.last_fed = fed;
+                    if short > 0 && producing {
+                        let total = data.state.starved.fetch_add(1, Ordering::Relaxed);
+                        // Throttled for the same reason the other direction is: a stream that
+                        // has genuinely stopped would otherwise say so sixty times a second.
+                        if total % 200 == 0 {
+                            log::warn!(
+                                "spatial audio: a window's sound ran dry ({short} samples of \
+                                 silence); this is what a stutter sounds like"
+                            );
+                        }
+                    }
                     for (i, sample) in data.scratch.iter().enumerate() {
                         let at = i * 4;
                         slice[at..at + 4].copy_from_slice(&sample.to_le_bytes());

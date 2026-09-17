@@ -67,6 +67,9 @@ const PANEL_DISTANCE: f32 = 1.4;
 /// of a text document, which is the same ballpark as a laptop touchpad.
 const SCROLL_SCALE: f64 = 260.0;
 
+/// How long Y is held on the window list before the application is killed outright.
+const FORCE_CLOSE_HOLD: Duration = Duration::from_secs(5);
+
 /// How long the headset may stay silent before it is reopened.
 ///
 /// The glasses stream at about a kilohertz, so a second of nothing is already thousands of
@@ -187,6 +190,16 @@ pub fn run(
     if controller.is_none() {
         log::warn!("no controller; the return-to-desktop button will not work");
     }
+    // Every controller as one, through the focused application's layout, into one virtual
+    // gamepad. Built here rather than inside the rebuild loop below: the pad is what a game
+    // enumerates when it starts, and a game does not go looking again because the glasses were
+    // replugged. See `crate::controls`.
+    let mut controls = crate::controls::Controls::new();
+    // Which window the layout was last chosen for. Choosing reads the window's process
+    // environment, so it happens when focus moves rather than every frame.
+    let mut controls_focus: Option<usize> = None;
+    // How long Y has been held on the window list, for the force-close.
+    let mut force_close_since: Option<std::time::Instant> = None;
     let mut gesture = spatiand_input::TwoPadGesture::new();
     let pointer_config = PointerConfig::default();
     let mut pointers = PointerState::default();
@@ -1004,21 +1017,10 @@ pub fn run(
                         // each one to find out where you were. Both problems are the window
                         // switcher's now -- a paddle, and a list you can read.
                         //
-                        // This is the small version of something bigger: eventually every
-                        // control should be remappable per application and forwarded without
-                        // the application knowing, the way Game Mode does it. What is here is
-                        // the fixed mapping that makes the common case work today, kept in
-                        // one table so that replacing it is replacing one table.
-                        if !shell.menu_is_open() {
-                            // Pressed here and released below, so a held direction repeats in
-                            // the application exactly as a held arrow key does -- scrolling a
-                            // long list is one press, not forty.
-                            if let Some(code) = crate::input_map::key_for(*control) {
-                                let now = started.elapsed().as_millis() as u32;
-                                send_key_state(&mut runtime.state, code, true, now);
-                                continue;
-                            }
-                        }
+                        // It is now exactly what that grew into: every control belongs to the
+                        // focused application's controller layout, run below with the rest of
+                        // the controls and forwarded without the application knowing -- see
+                        // `crate::controls`. Only the menus are decided here.
                         if let Some(intent) = intent_for(*control) {
                             // The switcher's list is stale the moment anything is launched or
                             // closed, so it is rebuilt on the way in rather than kept up to
@@ -1032,16 +1034,6 @@ pub fn run(
                             }
                         }
                     }
-                    // The other half of the D-pad mapping. Without it the key is never let
-                    // go, which a client reads as a direction held down forever.
-                    if !shell.menu_is_open() {
-                        for control in c.released() {
-                            if let Some(code) = crate::input_map::key_for(*control) {
-                                let now = started.elapsed().as_millis() as u32;
-                                send_key_state(&mut runtime.state, code, false, now);
-                            }
-                        }
-                    }
                     let input = *c.state();
                     // Two thumbs down is a window gesture and takes the pads away from the
                     // pointer. Running both at once sends the laser racing across the world
@@ -1052,10 +1044,157 @@ pub fn run(
                     // Updated so the gesture keeps its own state consistent, and dropped: see
                     // `two_handed` above for why nothing consumes it yet.
                     let _two_handed = gesture.update(&input.left_pad, &input.right_pad);
-                    if !shell.menu_is_open() {
-                        pads = Some(input);
+                }
+            }
+
+            // The window the layout says is focused is the window the keyboard talks to.
+            // Cheap and idempotent: it does nothing at all on a frame where focus has not
+            // moved. See `Spatiand::settle_keyboard_focus`.
+            runtime.state.settle_keyboard_focus();
+            runtime.state.fit_screen_to_windows();
+
+            // --- the controller layout ---
+            //
+            // Every controller there is -- the Deck, a Bluetooth pad, the glasses -- through the
+            // layout of whatever is in front of the wearer, into one virtual gamepad plus keys
+            // and a mouse. The layout is chosen again only when focus moves, since choosing it
+            // reads the window's process environment for a Steam game's id.
+            {
+                let focused = runtime
+                    .state
+                    .space
+                    .elements()
+                    .find(|w| runtime.state.layout.is_focused(w))
+                    .cloned();
+                let id = focused.as_ref().and_then(|w| runtime.state.layout.id_of(w));
+                if id != controls_focus {
+                    controls_focus = id;
+                    match focused.as_ref() {
+                        Some(window) => {
+                            let key = crate::controls::app_key(
+                                runtime.state.pid_of(window),
+                                runtime.state.app_id_of(window).as_deref(),
+                            );
+                            let name = runtime
+                                .state
+                                .title_of(window)
+                                .unwrap_or_else(|| "this application".into());
+                            controls.focus(key, &name);
+                        }
+                        None => controls.focus(
+                            spatiand_mapper::AppKey::App(String::new()),
+                            "the desktop",
+                        ),
                     }
                 }
+            }
+            let deck_input = controller.as_ref().map(|c| *c.state());
+            let snapshot = controls.gather(deck_input.as_ref());
+            // Rested under a menu, on the waiting screen and through calibration: a game must
+            // never be left holding a button that was pressed to work a menu.
+            let layout_resting = shell.menu_is_open() || missing.is_some() || calibration.is_some();
+            let delivery = controls.step(&snapshot, layout_resting);
+            if let Some((strong, weak)) = controls.rumble() {
+                if let Some(c) = controller.as_ref() {
+                    c.rumble(strong, weak);
+                }
+            }
+            // A Bluetooth pad's guide button is its STEAM button.
+            if delivery.guide {
+                if let Some(event) = shell.handle(spatiand_shell::Intent::ToggleHud) {
+                    shell_events.push(event);
+                }
+            }
+            for command in &delivery.commands {
+                use spatiand_mapper::Command;
+                let intent = match command {
+                    Command::Hud => Some(spatiand_shell::Intent::ToggleHud),
+                    Command::Launcher => Some(spatiand_shell::Intent::ToggleLauncher),
+                    Command::Keyboard => {
+                        keyboard.open = !keyboard.open;
+                        None
+                    }
+                    Command::Screenshot => {
+                        screenshot = true;
+                        None
+                    }
+                    Command::Recentre => {
+                        shell_events.push(ShellEvent::Hud(HudAction::Recentre));
+                        None
+                    }
+                };
+                if let Some(event) = intent.and_then(|i| shell.handle(i)) {
+                    shell_events.push(event);
+                }
+            }
+            for (code, pressed) in &delivery.keys {
+                let now = started.elapsed().as_millis() as u32;
+                send_key_state(&mut runtime.state, *code, *pressed, now);
+            }
+            // The trackpads are always the pointer, in every application and every layout. They
+            // were briefly a layout's to take, and a game's layout took them: opening OpenTTD
+            // left the wearer with no way to point at anything, including the menus that would
+            // have undone it. A trigger the layout uses as a trigger is a different matter, and
+            // reads as unpulled here so the pointer does not also click with it.
+            if let Some(mut input) = deck_input {
+                if !shell.menu_is_open() {
+                    let mut raw = input.buttons.raw();
+                    for (clicks, control) in [
+                        (delivery.pointer_clicks[0], spatiand_input::Control::L2),
+                        (delivery.pointer_clicks[1], spatiand_input::Control::R2),
+                    ] {
+                        if !clicks {
+                            if let Some(bit) = control.bit() {
+                                raw &= !(1u64 << bit);
+                            }
+                        }
+                    }
+                    if !delivery.pointer_clicks[0] {
+                        input.left_trigger = 0.0;
+                    }
+                    if !delivery.pointer_clicks[1] {
+                        input.right_trigger = 0.0;
+                    }
+                    input.buttons = spatiand_input::Buttons::from_raw(raw);
+                    pads = Some(input);
+                }
+            }
+
+            // Holding Y on the window list kills the application outright. The way out of an
+            // application that ignores a close request -- a game that has stopped drawing, a
+            // dialog with no buttons reachable -- without a terminal, which in a headset there
+            // is not. Long enough that it cannot be done by accident while pressing Y to close.
+            if shell.mode() == Mode::Switcher
+                && controller
+                    .as_ref()
+                    .is_some_and(|c| c.state().buttons.is_down(spatiand_input::Control::Y))
+            {
+                let since = force_close_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= FORCE_CLOSE_HOLD {
+                    force_close_since = None;
+                    let window = shell.switcher().activate().and_then(|id| {
+                        runtime
+                            .state
+                            .space
+                            .elements()
+                            .find(|w| runtime.state.layout.id_of(w) == Some(id))
+                            .cloned()
+                    });
+                    if let Some(window) = window {
+                        let title = runtime.state.display_title(&window);
+                        match runtime.state.pid_of(&window) {
+                            Some(pid) => {
+                                log::warn!("force-closing {title} (pid {pid})");
+                                // SIGKILL rather than SIGTERM: this is the second ask, and the
+                                // first one was the polite one.
+                                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                            }
+                            None => log::warn!("cannot force-close {title}: no process id"),
+                        }
+                    }
+                }
+            } else {
+                force_close_since = None;
             }
 
             for event in shell_events {
@@ -1074,12 +1213,19 @@ pub fn run(
                         // Claim a sink before the app starts, so its very first sound already
                         // knows which window it belongs to. Nothing here fails if spatial
                         // audio is off -- the app simply launches as it always did.
-                        let claim = spatial_audio.prepare_launch();
+                        let claim =
+                            spatial_audio.prepare_launch(crate::audio::width_for(&app.categories));
                         let mut env: Vec<(String, String)> =
                             claim.as_ref().map(|(_, e)| e.clone()).unwrap_or_default();
                         // Where the X server is, for anything that cannot speak Wayland.
                         env.extend(crate::xwayland::client_environment(x_display));
-                        match spatiand_platform::launch(&app.exec, &runtime.state.socket_name, &env)
+                        // And that the virtual pad is the only controller there is. Steam
+                        // hands its own environment to every game it starts, so this reaches
+                        // a game launched through it too -- as long as Steam is also told to
+                        // keep its hands off the controller itself.
+                        env.extend(crate::controls::Controls::launch_environment());
+                        let exec = crate::controls::without_steam_input(&app.exec);
+                        match spatiand_platform::launch(&exec, &runtime.state.socket_name, &env)
                         {
                             Ok(pid) => {
                                 if let Some((slot, _)) = claim {
@@ -1129,6 +1275,42 @@ pub fn run(
                                 runtime.state.layout.set(&window, placement);
                             }
                             runtime.state.focus_window(&window);
+                        }
+                    }
+                    // Politely: the application decides, and one with unsaved work may put up a
+                    // dialog and stay. The list stays open and is refreshed as windows go.
+                    ShellEvent::CloseWindow(id) => {
+                        let window = runtime
+                            .state
+                            .space
+                            .elements()
+                            .find(|w| runtime.state.layout.id_of(w) == Some(id))
+                            .cloned();
+                        if let Some(window) = window {
+                            log::info!("closing {}", runtime.state.display_title(&window));
+                            runtime.state.close_window(&window);
+                        }
+                    }
+                    ShellEvent::Controller(intent) => {
+                        use spatiand_mapper::editor::Input;
+                        use spatiand_shell::grid::Direction;
+                        let input = match intent {
+                            spatiand_shell::ControllerIntent::Navigate(Direction::Up) => Input::Up,
+                            spatiand_shell::ControllerIntent::Navigate(Direction::Down) => {
+                                Input::Down
+                            }
+                            spatiand_shell::ControllerIntent::Navigate(Direction::Left) => {
+                                Input::Left
+                            }
+                            spatiand_shell::ControllerIntent::Navigate(Direction::Right) => {
+                                Input::Right
+                            }
+                            spatiand_shell::ControllerIntent::Accept => Input::Accept,
+                            spatiand_shell::ControllerIntent::Back => Input::Back,
+                        };
+                        // Backing out of the top page closes the editor, which saves.
+                        if !controls.editor_input(input) && shell.close_controller().is_some() {
+                            scene.forget_anchor();
                         }
                     }
                     ShellEvent::Hud(action) => match action {
@@ -1182,6 +1364,9 @@ pub fn run(
                         HudAction::OpenSwitcher => {
                             shell.set_windows(runtime.state.open_windows())
                         }
+                        // The shell has already switched to the editor; what is owed is the editor,
+                        // opened on whatever is in front of the wearer.
+                        HudAction::ControllerLayout => controls.open_editor(),
                         HudAction::ToggleKeyboard => {
                             keyboard.open = !keyboard.open;
                             log::info!(
@@ -1235,6 +1420,8 @@ pub fn run(
                 // starts before the retraction lands inherits the stale value anyway. This is
                 // what game mode was tripping over -- see `withdraw_session_environment`.
                 spatiand_platform::withdraw_session_environment(&published_names);
+                // A layout being edited is saved rather than lost with the session.
+                controls.close_editor();
                 // Exiting is not enough. SDDM restarts whatever the default session is, and
                 // getting here means that is Spatiand - so quitting just relaunches us, which
                 // looks like the button doing nothing. Hand the default back to Plasma first.
@@ -1315,7 +1502,23 @@ pub fn run(
                                 c.feed(&sample);
                             }
                             tracker.integrate(&sample);
+                            // The head's own rotation, for a layout that aims with the glasses:
+                            // in the tracker's frame, with its bias taken out, so a still head
+                            // reads still.
+                            controls.glasses_gyro(
+                                tracker.axes().apply(sample.gyro) - tracker.gyro_bias(),
+                            );
                         }
+                        HmdEvent::Button {
+                            button,
+                            pressed: true,
+                        } => match button {
+                            spatiand_hmd::HmdButton::BrightnessUp => controls.glasses_button(true),
+                            spatiand_hmd::HmdButton::BrightnessDown => {
+                                controls.glasses_button(false)
+                            }
+                            spatiand_hmd::HmdButton::Unknown(_) => {}
+                        },
                         HmdEvent::Disconnected => {
                             log::warn!("headset disconnected");
                             hmd = None;
@@ -1567,13 +1770,45 @@ pub fn run(
                 debug_assert!(keyboard_hover.len() <= 2, "at most one key per pad");
             }
             scene.sync_apps(&mut renderer, &mut text, &shell, ppd)?;
+            // The layout editor is a card like any menu, with the controller picture beside it.
+            // Anything that took the shell elsewhere mid-edit -- STEAM, say -- closes it, which
+            // is also when its changes are saved.
+            if shell.mode() != Mode::Controller && controls.editor_open() {
+                controls.close_editor();
+            }
+            let editor_view = if shell.mode() == Mode::Controller {
+                controls.editor_view()
+            } else {
+                None
+            };
+            if shell.mode() == Mode::Controller
+                && editor_view.is_none()
+                && shell.close_controller().is_some()
+            {
+                scene.forget_anchor();
+            }
+            // The editor shares the view with its controller picture, so its card is smaller.
+            scene.set_compact_card(editor_view.is_some());
+            let menu_model = match editor_view.as_ref() {
+                Some(view) => Some(crate::menu::from_editor(view)),
+                None => crate::menu::model(&shell),
+            };
             scene.sync_menu(
                 &mut renderer,
                 &mut text,
-                crate::menu::model(&shell).as_ref(),
+                menu_model.as_ref(),
                 ppd,
                 (stereo.h_fov_deg, stereo.v_fov_deg()),
             )?;
+            scene.sync_diagram(
+                &mut renderer,
+                &mut text,
+                editor_view
+                    .as_ref()
+                    .map(|v| v.callouts.as_slice())
+                    .unwrap_or(&[]),
+            )?;
+            scene.sync_radial(&mut renderer, &mut text, delivery.radial.as_ref(), ppd)?;
 
             // Answer any dmabuf a client offered since the last frame, before importing:
             // a buffer nobody has said yes to yet is one the client has not committed.
@@ -1633,6 +1868,14 @@ pub fn run(
             // Windows that have come and gone since the last frame. Collected by the Wayland
             // handlers, which have no business reaching into an audio engine, and drained
             // here where the engine lives.
+            // A window list is stale the moment something opens or closes, and closing things
+            // is now something the list itself does.
+            if shell.mode() == Mode::Switcher
+                && !(runtime.state.arrived_windows.is_empty()
+                    && runtime.state.departed_windows.is_empty())
+            {
+                shell.set_windows(runtime.state.open_windows());
+            }
             for (id, pid) in std::mem::take(&mut runtime.state.arrived_windows) {
                 spatial_audio.adopt(id, pid);
             }
@@ -1668,7 +1911,11 @@ pub fn run(
                     } else {
                         continue;
                     };
-                    sources.push(crate::audio::Source { window: id, kind });
+                    sources.push(crate::audio::Source {
+                        window: id,
+                        kind,
+                        focused: runtime.state.layout.is_focused(window),
+                    });
                 }
                 spatial_audio.aim_all(&sources, head);
                 for quad in windows.iter_mut() {
@@ -1898,6 +2145,37 @@ pub fn run(
                                 }
                             }
                         }
+                    }
+                }
+
+                // What the layout does with the mouse, delivered to the window in front: a game's
+                // camera by relative motion, and clicks and the wheel wherever that cursor is.
+                if !shell.menu_is_open()
+                    && (delivery.motion != (0, 0)
+                        || !delivery.mouse_buttons.is_empty()
+                        || delivery.wheel != (0, 0))
+                {
+                    if let Some(quad) = windows.iter().find(|w| w.focused) {
+                        let surface = quad.surface.clone();
+                        let size = (quad.pixels.0 as f64, quad.pixels.1 as f64);
+                        pointers.nudge(
+                            &mut runtime.state,
+                            &surface,
+                            size,
+                            delivery.motion.0 as f64,
+                            delivery.motion.1 as f64,
+                            time_ms,
+                        );
+                        for (code, pressed) in &delivery.mouse_buttons {
+                            pointers.button(&mut runtime.state, *code, *pressed, time_ms);
+                        }
+                        // Fifteen units a notch, as libinput reports a wheel.
+                        pointers.scroll(
+                            &mut runtime.state,
+                            delivery.wheel.0 as f64 * 15.0,
+                            -(delivery.wheel.1 as f64) * 15.0,
+                            time_ms,
+                        );
                     }
                 }
 
@@ -2271,12 +2549,18 @@ pub fn run(
 
                     // Face buttons, only while a thumb is on a pad -- otherwise A would click
                     // whatever the stale cursor was over, and A is also the menus' select.
+                    //
+                    // And only where the application's layout has not claimed them. In a game A
+                    // is jump, and a jump must not also click on whatever the laser is over.
                     if right_aim.is_some() {
-                        for (control, button) in [
-                            (spatiand_input::Control::A, BTN_LEFT),
-                            (spatiand_input::Control::B, BTN_RIGHT),
-                            (spatiand_input::Control::X, BTN_MIDDLE),
+                        for (control, button, mapped) in [
+                            (spatiand_input::Control::A, BTN_LEFT, controls.binds(spatiand_mapper::Button::A)),
+                            (spatiand_input::Control::B, BTN_RIGHT, controls.binds(spatiand_mapper::Button::B)),
+                            (spatiand_input::Control::X, BTN_MIDDLE, controls.binds(spatiand_mapper::Button::X)),
                         ] {
+                            if mapped {
+                                continue;
+                            }
                             let down = p.buttons.is_down(control);
                             let was = face_down.contains(&button);
                             if down && !was {
@@ -2387,6 +2671,7 @@ pub fn run(
                             );
                         }
                         scene.draw_menu(gl, &eye, &shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
+                        scene.draw_radial(gl, &eye, orientation);
                         // While a resize is running the cursor keeps the edge's shape even
                         // once the ray has left the window -- which it does immediately, since
                         // dragging an edge outward means aiming past where the window was.
@@ -2811,8 +3096,16 @@ pub fn run(
             frames += 1;
             if last_report.elapsed() >= Duration::from_secs(2) {
                 let secs = last_report.elapsed().as_secs_f32();
+                // The game's own cadence beside ours: a steady 60 here says nothing about
+                // whether the window in front is stuttering. See `crate::cadence`.
+                let window = runtime
+                    .state
+                    .cadence
+                    .take()
+                    .map(|w| format!("; {w}"))
+                    .unwrap_or_default();
                 log::info!(
-                    "presented {frames} frames in {secs:.1}s ({:.0} fps), {skipped} waits for flip",
+                    "presented {frames} frames in {secs:.1}s ({:.0} fps), {skipped} waits for flip{window}",
                     frames as f32 / secs
                 );
                 frames = 0;

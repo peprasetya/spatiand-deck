@@ -16,12 +16,15 @@ use smithay::reexports::wayland_server::{Display, DisplayHandle};
 
 mod attention;
 mod audio;
+mod cadence;
 mod backend_drm;
 mod backend_snapshot;
 mod backend_winit;
 mod calib;
 mod click;
+mod controls;
 mod desk;
+mod diagram;
 mod dmabuf;
 mod environment;
 mod gl;
@@ -54,8 +57,16 @@ pub struct Runtime {
     pub display_handle: DisplayHandle,
 }
 
+/// The default log filter.
+///
+/// Info, except for one talkative thing: smithay logs the keyboard's focus at info on every key
+/// event, and for an X11 window that focus is an `X11Surface` whose `Debug` runs to four
+/// kilobytes — every atom in the server, the window's hints and its state. Typing a sentence
+/// buried the rest of the log. `RUST_LOG` overrides all of this as usual.
+const LOG: &str = "info,smithay::input::keyboard=warn";
+
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(LOG)).init();
 
     // Before any backend, and so before anything claims the controller. The window between
     // claiming hardware and being able to hand it back is exactly the window this closes, so

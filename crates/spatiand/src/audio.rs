@@ -33,8 +33,8 @@ use std::collections::HashMap;
 
 use glam::DQuat;
 use spatiand_audio::render::Directness;
-use spatiand_audio::server::{routing_env, Engine, Head, Slot, Status};
-use spatiand_audio::stage::{place, Layout, Stage, NOMINAL_HALF_STAGE};
+use spatiand_audio::server::{routing_env, Engine, Head, Slot, Status, Width};
+use spatiand_audio::stage::{place, Stage, NOMINAL_HALF_STAGE};
 
 use crate::window::Placement;
 
@@ -65,6 +65,8 @@ pub struct Audio {
     launched: Vec<(u32, Slot)>,
     /// Which window owns which slot.
     bound: HashMap<usize, Slot>,
+    /// How wide each sink was opened, so its channels are aimed as the ones it actually has.
+    widths: HashMap<Slot, Width>,
     next: Slot,
 }
 
@@ -83,6 +85,7 @@ impl Audio {
             engine,
             launched: Vec::new(),
             bound: HashMap::new(),
+            widths: HashMap::new(),
             next: 1,
         }
     }
@@ -95,11 +98,12 @@ impl Audio {
     ///
     /// Returns nothing when spatial audio is off, and the caller then launches the app exactly
     /// as it always did.
-    pub fn prepare_launch(&mut self) -> Option<(Slot, Vec<(String, String)>)> {
+    pub fn prepare_launch(&mut self, width: Width) -> Option<(Slot, Vec<(String, String)>)> {
         let engine = self.engine.as_ref()?;
         let slot = self.next;
         self.next += 1;
-        engine.open(slot);
+        engine.open(slot, width);
+        self.widths.insert(slot, width);
         Some((slot, routing_env(slot)))
     }
 
@@ -150,13 +154,43 @@ impl Audio {
         None
     }
 
-    /// The window has gone; take its sink with it.
+    /// The window has gone; take its sink with it, if nothing is still playing into it.
+    ///
+    /// **A sink belongs to a process, not to a window**, and the two do not end together. This
+    /// used to close the sink on the first window of an app to disappear, which is wrong for
+    /// any application that opens more than one window and fatal for a game launched through
+    /// Steam: Steam puts up a window while it prepares a game and takes it down again as the
+    /// game starts, so the sink was destroyed at the exact moment the game began to play into
+    /// it. PipeWire then did the only thing it can with a stream whose target has gone --
+    /// moved it to the machine's default output -- and the game's sound came out of the Deck
+    /// unplaced, which is what it sounds like from inside the headset.
+    ///
+    /// Dropping the `launched` entry made it worse: the game's own window, arriving after the
+    /// splash had gone, could no longer find the slot its process had been given, so its sound
+    /// could not be aimed either.
+    ///
+    /// So a sink now outlives its windows and is reclaimed when the process it was made for is
+    /// gone. That is a `/proc` lookup per departed window, which happens when somebody closes
+    /// something, not every frame.
     pub fn forget(&mut self, window: usize) {
-        if let Some(slot) = self.bound.remove(&window) {
-            self.launched.retain(|(_, s)| *s != slot);
-            if let Some(engine) = &self.engine {
-                engine.close(slot);
-            }
+        let Some(slot) = self.bound.remove(&window) else {
+            return;
+        };
+        if self.bound.values().any(|held| *held == slot) {
+            return;
+        }
+        if self
+            .launched
+            .iter()
+            .any(|(pid, held)| *held == slot && process_alive(*pid))
+        {
+            log::debug!("window {window} has gone; slot {slot} stays, its app is still running");
+            return;
+        }
+        self.launched.retain(|(_, s)| *s != slot);
+        self.widths.remove(&slot);
+        if let Some(engine) = &self.engine {
+            engine.close(slot);
         }
     }
 
@@ -210,7 +244,11 @@ impl Audio {
             .clamp(-1.0, 1.0);
         // Every window's sink is the widest layout, whatever the app is using of it; the
         // renderer skips whatever is silent.
-        engine.aim(slot, place(Layout::Surround714, &stage, head), ahead.acos());
+        // The sink's own width, which is what its renderer has voices for. It used to be the
+        // widest layout on the understanding that the renderer skips what is silent -- true,
+        // but it only worked because every layout starts with the front pair.
+        let width = self.widths.get(&slot).copied().unwrap_or(Width::Full);
+        engine.aim(slot, place(width.layout(), &stage, head), ahead.acos());
     }
 
     /// What a window's sound is doing, for its title bar to show.
@@ -227,12 +265,32 @@ impl Audio {
     }
 }
 
+/// How wide a sink to open for an application about to start.
+///
+/// By its desktop entry's categories, which is the only thing known at launch — and enough:
+/// the question is whether the application *makes* its mix (a game, which will mix for
+/// whatever device it is shown) or *plays* one (a film, whose channels were placed by
+/// somebody else). See [`Width`] for what each answer costs.
+pub fn width_for(categories: &[String]) -> Width {
+    let game = categories
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case("Game") || c.eq_ignore_ascii_case("ActionGame"));
+    if game {
+        Width::Stereo
+    } else {
+        Width::Full
+    }
+}
+
 /// One window, and what its sound would be if it were the one making it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Source {
     /// The window's id, the same one the sink was bound to.
     pub window: usize,
     pub kind: Kind,
+    /// Whether this is the window the wearer is working in. Breaks a tie between windows of
+    /// the same size — see [`Source::rank`].
+    pub focused: bool,
 }
 
 /// What kind of thing a window is, for the purpose of deciding where its app's sound is.
@@ -260,16 +318,32 @@ impl Source {
     ///   accident this replaces. A player's video panel is much larger than its transport
     ///   bar, a browser's page much larger than its popup, so in every case that prompted
     ///   this the biggest window *is* the one with the picture in it.
+    /// * **Between windows of the same size, the focused one wins.** This is what "the same
+    ///   size" was hiding: a Steam game is *two* applications sharing one sink, Steam and the
+    ///   game, and their windows are both whatever size a new window is. The tie went to the
+    ///   lower id, which is Steam's — so the game's sound arrived from wherever Steam's
+    ///   window happened to be standing while the game was straight ahead. Focus does not
+    ///   disturb the case above, because a preferences panel is smaller than the window it
+    ///   belongs to and a transport bar smaller than its film.
     ///
-    /// Ties go to the lower window id, purely so that two identical windows do not make the
-    /// aim depend on the order a hash map happened to yield.
-    fn rank(&self) -> (u8, OrderedSize, std::cmp::Reverse<usize>) {
+    /// Sizes count as the same when they are within [`SAME_SIZE`] of each other, so this is a
+    /// rule about windows that look alike rather than about floating-point equality.
+    ///
+    /// Ties that survive all of that go to the lower window id, purely so that two identical
+    /// windows do not make the aim depend on the order a hash map happened to yield.
+    fn rank(&self) -> (u8, i32, bool, OrderedSize, std::cmp::Reverse<usize>) {
         let (tier, size) = match self.kind {
             Kind::Environment { .. } => (1, 0.0),
             // Width over radius: how big it looks, not how big it is.
             Kind::Window(p) => (0, p.width / p.radius.max(1e-6)),
         };
-        (tier, OrderedSize(size), std::cmp::Reverse(self.window))
+        (
+            tier,
+            size_class(size),
+            self.focused,
+            OrderedSize(size),
+            std::cmp::Reverse(self.window),
+        )
     }
 
     /// Where this window's sound would come from, and how wide.
@@ -295,6 +369,21 @@ impl Source {
     }
 }
 
+/// How much bigger one window has to look than another before size decides between them.
+///
+/// A quarter. Below that they are two windows of a kind -- a game and the Steam window behind
+/// it, two documents side by side -- and which one an app's sound belongs to is better answered
+/// by which one the wearer is in than by a few per cent of width.
+const SAME_SIZE: f64 = 1.25;
+
+/// Which band of apparent size a window falls in, for comparing two of them.
+fn size_class(size: f64) -> i32 {
+    if size <= 0.0 {
+        return i32::MIN;
+    }
+    (size.ln() / SAME_SIZE.ln()).floor() as i32
+}
+
 /// An angular size that can be sorted.
 ///
 /// A window's size is a float and floats are not `Ord`; it is also finite by construction
@@ -317,6 +406,21 @@ impl Ord for OrderedSize {
 /// finding the *last* `)` rather than by splitting on whitespace -- a process called
 /// `foo) 1 2 3 (bar` is unusual but entirely legal, and splitting naively reads the wrong
 /// field and walks off to some unrelated process.
+/// Whether a process we launched is still running.
+///
+/// A zombie counts as gone: it has exited and closed everything it had open, and it stays in
+/// the table only until its parent reaps it. `/proc/<pid>/stat` names the state in the field
+/// after the process's own name — see [`parent_of`] for why that is where the reading starts.
+fn process_alive(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some(after_name) = stat.rfind(')').map(|at| &stat[at + 1..]) else {
+        return false;
+    };
+    !matches!(after_name.split_whitespace().next(), Some("Z") | None)
+}
+
 fn parent_of(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_name = &stat[stat.rfind(')')? + 1..];
@@ -327,6 +431,7 @@ fn parent_of(pid: u32) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spatiand_audio::stage::Layout;
 
     #[test]
     fn a_process_name_full_of_punctuation_does_not_derail_the_walk() {
@@ -364,6 +469,14 @@ mod tests {
                 width,
                 ..Default::default()
             }),
+            focused: false,
+        }
+    }
+
+    fn focused_win(window: usize, yaw: f64, width: f64) -> Source {
+        Source {
+            focused: true,
+            ..win(window, yaw, width)
         }
     }
 
@@ -371,6 +484,7 @@ mod tests {
         Source {
             window,
             kind: Kind::Environment { yaw },
+            focused: false,
         }
     }
 
@@ -395,6 +509,117 @@ mod tests {
         audio.launched(4242, 1);
         audio.launched(4242, 2);
         assert_eq!(audio.slot_of_process(4242), Some(2));
+    }
+
+    /// The reported fault, as a rule about which of two alike windows the sound belongs to.
+    ///
+    /// A Steam game is two applications on one sink: Steam, whose window opened first, and the
+    /// game. Both windows are whatever size a new window is, so the tie went to the lower id —
+    /// Steam's — and the game's sound arrived from wherever Steam's window was standing while
+    /// the game itself was straight ahead.
+    #[test]
+    fn between_two_windows_of_a_size_the_sound_follows_the_one_being_used() {
+        let steam = win(1, 90f64.to_radians(), 1.1);
+        let game = focused_win(2, 0.0, 1.1);
+        for order in [vec![steam, game], vec![game, steam]] {
+            let chosen = order
+                .iter()
+                .max_by_key(|s| s.rank())
+                .expect("something to choose");
+            assert_eq!(*chosen, game, "the wrong window won in this order");
+            assert!(chosen.stage().yaw.abs() < 1e-12, "the sound is not where the game is");
+        }
+    }
+
+    #[test]
+    fn a_focused_transport_bar_still_does_not_take_the_films_sound() {
+        // Focus only breaks a tie. A window a quarter bigger than another is not a tie, and a
+        // film is very much more than a quarter bigger than the bar in front of it.
+        let film = win(1, 0.0, 2.4);
+        let bar = focused_win(2, 60f64.to_radians(), 0.8);
+        let chosen = [film, bar]
+            .into_iter()
+            .max_by_key(|s| s.rank())
+            .expect("something to choose");
+        assert_eq!(chosen, film);
+    }
+
+    #[test]
+    fn size_bands_separate_a_film_from_a_bar_and_nothing_smaller() {
+        // Bands are absolute, so two sizes a fifth apart may or may not share one depending on
+        // where they fall. What has to hold is the two ends: the same size is always the same
+        // band, and a window several times bigger is always a bigger one, wherever the
+        // boundaries happen to land.
+        let mut steps = 0;
+        let mut size = 0.2;
+        while size < 4.0 {
+            assert_eq!(size_class(size), size_class(size), "a size is its own band");
+            assert!(
+                size_class(size) < size_class(size * 3.0),
+                "three times bigger did not separate at {size}"
+            );
+            size *= 1.05;
+            steps += 1;
+        }
+        assert!(steps > 50, "the sweep barely ran");
+    }
+
+    #[test]
+    fn a_game_is_given_a_pair_of_channels_and_a_player_the_room() {
+        assert_eq!(width_for(&["Game".into()]), Width::Stereo);
+        assert_eq!(width_for(&["ActionGame".into(), "Game".into()]), Width::Stereo);
+        // Case is not something a desktop entry promises.
+        assert_eq!(width_for(&["game".into()]), Width::Stereo);
+        assert_eq!(width_for(&["AudioVideo".into(), "Player".into()]), Width::Full);
+        assert_eq!(width_for(&[]), Width::Full);
+    }
+
+    /// The reported fault, as a rule about the life of a sink.
+    ///
+    /// Steam shows a window while it prepares a game and takes it away as the game starts, so
+    /// the first window of that app to depart is not the last. Closing the sink then left the
+    /// game playing into nothing, and PipeWire moved it to the default output.
+    ///
+    /// The windows are bound by hand rather than through `adopt`, which does nothing at all
+    /// with the engine off — and an engine cannot be started in a test, since it opens a real
+    /// connection to the machine's audio server. What is under test is which of them `forget`
+    /// decides to keep, and that is all bookkeeping.
+    #[test]
+    fn a_sink_outlives_the_window_that_first_claimed_it() {
+        let mut audio = Audio::new(false, Directness::default());
+        let alive = std::process::id();
+        audio.launched(alive, 1);
+        audio.bound.insert(10, 1);
+        audio.bound.insert(11, 1);
+
+        audio.forget(10);
+        assert_eq!(audio.bound.get(&11), Some(&1), "the other window lost its sink");
+
+        // And the window that has not opened yet -- the game itself -- can still find it.
+        audio.forget(11);
+        assert_eq!(
+            audio.slot_of_process(alive),
+            Some(1),
+            "the slot was forgotten while its app was still running"
+        );
+    }
+
+    #[test]
+    fn a_sink_is_reclaimed_once_its_app_has_gone() {
+        // A real process, run to completion and reaped, so the pid is genuinely absent rather
+        // than a number chosen in the hope that nothing owns it.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("something to run");
+        let gone = child.id();
+        child.wait().expect("it to exit");
+
+        let mut audio = Audio::new(false, Directness::default());
+        audio.launched(gone, 3);
+        audio.bound.insert(20, 3);
+        audio.forget(20);
+        assert!(audio.bound.is_empty());
+        assert_eq!(audio.slot_of_process(gone), None, "a dead app kept its sink");
     }
 
     /// The reported fault, as a rule about which window an app's sound follows.

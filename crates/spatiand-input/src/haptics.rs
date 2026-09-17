@@ -83,6 +83,43 @@ pub fn pulse(device: &HidDevice, pad: Pad, feel: Feel) -> Result<()> {
     send_feature(device.as_raw_fd(), &payload)
 }
 
+const ID_TRIGGER_RUMBLE_CMD: u8 = 0xEB;
+
+/// Run the body motors at these strengths until told otherwise.
+///
+/// The report is `hid-steam.c`'s `steam_haptic_rumble`: an intensity word, the two motor speeds
+/// and two gains, sent the way the kernel sends it when a game rumbles its evdev device. The
+/// kernel's evdev device is gone while Spatiand holds the controller, which is why this is
+/// sent directly. The layout is from the driver and not yet confirmed by feel on hardware.
+pub fn rumble(device: &HidDevice, strong: u16, weak: u16) -> Result<()> {
+    send_feature(device.as_raw_fd(), &rumble_payload(strong, weak))
+}
+
+fn rumble_payload(strong: u16, weak: u16) -> [u8; 11] {
+    let mut payload = [0u8; 11];
+    payload[0] = ID_TRIGGER_RUMBLE_CMD;
+    payload[1] = 9;
+    payload[5..7].copy_from_slice(&strong.to_le_bytes());
+    payload[7..9].copy_from_slice(&weak.to_le_bytes());
+    // The gains the driver uses: the left motor at 2, the right left at its default.
+    payload[9] = 2;
+    payload
+}
+
+#[cfg(test)]
+mod rumble_tests {
+    use super::*;
+
+    #[test]
+    fn the_rumble_report_carries_both_motors_where_the_driver_puts_them() {
+        let p = rumble_payload(0x1234, 0xABCD);
+        assert_eq!(p[0], 0xEB);
+        assert_eq!(p[1], 9, "the length counts what follows it");
+        assert_eq!(&p[5..7], &[0x34, 0x12]);
+        assert_eq!(&p[7..9], &[0xCD, 0xAB]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

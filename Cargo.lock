@@ -2463,6 +2463,7 @@ dependencies = [
  "spatiand-audio",
  "spatiand-hmd",
  "spatiand-input",
+ "spatiand-mapper",
  "spatiand-platform",
  "spatiand-proto",
  "spatiand-render",
@@ -2506,6 +2507,15 @@ dependencies = [
  "libc",
  "log",
  "spatiand-hmd",
+]
+
+[[package]]
+name = "spatiand-mapper"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
+ "toml",
 ]
 
 [[package]]

@@ -68,6 +68,8 @@ pub enum HudAction {
     OpenSwitcher,
     /// Show or hide the on-screen keyboard.
     ToggleKeyboard,
+    /// Open the controller layout of whatever is in front of the wearer.
+    ControllerLayout,
     /// Open the environment picker.
     ///
     /// This was once "cycle to the next one", which is a control that gets worse with every
@@ -178,6 +180,12 @@ impl Hud {
                 label: "Keyboard",
                 detail: "Show a keyboard you can point at and click",
                 action: HudAction::ToggleKeyboard,
+            },
+            HudItem {
+                label: "Controller layout",
+                detail: "Change what every button, stick, trackpad and gyro does in the app in \
+                         front of you",
+                action: HudAction::ControllerLayout,
             },
             HudItem {
                 label: "Take a screenshot",
@@ -422,6 +430,7 @@ mod tests {
             vec![
                 "Recentre",
                 "Keyboard",
+                "Controller layout",
                 "Take a screenshot",
                 "Windows",
                 "Environment",

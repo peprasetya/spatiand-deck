@@ -10,6 +10,8 @@ spatiand-hmd = { path = "../spatiand-hmd" }
 spatiand-track = { path = "../spatiand-track" }
 spatiand-render = { path = "../spatiand-render" }
 spatiand-input = { path = "../spatiand-input" }
+# Controller layouts. Pure data and a state machine; everything that touches a device is here.
+spatiand-mapper = { path = "../spatiand-mapper" }
 spatiand-shell = { path = "../spatiand-shell" }
 spatiand-platform = { path = "../spatiand-platform" }
 spatiand-proto = { path = "../spatiand-proto" }
