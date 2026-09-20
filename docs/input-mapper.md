@@ -189,3 +189,37 @@ cargo run --release -p spatiand-input --example virtual-pad 120 quiet
 ```
 
 Then open a game's controller-binding screen, or run `jstest /dev/input/jsN`, and watch.
+
+## The sticks are touch-sensitive, and now bindable — 2026-09-20
+
+The Deck senses a thumb resting on either stick, the way it senses one resting on a trackpad.
+The bits were noted in `spatiand_input::layout` a while ago as "almost certainly capacitive
+stick-touch sensing. Nothing needs them yet" and left unassigned, so nothing in the
+configurator could be bound to them.
+
+They are `Control::LStickTouch` and `Control::RStickTouch` now, and `Button::LStickTouch` and
+`Button::RStickTouch` in a layout — which means they appear in the editor's button list and on
+the diagram like everything else, and `GyroEnable::WhileHeld` can hang off one. Reach for the
+stick and the gyro wakes; let go and it sleeps. That is the arrangement a Steam Input user
+expects, and it was the reason for asking.
+
+Two cautions, both written into the table:
+
+- **Which is left and which is right is a guess**, taken from the order every other pair in
+  that table follows. It has not been told apart by hand. If the gyro wakes for the wrong
+  thumb, those two lines swap.
+- **A capacitive sensor reading a thumb that is nearly touching flickers.** Bit 47 was seen
+  sitting high at rest often enough to have been filtered as noise once. Anything gating on
+  these should expect a flicker rather than a clean switch.
+
+## Hover is reported, always — 2026-09-20
+
+A thumb resting over an application played with the gamepad used to withdraw the pointer
+entirely: a game hears hover as the wearer picking up a mouse and stalls switching over, so it
+was only given the pointer once something was clicked.
+
+That guess cost more than it saved. A viewer with a real interface in it — Firestorm — needs
+hover to work at all, and where the pointer is is not something to be clever about. The
+pointer now behaves like a mouse on a desk, in every application. If a pad game stalls on this
+again it comes back as a switch in *that application's* layout, not as a rule about all of
+them; `Pointers::withdraw` and `Controls::drives_pad` are kept for exactly that.

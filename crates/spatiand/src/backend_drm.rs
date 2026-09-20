@@ -2266,22 +2266,17 @@ pub fn run(
                                     (None, Some(left), _) => Some(left),
                                     (None, None, mouse) => mouse,
                                 };
-                            // Except a thumb resting over a game played with the gamepad: that
-                            // game hears hover as the wearer picking up a mouse, and stalls
-                            // switching over. It still gets the pointer the moment something
-                            // is clicked, since every click moves the cursor first. A real
-                            // mouse is always reported -- somebody using one means it.
-                            let over_pad_game = (right_aim.is_some() || left_aim.is_some())
-                                && controls.drives_pad()
-                                && cursor_aim.is_some_and(|a| {
-                                    a.popup.is_none()
-                                        && a.hit
-                                            .and_then(|(i, _)| windows.get(i))
-                                            .is_some_and(|w| w.focused)
-                                });
-                            let withdrawn =
-                                over_pad_game && pointers.withdraw(&mut runtime.state, time_ms);
-                            if let (false, Some(a)) = (withdrawn, cursor_aim) {
+                            // **Hover is reported, always.** A thumb resting over an
+                            // application played with the gamepad used to withdraw the
+                            // pointer entirely -- a game hears hover as the wearer picking up
+                            // a mouse and stalls switching over, so it was only given the
+                            // pointer once something was clicked. That guess cost more than
+                            // it saved: a viewer with a real interface in it needs hover to
+                            // work at all, and where the pointer is is not something to be
+                            // clever about. It behaves like a mouse on a desk. If a pad game
+                            // ever stalls on this again it comes back as a switch in that
+                            // application's own layout, not as a rule about every application.
+                            if let Some(a) = cursor_aim {
                                 pointers.motion(&mut runtime.state, a, &windows, time_ms);
                             }
                             // The left pad is the wheel, and it turns whatever the cursor is

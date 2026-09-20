@@ -759,6 +759,7 @@ impl PointerState {
     /// Refused while a button is held, returning `false` so the caller moves the pointer as
     /// usual: a held button grabs the pointer to the window it went down on, and motion sent
     /// "nowhere" during that grab lands on the window at its top-left corner instead.
+    #[allow(dead_code)] // Kept for a per-layout "no hover" switch; see `backend_drm`.
     pub fn withdraw(&mut self, state: &mut Spatiand, time_ms: u32) -> bool {
         if !self.held.is_empty() {
             return false;

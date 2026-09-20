@@ -61,6 +61,10 @@ fn spot(callout: Callout) -> (f32, f32, Shape) {
             B::Menu => (1200.0, 165.0, Shape::Circle(11.0)),
             B::LStick => (640.0, 240.0, Shape::Circle(16.0)),
             B::RStick => (1160.0, 240.0, Shape::Circle(16.0)),
+            // A ring around the stick's cap: touching it is the whole top of the stick, and
+            // it has to be distinguishable from the click at its centre.
+            B::LStickTouch => (640.0, 240.0, Shape::Circle(30.0)),
+            B::RStickTouch => (1160.0, 240.0, Shape::Circle(30.0)),
             B::LPadTouch => (585.0, 420.0, Shape::Circle(6.0)),
             B::RPadTouch => (1215.0, 420.0, Shape::Circle(6.0)),
             B::GlassesUp => (1045.0, 610.0, Shape::Circle(9.0)),

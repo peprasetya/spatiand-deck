@@ -51,12 +51,17 @@ pub enum Control {
     RPadTouch,
     LStickClick,
     RStickClick,
+    /// A thumb resting on a stick, with no click. The Deck senses this the way the trackpads
+    /// do, and it is the natural switch for gyro aiming: reach for the stick and the gyro
+    /// wakes up.
+    LStickTouch,
+    RStickTouch,
 }
 
 impl Control {
     /// Every control, in a stable order. Used by the probe and by tests that must not silently
     /// skip a control added later.
-    pub const ALL: [Control; 26] = [
+    pub const ALL: [Control; 28] = [
         Control::A,
         Control::B,
         Control::X,
@@ -83,6 +88,8 @@ impl Control {
         Control::RPadTouch,
         Control::LStickClick,
         Control::RStickClick,
+        Control::LStickTouch,
+        Control::RStickTouch,
     ];
 
     pub fn name(self) -> &'static str {
@@ -107,6 +114,8 @@ impl Control {
             Control::Quick => "quick access (...)",
             Control::Menu => "menu",
             Control::View => "view",
+            Control::LStickTouch => "left stick touch",
+            Control::RStickTouch => "right stick touch",
             Control::LPadClick => "left pad click",
             Control::RPadClick => "right pad click",
             Control::LPadTouch => "left pad touch",
@@ -189,9 +198,16 @@ pub const BITS: &[Entry] = &[
     (Control::RStickClick, 26, Confidence::Verified),
     (Control::L4, 41, Confidence::Verified),
     (Control::R4, 42, Confidence::Verified),
-    // Bits 46 and 47 (byte 13, bits 6 and 7) were seen going high while a stick was merely
-    // being held, and 47 sits high at rest often enough to be filtered as noise. Almost
-    // certainly capacitive stick-touch sensing. Nothing needs them yet.
+    // Byte 13, bits 6 and 7: capacitive stick touch, seen going high on this hardware while a
+    // stick was merely being held. Which is which is taken from the order every other pair in
+    // this table follows, left before right, and has not been told apart by hand — if the
+    // gyro wakes for the wrong thumb, these two are the line to swap.
+    //
+    // Bit 47 was also seen sitting high at rest often enough to have been filtered as noise
+    // once. A capacitive sensor reading a thumb that is *nearly* touching is exactly that, so
+    // anything gating on these should expect them to flicker rather than switch cleanly.
+    (Control::LStickTouch, 46, Confidence::Guess),
+    (Control::RStickTouch, 47, Confidence::Guess),
     // The QAM button is the one control with no evdev equivalent on a normal gamepad, and the
     // kernel reports it as BTN_BASE out of byte 14. Spatiand's launcher hangs off it, so it
     // was the single most important entry here to confirm — and it did, at byte 14 bit 2.

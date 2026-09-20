@@ -286,6 +286,7 @@ impl Controls {
 
     /// Is the application in front played with the virtual gamepad? See
     /// [`spatiand_mapper::engine::Engine::drives_pad`].
+    #[allow(dead_code)] // Same: the shape of a per-layout hover switch, when one is wanted.
     pub fn drives_pad(&self) -> bool {
         self.engine.drives_pad()
     }
@@ -395,7 +396,7 @@ pub fn without_steam_input(exec: &str) -> String {
     }
 }
 
-const DECK_BUTTONS: [(Control, Button); 22] = [
+const DECK_BUTTONS: [(Control, Button); 24] = [
     (Control::A, Button::A),
     (Control::B, Button::B),
     (Control::X, Button::X),
@@ -418,6 +419,8 @@ const DECK_BUTTONS: [(Control, Button); 22] = [
     (Control::RStickClick, Button::RStick),
     (Control::LPadTouch, Button::LPadTouch),
     (Control::RPadTouch, Button::RPadTouch),
+    (Control::LStickTouch, Button::LStickTouch),
+    (Control::RStickTouch, Button::RStickTouch),
 ];
 
 fn deck_snapshot(state: &ControllerState) -> Snapshot {

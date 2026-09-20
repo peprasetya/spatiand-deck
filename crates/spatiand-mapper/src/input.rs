@@ -37,12 +37,17 @@ pub enum Button {
     /// pointer in every layout — but *touching* one is the natural switch for gyro aiming.
     LPadTouch,
     RPadTouch,
+    /// A thumb resting on a stick, without clicking it. The Deck senses this the way it
+    /// senses a thumb on a pad, and it is what "the gyro wakes when you reach for the stick"
+    /// is bound to.
+    LStickTouch,
+    RStickTouch,
     GlassesUp,
     GlassesDown,
 }
 
 impl Button {
-    pub const ALL: [Button; 24] = [
+    pub const ALL: [Button; 26] = [
         Button::A,
         Button::B,
         Button::X,
@@ -65,6 +70,8 @@ impl Button {
         Button::RStick,
         Button::LPadTouch,
         Button::RPadTouch,
+        Button::LStickTouch,
+        Button::RStickTouch,
         Button::GlassesUp,
         Button::GlassesDown,
     ];
@@ -93,6 +100,8 @@ impl Button {
             Button::RStick => "Right stick click",
             Button::LPadTouch => "Left trackpad touch",
             Button::RPadTouch => "Right trackpad touch",
+            Button::LStickTouch => "Left stick touch",
+            Button::RStickTouch => "Right stick touch",
             Button::GlassesUp => "Glasses button up",
             Button::GlassesDown => "Glasses button down",
         }
