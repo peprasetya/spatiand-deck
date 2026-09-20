@@ -163,10 +163,26 @@ impl Identity {
 
 /// How long a connection may go quiet before it is assumed gone.
 ///
-/// Short, because the interesting case is a headset that has walked out of range: the host
-/// should stop encoding for nobody promptly. Applications are untouched either way — losing a
-/// viewer is not losing anything else.
-const IDLE_TIMEOUT_MS: u32 = 5_000;
+/// It was five seconds, on the reasoning that the interesting case is a headset that has
+/// walked out of range and the host should stop encoding for nobody promptly. That reasoning
+/// is still right and the number was still wrong: a session that stalls for five seconds is
+/// not a session that has gone, and tearing the link down is much the more expensive mistake.
+/// Every window vanishes, and the wearer gets them back seconds later in the wrong place.
+///
+/// It happened eighteen times in one day. Each one looked like this from the host — nothing
+/// sent for five seconds, then the timeout, then the session straight back:
+///
+/// ```text
+/// 10:17:28  0 shown in 2.0s, rtt 14.2 ms      (the link is healthy and nothing is arriving)
+/// 10:17:33  the host closed the link; will keep trying
+/// 10:17:34  workshop says hello, with windows already open
+/// ```
+///
+/// Fifteen seconds rides out a stall that is going to end anyway, and a headset that really
+/// has walked away still costs the host only those seconds of encoding for nobody. **This is
+/// a tolerance, not a cure** — something is stalling for seconds at a time and that is still
+/// worth finding. It is here so that finding it is not urgent.
+pub const IDLE_TIMEOUT_MS: u32 = 15_000;
 /// How often a quiet connection proves it is still there.
 const KEEPALIVE_MS: u64 = 1_000;
 

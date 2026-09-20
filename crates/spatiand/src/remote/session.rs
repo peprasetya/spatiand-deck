@@ -411,7 +411,18 @@ async fn serve(
                             }
                         }
                         None => {
-                            return Ended::Lost("the host closed the link".into());
+                            // Say which it was. "The host closed the link" was a guess, and
+                            // it read the same whether the host had gone, refused us, or the
+                            // link had simply timed out -- three different faults with three
+                            // different fixes, and hours spent telling them apart by hand.
+                            return Ended::Lost(match connection.close_reason() {
+                                Some(quinn::ConnectionError::TimedOut) => format!(
+                                    "the link went quiet for {} s and was given up on",
+                                    spatiand_stream::transport::IDLE_TIMEOUT_MS / 1000
+                                ),
+                                Some(reason) => format!("the host closed the link: {reason}"),
+                                None => "the host closed the control stream".into(),
+                            });
                         }
                     }
                 }
