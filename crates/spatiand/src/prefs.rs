@@ -46,6 +46,36 @@ pub struct Prefs {
     /// work and is worth more than the tone.
     #[serde(default = "default_directness_off_axis")]
     pub audio_directness_off_axis: f32,
+
+    /// Whether a host may have this session's microphone when something there is listening.
+    ///
+    /// On by default, because a remote application with voice in it is unusable without one
+    /// and the host only asks while an application is actually recording. Off is a real
+    /// choice: it means no program anywhere else can open the microphone in this room, for
+    /// any reason. See `remote::microphone`.
+    #[serde(default = "yes")]
+    pub remote_microphone: bool,
+
+    /// Hosts running applications elsewhere, shown here as windows.
+    ///
+    /// Empty by default, and a session with none behaves exactly as it always has. Each entry
+    /// is a host that has been paired with — see `docs/remote.md`.
+    #[serde(default, rename = "remote")]
+    pub remotes: Vec<RemoteHost>,
+}
+
+/// One machine serving remote applications.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteHost {
+    /// Name or address, with a port: `workshop:47600`.
+    pub host: String,
+    /// The host's certificate fingerprint, from `spatiand-host --fingerprint`. A session talks
+    /// to a host it recognises and to nothing else.
+    pub fingerprint: String,
+    /// Applications to ask for as soon as the link is up, by catalogue id. Empty means "show
+    /// whatever is already open there", which is what a reconnection wants.
+    #[serde(default)]
+    pub launch: Vec<String>,
 }
 
 impl Default for Prefs {
@@ -57,6 +87,8 @@ impl Default for Prefs {
             spatial_audio: true,
             audio_directness_centred: DEFAULT_DIRECTNESS.centred,
             audio_directness_off_axis: DEFAULT_DIRECTNESS.off_axis,
+            remote_microphone: true,
+            remotes: Vec::new(),
         }
     }
 }

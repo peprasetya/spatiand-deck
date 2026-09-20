@@ -107,6 +107,13 @@ enum View {
     /// The controller layout editor, on a made-up game, with the controller picture beside it.
     /// `SPATIAND_VIEW_PAGE=<row label>` opens that row first, so a deeper page can be looked at.
     Controller,
+    /// Remote computers. `SPATIAND_VIEW_PAGE=address` shows an address being typed and
+    /// `=pairing` a code being compared. With `SPATIAND_REMOTE` the list is the real hosts in
+    /// `prefs.toml`, as they are right now; without it, a made-up pair.
+    Hosts,
+    /// The Bluetooth page, with this machine's real paired devices as BlueZ has them now.
+    /// `SPATIAND_VIEW_PAGE=<n>` moves the cursor down that many rows first.
+    Bluetooth,
 }
 
 impl View {
@@ -121,6 +128,8 @@ impl View {
             Ok("keyboard") => Self::Keyboard,
             Ok("sidecar") => Self::Sidecar,
             Ok("controller") => Self::Controller,
+            Ok("hosts") => Self::Hosts,
+            Ok("bluetooth") => Self::Bluetooth,
             _ => Self::World,
         }
     }
@@ -259,6 +268,66 @@ pub fn run(
                 shell.show_directory(browser.label(), browser.entries());
             }
         }
+        View::Bluetooth => {
+            shell.handle(Intent::ToggleHud);
+            for _ in 0..shell.hud().items().len() {
+                if shell.hud().activate() == spatiand_shell::HudAction::OpenBluetooth {
+                    break;
+                }
+                shell.handle(Intent::Navigate(spatiand_shell::NavDirection::Down));
+            }
+            shell.handle(Intent::Accept);
+            // The real list, from the same worker the session uses.
+            let mut devices = crate::bluetooth::Devices::start();
+            devices.refresh();
+            let asked = std::time::Instant::now();
+            while shell.bluetooth().view().powered.is_none()
+                && asked.elapsed() < std::time::Duration::from_secs(5)
+            {
+                devices.tick(&mut shell);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let rows: usize = std::env::var("SPATIAND_VIEW_PAGE")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(0);
+            for _ in 0..rows {
+                shell.handle(Intent::Navigate(spatiand_shell::NavDirection::Down));
+            }
+        }
+        // Through the HUD row too, and typed into the way the keyboard types into it.
+        View::Hosts => {
+            shell.handle(Intent::ToggleHud);
+            for _ in 0..shell.hud().items().len() {
+                if shell.hud().activate() == spatiand_shell::HudAction::OpenHosts {
+                    break;
+                }
+                shell.handle(Intent::Navigate(spatiand_shell::NavDirection::Down));
+            }
+            shell.handle(Intent::Accept);
+            if std::env::var("SPATIAND_REMOTE").is_err() {
+                shell.set_hosts(made_up_hosts().0, made_up_hosts().1);
+            }
+            let page = std::env::var("SPATIAND_VIEW_PAGE").unwrap_or_default();
+            if page == "address" || page == "pairing" {
+                for _ in 0..shell.hosts().len() {
+                    shell.handle(Intent::Navigate(spatiand_shell::NavDirection::Down));
+                }
+                shell.handle(Intent::Accept);
+                shell.type_text("workshop");
+            }
+            if page == "pairing" {
+                shell.type_enter();
+                shell.set_pairing(spatiand_shell::PairingView {
+                    address: "workshop".into(),
+                    code: Some("392 524".into()),
+                    status: "Check that workshop shows the same code, and answer yes there. \
+                             Then press A here if they match."
+                        .into(),
+                    ..Default::default()
+                });
+            }
+        }
         // Through the HUD row, as a wearer reaches it, so the snapshot cannot show a state
         // they could not get to.
         View::Controller => {
@@ -316,8 +385,125 @@ pub fn run(
         keyboard.click = false;
     }
 
-    // --- optionally host a real application ---
+    // --- optionally show an application from another machine ---
+    //
+    // The same idea as `SPATIAND_CLIENT` and for the same reason: a remote window has to be
+    // looked at, and putting the glasses on to find out whether a picture arrived at all is a
+    // slow way to learn it did not. With hosts configured in `prefs.toml`, this connects, waits
+    // for a window, and photographs it.
     let mut windows = Vec::new();
+    let mut _remotes = crate::remote::Remotes::default();
+    if std::env::var("SPATIAND_REMOTE").is_ok() {
+        let prefs = crate::prefs::Prefs::load();
+        let seconds: f32 = std::env::var("SPATIAND_REMOTE_WAIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15.0);
+        _remotes = crate::remote::Remotes::start(&mut runtime.display_handle, &prefs);
+        log::info!(
+            "waiting up to {seconds}s for a window from {} host(s)",
+            _remotes.len()
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f32(seconds);
+        while std::time::Instant::now() < deadline {
+            display.dispatch_clients(&mut runtime.state)?;
+            display.flush_clients()?;
+            event_loop.dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
+            crate::dmabuf::settle(&mut runtime.state, &mut renderer);
+            crate::window::apply_resize_anchors(&mut runtime.state);
+            runtime.state.settle_keyboard_focus();
+            runtime.state.fit_screen_to_windows();
+            // Frame callbacks, because a remote window is a client like any other and will not
+            // send a second picture until it is told it may.
+            let screen = runtime.state.screen.clone();
+            runtime.state.send_frames(&screen, std::time::Duration::ZERO);
+            runtime.state.space.refresh();
+            windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+            if !windows.is_empty() {
+                log::info!("a remote window arrived");
+            }
+        }
+        windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+        log::info!("{} window(s) to draw", windows.len());
+
+        // And whatever the harness asked to do to it. Input has the longest way to travel of
+        // anything here — through the session, the link, the host's seat and into the
+        // application — so being able to click a remote window without a headset is the only
+        // practical way to see that the whole chain works.
+        let steps = requested_steps();
+        if !steps.is_empty() {
+            for (n, step) in steps.into_iter().enumerate() {
+                // A pause before every step but the first, pumping as a session does: the
+                // application has to answer the last one — a menu has to open before it can
+                // be chosen from — and across a network that is not instant.
+                if n > 0 {
+                    let until = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+                    while std::time::Instant::now() < until {
+                        let screen = runtime.state.screen.clone();
+                        runtime.state.send_frames(&screen, std::time::Duration::ZERO);
+                        runtime.state.space.refresh();
+                        display.dispatch_clients(&mut runtime.state)?;
+                        display.flush_clients()?;
+                        event_loop.dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
+                        crate::dmabuf::settle(&mut runtime.state, &mut renderer);
+                    }
+                    windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+                }
+                match step {
+                    Step::Click(u, v, button) => {
+                        click_on_the_window(&mut runtime.state, &windows, (u, v), button)
+                    }
+                    Step::Key(code) => press_key(&mut runtime.state, code),
+                    Step::Close => close_the_window(&runtime.state, &windows),
+                }
+            }
+            // Long enough for the click to reach the other machine, for the application to
+            // react, and for the picture of it to come back.
+            let settle = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            while std::time::Instant::now() < settle {
+                let screen = runtime.state.screen.clone();
+                runtime.state.send_frames(&screen, std::time::Duration::ZERO);
+                runtime.state.space.refresh();
+                display.dispatch_clients(&mut runtime.state)?;
+                display.flush_clients()?;
+                event_loop.dispatch(Some(std::time::Duration::from_millis(16)), runtime)?;
+                crate::dmabuf::settle(&mut runtime.state, &mut renderer);
+                runtime.state.settle_keyboard_focus();
+                runtime.state.fit_screen_to_windows();
+            }
+            windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
+        }
+    }
+    // What the settings page and the launcher say about the hosts, as a session would have
+    // them by now.
+    if std::env::var("SPATIAND_REMOTE").is_ok() {
+        let mut prefs = crate::prefs::Prefs::load();
+        _remotes.tick(&mut runtime.display_handle, &mut prefs, &mut shell);
+    } else if view == View::Launcher {
+        let (rows, tabs) = made_up_hosts();
+        shell.set_hosts(rows, tabs);
+    }
+    // `SPATIAND_VIEW=launcher SPATIAND_VIEW_PAGE=host` opens the first computer's tab.
+    if view == View::Launcher && std::env::var("SPATIAND_VIEW_PAGE").as_deref() == Ok("host") {
+        // Walked the way a thumb would, row by row: right along a row, then down and back to
+        // its start. The first bubble after the groups is the first computer.
+        use spatiand_shell::NavDirection::{Down, Left, Right};
+        let target = shell.launcher().groups().len();
+        for _ in 0..shell.launcher().len() * 2 {
+            if shell.launcher().cursor() == target {
+                break;
+            }
+            let before = shell.launcher().cursor();
+            shell.handle(Intent::Navigate(Right));
+            if shell.launcher().cursor() == before {
+                shell.handle(Intent::Navigate(Down));
+                for _ in 0..spatiand_shell::launcher::COLUMNS {
+                    shell.handle(Intent::Navigate(Left));
+                }
+            }
+        }
+        shell.handle(Intent::Accept);
+    }
     if let Ok(command) = std::env::var("SPATIAND_CLIENT") {
         let seconds: f32 = std::env::var("SPATIAND_CLIENT_WAIT")
             .ok()
@@ -392,8 +578,8 @@ pub fn run(
                         let asked_to_close = steps.iter().any(|s| matches!(s, Step::Close));
                         for step in steps {
                             match step {
-                                Step::Click(u, v) => {
-                                    click_on_the_window(&mut runtime.state, &windows, (u, v))
+                                Step::Click(u, v, button) => {
+                                    click_on_the_window(&mut runtime.state, &windows, (u, v), button)
                                 }
                                 Step::Key(code) => press_key(&mut runtime.state, code),
                                 Step::Close => close_the_window(&runtime.state, &windows),
@@ -505,7 +691,10 @@ pub fn run(
     // Decisive diagnostic: read the imported client texture straight back, with no scene
     // geometry involved. A black window in the world could be a bad import or a bad draw, and
     // these two look identical from outside.
-    if let (Ok(path), Some(first)) = (std::env::var("SPATIAND_DUMP_WINDOW"), windows.first()) {
+    if let (Ok(path), Some(first)) = (
+        std::env::var("SPATIAND_DUMP_WINDOW"),
+        chosen_window(&runtime.state, &windows),
+    ) {
         let (tw, th) = first.pixels;
         let mut raw = vec![0u8; (tw * th * 4) as usize];
         let tex = first.texture;
@@ -907,16 +1096,26 @@ fn draw_sidecar(
 /// thing at all -- it can launch an application and photograph it sitting there with no menu
 /// open, which proves nothing. Pressing a real toolbar button and photographing what happens
 /// next is the difference between reading the code again and knowing.
-fn requested_clicks() -> Vec<(f64, f64)> {
+/// `SPATIAND_CLICK=u,v;u,v` — fractions across the window. A step may name its button with
+/// `r:` or `m:` in front, so a right-click and then a choice from the menu it opens is one
+/// script: `r:0.5,0.5;0.53,0.68`.
+fn requested_clicks() -> Vec<(f64, f64, Option<u32>)> {
     let Ok(raw) = std::env::var("SPATIAND_CLICK") else {
         return Vec::new();
     };
     raw.split(';')
         .filter_map(|step| {
+            let step = step.trim();
+            let (button, step) = match step.split_once(':') {
+                Some(("r", rest)) => (Some(crate::pointer::BTN_RIGHT), rest),
+                Some(("m", rest)) => (Some(crate::pointer::BTN_MIDDLE), rest),
+                Some(("l", rest)) => (Some(crate::pointer::BTN_LEFT), rest),
+                _ => (None, step),
+            };
             let (u, v) = step.split_once(',')?;
             let u: f64 = u.trim().parse().ok()?;
             let v: f64 = v.trim().parse().ok()?;
-            Some((u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)))
+            Some((u.clamp(0.0, 1.0), v.clamp(0.0, 1.0), button))
         })
         .collect()
 }
@@ -924,8 +1123,9 @@ fn requested_clicks() -> Vec<(f64, f64)> {
 /// One scripted thing to do to the client's window, each followed by time for it to answer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Step {
-    /// `SPATIAND_CLICK`: a fraction across the window. See [`requested_clicks`].
-    Click(f64, f64),
+    /// `SPATIAND_CLICK`: a fraction across the window, and the button if the step named one.
+    /// See [`requested_clicks`].
+    Click(f64, f64, Option<u32>),
     /// `SPATIAND_KEY`: an evdev key code, pressed and released. See [`requested_keys`].
     Key(u32),
     /// `SPATIAND_CLOSE=1`: what the title bar's close button does. Always last, because
@@ -952,7 +1152,7 @@ fn requested_keys() -> Vec<u32> {
 fn requested_steps() -> Vec<Step> {
     let mut steps: Vec<Step> = requested_clicks()
         .into_iter()
-        .map(|(u, v)| Step::Click(u, v))
+        .map(|(u, v, button)| Step::Click(u, v, button))
         .collect();
     steps.extend(requested_keys().into_iter().map(Step::Key));
     if std::env::var("SPATIAND_CLOSE").as_deref() == Ok("1") {
@@ -995,7 +1195,7 @@ fn press_key(state: &mut Spatiand, code: u32) {
 /// not be tested was the half after it: whether the application hears the request at all. For
 /// an X11 window it did not, and nothing short of a headset could show that.
 fn close_the_window(state: &Spatiand, windows: &[crate::scene::WindowQuad]) {
-    let Some(window) = windows.first() else {
+    let Some(window) = chosen_window(state, windows) else {
         log::warn!("asked to close a window with no window to close");
         return;
     };
@@ -1012,23 +1212,40 @@ fn close_the_window(state: &Spatiand, windows: &[crate::scene::WindowQuad]) {
 /// what is being tested is what a client does when the pointer arrives, and going through the
 /// 3D pointer would be testing the ray maths instead. These are the same events it ends up
 /// sending: enter, motion in surface pixels, press, release.
+/// The window the harness acts on: the first, or with `SPATIAND_WINDOW=<text>` the first whose
+/// title contains that text — so one of several remote windows can be clicked and photographed.
+fn chosen_window<'a>(
+    state: &Spatiand,
+    windows: &'a [crate::scene::WindowQuad],
+) -> Option<&'a crate::scene::WindowQuad> {
+    match std::env::var("SPATIAND_WINDOW") {
+        Ok(wanted) => windows.iter().find(|w| {
+            state
+                .title_of(&w.window)
+                .is_some_and(|t| t.to_lowercase().contains(&wanted.to_lowercase()))
+        }),
+        Err(_) => windows.first(),
+    }
+}
+
 fn click_on_the_window(
     state: &mut Spatiand,
     windows: &[crate::scene::WindowQuad],
     at: (f64, f64),
+    chosen: Option<u32>,
 ) {
     use smithay::input::pointer::{ButtonEvent, MotionEvent};
     use smithay::utils::{Point, SERIAL_COUNTER};
 
-    let Some(window) = windows.first() else {
+    let Some(window) = chosen_window(state, windows) else {
         log::warn!("asked for a click with no window to click on");
         return;
     };
-    let button = match std::env::var("SPATIAND_CLICK_BUTTON").as_deref() {
+    let button = chosen.unwrap_or(match std::env::var("SPATIAND_CLICK_BUTTON").as_deref() {
         Ok("right") => crate::pointer::BTN_RIGHT,
         Ok("middle") => crate::pointer::BTN_MIDDLE,
         _ => crate::pointer::BTN_LEFT,
-    };
+    });
     let location = Point::from((at.0 * window.pixels.0 as f64, at.1 * window.pixels.1 as f64));
     log::info!(
         "clicking button {button:#x} at {:.0},{:.0} of {}x{}",
@@ -1074,4 +1291,45 @@ fn click_on_the_window(
         );
         pointer.frame(state);
     }
+}
+
+/// Two computers to draw when there is no real one to ask: one there, one asleep.
+fn made_up_hosts() -> (Vec<spatiand_shell::HostRow>, Vec<spatiand_shell::HostTab>) {
+    use spatiand_shell::{HostRow, HostStatus, HostTab, RemoteEntry};
+    let rows = vec![
+        HostRow {
+            label: "deepMagpie".into(),
+            address: "workshop".into(),
+            status: HostStatus::Online,
+        },
+        HostRow {
+            label: "study-pc".into(),
+            address: "192.168.10.40".into(),
+            status: HostStatus::Offline,
+        },
+    ];
+    let app = |id: &str, name: &str| RemoteEntry {
+        id: id.into(),
+        name: name.into(),
+        icon: None,
+    };
+    let tabs = vec![
+        HostTab {
+            label: "deepMagpie".into(),
+            address: "workshop".into(),
+            online: true,
+            apps: vec![
+                app("config", "Host settings"),
+                app("chrome", "Chrome"),
+                app("firestorm", "Firestorm"),
+            ],
+        },
+        HostTab {
+            label: "study-pc".into(),
+            address: "192.168.10.40".into(),
+            online: false,
+            apps: Vec::new(),
+        },
+    ];
+    (rows, tabs)
 }

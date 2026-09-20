@@ -780,25 +780,17 @@ impl Scene {
         // Whatever the launcher is currently showing: groups at the top level, applications
         // inside one. Both are bubbles with a name and an icon, so the rest is identical.
         let launcher = shell.launcher();
-        let entries: Vec<(String, Option<String>)> = match launcher.level() {
-            spatiand_shell::Level::Groups => launcher
-                .groups()
-                .iter()
-                .map(|g| (g.label.to_string(), Some(g.icon.to_string())))
-                .collect(),
-            spatiand_shell::Level::Apps(_) => launcher
-                .apps_in_level()
-                .iter()
-                .map(|a| (a.name.clone(), a.icon.clone()))
-                .collect(),
+        let entries: Vec<(String, Option<String>)> = launcher.bubbles();
+        // What is shown, not how many: a computer's tab and a group of the same size would
+        // otherwise reuse each other's labels, and a computer going offline changes a label
+        // without changing the count.
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::mem::discriminant(launcher.level()).hash(&mut hasher);
+            entries.hash(&mut hasher);
+            hasher.finish() as usize
         };
-        // Level and count together: entering a group of the same size as the group list would
-        // otherwise reuse the wrong textures.
-        let fingerprint = entries.len()
-            + match launcher.level() {
-                spatiand_shell::Level::Groups => 0,
-                spatiand_shell::Level::Apps(_) => 10_000,
-            };
         let relabel = fingerprint != self.labels_built_for;
         let icons_came = self
             .glyphs_waiting_since
@@ -849,7 +841,10 @@ impl Scene {
                 .groups()
                 .iter()
                 .map(|g| g.icon.to_string())
-                .chain(launcher.apps().iter().filter_map(|a| a.icon.clone()));
+                .chain(launcher.apps().iter().filter_map(|a| a.icon.clone()))
+                .chain(launcher.hosts().iter().flat_map(|h| {
+                    h.apps.iter().filter_map(|a| a.icon.clone()).collect::<Vec<_>>()
+                }));
             for icon in everything {
                 self.icon(crate::icon::Wanted::Named(icon), ICON_TEXTURE_PX);
             }
@@ -2032,7 +2027,12 @@ impl Scene {
             Mode::World => {}
             // All four are the same thing to draw: a card of rows with one selected. The
             // launcher is the odd one out because it is bubbles in space, not a list.
-            Mode::Hud | Mode::Environment | Mode::Files | Mode::Switcher => {
+            Mode::Hud
+            | Mode::Environment
+            | Mode::Files
+            | Mode::Switcher
+            | Mode::Hosts
+            | Mode::Bluetooth => {
                 self.draw_card(gl, eye, fov)
             }
             Mode::Controller => {

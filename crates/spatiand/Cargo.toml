@@ -6,6 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Remote applications: the wire, the decoder, and a Wayland *client* of our own compositor.
+spatiand-stream = { path = "../spatiand-stream" }
+spatiand-video = { path = "../spatiand-video" }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros"] }
 spatiand-hmd = { path = "../spatiand-hmd" }
 spatiand-track = { path = "../spatiand-track" }
 spatiand-render = { path = "../spatiand-render" }

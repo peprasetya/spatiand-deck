@@ -713,6 +713,19 @@ impl PointerState {
                 }),
         };
 
+        // **Where the laser is, a layout's mouse is too.** A button a controller layout
+        // turns into a mouse click — L2 as right-click — is delivered at the layout's own
+        // cursor, which used to start in the middle of the window and never follow the laser.
+        // So pointing at a link and pulling L2 moved the pointer to the centre of the page and
+        // clicked there. Following the laser whenever it is on a window makes the click land
+        // where the wearer is pointing; a game that drives the cursor by relative motion
+        // carries on from the same place.
+        if on_popup.is_none() {
+            if let Some(point) = local {
+                self.mapped_cursor = Some((point.x, point.y));
+            }
+        }
+
         // Leaving a window has to be reported, or it keeps its hover state for ever.
         let index_now = aim.hit.map(|(i, _)| i);
         if index_now != self.last_focus {

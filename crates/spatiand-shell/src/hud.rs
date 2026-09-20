@@ -78,6 +78,10 @@ pub enum HudAction {
     /// this by re-reading the environments folder and calling `Shell::set_environments`, which
     /// is what lets an image dropped in mid-session appear without a restart.
     OpenEnvironments,
+    /// Open the remote computers page: which are paired, which are online, add another.
+    OpenHosts,
+    /// Open the Bluetooth page: the paired devices, whether each is connected, add another.
+    OpenBluetooth,
     /// Hand the display back and return to the desktop session.
     ReturnToDesktop,
     /// Float one of the desktop's own settings panels as a 2D window.
@@ -202,12 +206,18 @@ impl Hud {
                 detail: "Choose what surrounds you, or add an image",
                 action: HudAction::OpenEnvironments,
             },
+            HudItem {
+                label: "Remote computers",
+                detail: "Apps running on your other computers: see which are online, or pair \
+                         a new one",
+                action: HudAction::OpenHosts,
+            },
         ]);
         if panels.bluetooth {
             items.push(HudItem {
                 label: "Bluetooth",
-                detail: "Pair headphones or a controller, in a window in front of you",
-                action: HudAction::OpenSystemSettings("bluetooth"),
+                detail: "See which devices are connected, connect one, or pair a new one",
+                action: HudAction::OpenBluetooth,
             });
         }
         if panels.network {
@@ -313,9 +323,10 @@ mod tests {
     }
 
     #[test]
-    fn wifi_and_bluetooth_are_separate_rows_that_open_separate_panels() {
+    fn wifi_and_bluetooth_are_separate_rows_that_open_separate_things() {
         // They were one row labelled "Wi-Fi and Bluetooth" that opened the network module and
-        // nothing else, so half the label was a lie. Two rows, two modules.
+        // nothing else, so half the label was a lie. Two rows: Wi-Fi opens the system panel,
+        // Bluetooth opens the device list, which opens the wizard only for adding a device.
         let hud = Hud::new(DesktopPanels::ALL);
         let modules: Vec<_> = hud
             .items()
@@ -325,7 +336,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(modules, vec![("Bluetooth", "bluetooth"), ("Wi-Fi", "wifi")]);
+        assert_eq!(modules, vec![("Wi-Fi", "wifi")]);
+        assert!(hud
+            .items()
+            .iter()
+            .any(|i| i.label == "Bluetooth" && i.action == HudAction::OpenBluetooth));
     }
 
     #[test]
@@ -434,6 +449,9 @@ mod tests {
                 "Take a screenshot",
                 "Windows",
                 "Environment",
+                // Spatiand's own pages before the desktop's panels: this one is where the
+                // launcher's remote tabs come from, and it is reached for more than Bluetooth.
+                "Remote computers",
                 "Bluetooth",
                 "Wi-Fi",
                 "Calibrate head tracking",

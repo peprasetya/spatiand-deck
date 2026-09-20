@@ -1,0 +1,48 @@
+# A host that is always there.
+#
+# The point of the host is that applications outlive the viewer: you take the glasses off, the
+# Deck sleeps, the network drops, and the work is still open when you come back. That only
+# holds if the host itself is still running, so it belongs to the login session as a service
+# rather than to whichever terminal happened to start it.
+#
+# A **user** unit, not a system one. The host runs applications — a browser, a viewer, a game —
+# and those want the user's own home, keyring, fonts, PipeWire and GPU access. A system service
+# would have none of that and would need half of it handed back one directive at a time.
+#
+#   install:  cp spatiand-host ~/.local/bin/
+#             cp spatiand-host.service ~/.config/systemd/user/
+#             systemctl --user daemon-reload
+#             systemctl --user enable --now spatiand-host
+#
+# For it to survive logging out — which is what "24/7" means on a machine nobody is sitting at —
+# the account needs lingering, and that one line is the only part that needs root:
+#
+#             sudo loginctl enable-linger $USER
+#
+[Unit]
+Description=Spatiand remote application host
+Documentation=https://github.com/pauluswi/spatiand
+# PipeWire is how applications on this host make a sound. Wanted, not Required: a host with no
+# audio is still worth having, and refusing to start would take the windows with it.
+Wants=pipewire.service
+After=pipewire.service graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/spatiand-host
+# Applications are the host's children. Killing the host should not kill them mid-save, so the
+# stop signal goes to the host alone and it closes them itself.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=always
+RestartSec=2
+# A host that crashes in a loop should stop and say so, not hammer the GPU forever.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+Environment=RUST_LOG=info
+# Its own compositor socket, so it never collides with a desktop session on the same machine.
+Environment=XDG_SESSION_TYPE=wayland
+
+[Install]
+WantedBy=default.target

@@ -170,8 +170,10 @@ pub fn run(
         stored.unwrap_or(AxisMap::XREAL_AIR),
         TrackerConfig::default(),
     );
+    let mut sensor_memory = crate::sensors::SensorMemory::new();
     if let Some(h) = hmd.as_ref() {
         crate::backend_drm::settle_axes(h.info(), stored, &mut tracker, &mut calibration);
+        sensor_memory.restore(&h.info().name, &mut tracker);
     }
 
     // --- the shell ---
@@ -260,6 +262,7 @@ pub fn run(
                             c.feed(&sample);
                         }
                         tracker.integrate(&sample);
+                        sensor_memory.tick(&tracker);
                     }
                     HmdEvent::Disconnected => {
                         log::warn!("headset disconnected");
@@ -300,6 +303,16 @@ pub fn run(
 
             for event in events {
                 match event {
+                    // Remote computers are served by the headset backend, which holds the
+                    // hosts; this one is for working on the shell at a desk.
+                    ShellEvent::LaunchRemote { .. }
+                    | ShellEvent::PairHost(_)
+                    | ShellEvent::ConfirmPairing
+                    | ShellEvent::CancelPairing
+                    | ShellEvent::ForgetHost(_)
+                    | ShellEvent::Bluetooth(_) => {
+                        log::info!("remote computers are only served on the headset")
+                    }
                     ShellEvent::ModeChanged(mode) => {
                         if mode == spatiand_shell::Mode::World {
                             scene.forget_anchor();
@@ -363,6 +376,7 @@ pub fn run(
                         }
                     }
                     ShellEvent::Hud(action) => match action {
+                        HudAction::OpenHosts | HudAction::OpenBluetooth => {}
                         HudAction::OpenSwitcher => {
                             shell.set_windows(runtime.state.open_windows())
                         }

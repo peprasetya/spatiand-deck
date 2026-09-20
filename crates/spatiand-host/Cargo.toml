@@ -1,0 +1,42 @@
+[package]
+name = "spatiand-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Deliberately thin. This runs on somebody's ordinary Linux desktop, not on the Deck, and the
+# shorter this list is the more machines it runs on unchanged. Nothing here knows what a
+# headset is.
+[dependencies]
+spatiand-stream = { path = "../spatiand-stream" }
+spatiand-host-catalog = { path = "../spatiand-host-catalog" }
+spatiand-platform = { path = "../spatiand-platform" }
+serde.workspace = true
+# Only to read what `pw-dump` prints; see `route`. Pure Rust, so it costs the machine
+# this runs on nothing and the tarball a few kilobytes.
+serde_json = "1"
+toml.workspace = true
+log.workspace = true
+env_logger.workspace = true
+libc = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "io-util"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+# The VA-API encoders, and nothing else from it. Built against the system's libavcodec while
+# iterating; the release tarball carries its own minimal build, because libavcodec has no
+# opinion about the machine it runs on. libva is the opposite and always comes from the system:
+# it loads the GPU vendor's own driver, which belongs to the installed Mesa.
+rsmpeg = { version = "0.18", default-features = false, features = ["ffmpeg8", "link_system_ffmpeg"] }
+
+[dependencies.smithay]
+version = "0.7"
+default-features = false
+features = [
+    "backend_gbm",
+    "backend_egl",
+    "renderer_gl",
+    "wayland_frontend",
+    "desktop",
+    "use_system_lib",
+    "xwayland",
+]

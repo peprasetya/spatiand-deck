@@ -154,13 +154,47 @@ pub fn model(shell: &Shell) -> Option<MenuModel> {
                 footer: "A open    B back".into(),
             })
         }
-        Mode::Launcher if shell.launcher().is_empty() => Some(MenuModel {
-            title: "No applications".into(),
-            rows: Vec::new(),
-            cursor: 0,
-            detail: "Nothing was found in the system's application folders.".into(),
-            footer: "B back".into(),
-        }),
+        Mode::Launcher if shell.launcher().is_empty() => {
+            // Inside a remote computer's tab, "nothing here" has a different reason: the
+            // computer is off, or has not been given anything to offer yet.
+            let launcher = shell.launcher();
+            let host = match launcher.level() {
+                spatiand_shell::Level::Host(i) => launcher.hosts().get(*i),
+                _ => None,
+            };
+            Some(match host {
+                Some(h) if !h.online => MenuModel {
+                    title: h.label.clone(),
+                    rows: Vec::new(),
+                    cursor: 0,
+                    detail: format!(
+                        "{} is offline. Its apps are still running there if they were; they \
+                         come back here when it does.",
+                        h.label
+                    ),
+                    footer: "B back".into(),
+                },
+                Some(h) => MenuModel {
+                    title: h.label.clone(),
+                    rows: Vec::new(),
+                    cursor: 0,
+                    detail: format!(
+                        "{} offers no applications yet. Add some in its catalogue.",
+                        h.label
+                    ),
+                    footer: "B back".into(),
+                },
+                None => MenuModel {
+                    title: "No applications".into(),
+                    rows: Vec::new(),
+                    cursor: 0,
+                    detail: "Nothing was found in the system's application folders.".into(),
+                    footer: "B back".into(),
+                },
+            })
+        }
+        Mode::Hosts => Some(hosts(shell.hosts())),
+        Mode::Bluetooth => Some(bluetooth(shell.bluetooth())),
         Mode::Switcher => {
             let switcher = shell.switcher();
             Some(MenuModel {
@@ -189,6 +223,169 @@ pub fn model(shell: &Shell) -> Option<MenuModel> {
         Mode::Launcher => None,
         // The editor is drawn from its own view; see `from_editor`.
         Mode::Controller => None,
+    }
+}
+
+/// The remote computers page: the list, the address being typed, or a code being compared.
+fn hosts(hosts: &spatiand_shell::Hosts) -> MenuModel {
+    use spatiand_shell::hosts::{Page, ADD_LABEL};
+    match hosts.page() {
+        Page::List => {
+            let mut rows: Vec<MenuRow> = hosts
+                .rows()
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    if hosts.is_armed(i) {
+                        MenuRow::with(&r.label, "A again to forget")
+                    } else {
+                        MenuRow::with(&r.label, r.status.label())
+                    }
+                })
+                .collect();
+            rows.push(MenuRow::plain(ADD_LABEL));
+            let cursor = hosts.cursor();
+            let detail = match hosts.rows().get(cursor) {
+                Some(r) if hosts.is_armed(cursor) => format!(
+                    "Press A again to forget {}. Its apps keep running there; this headset \
+                     just stops showing them, until it is paired again.",
+                    r.label
+                ),
+                Some(r) => format!(
+                    "{} at {}. Its apps are in the launcher, in their own tab. Press A twice \
+                     to forget it.",
+                    r.label, r.address
+                ),
+                None => "Pair with a computer running spatiand-host, so its apps can be \
+                         opened here as windows."
+                    .into(),
+            };
+            MenuModel {
+                title: "Remote computers".into(),
+                rows,
+                cursor,
+                detail,
+                footer: FOOTER_SELECT.into(),
+            }
+        }
+        Page::Address => MenuModel {
+            title: "Add a computer".into(),
+            // The text being typed, as the one row, with a bar where the next letter goes.
+            rows: vec![MenuRow::plain(format!("{}\u{2502}", hosts.typed()))],
+            cursor: 0,
+            detail: "On the computer, run  spatiand-host --pair  first. Then type its name or \
+                     address here — its hostname, or something like 192.168.1.20 — and press \
+                     Enter."
+                .into(),
+            footer: "Enter connect    B back".into(),
+        },
+        Page::Pairing => {
+            let pairing = hosts.pairing();
+            let mut rows = Vec::new();
+            if let Some(code) = &pairing.code {
+                rows.push(MenuRow::with(code.clone(), "the code"));
+            }
+            let footer = if pairing.finished {
+                "A done"
+            } else if pairing.code.is_some() && !hosts.confirmed() {
+                "A they match    B cancel"
+            } else {
+                "B cancel"
+            };
+            MenuModel {
+                title: format!("Pairing with {}", pairing.address),
+                rows,
+                cursor: 0,
+                detail: pairing.status.clone(),
+                footer: footer.into(),
+            }
+        }
+    }
+}
+
+/// The Bluetooth page: paired devices, then adding one, then the switch.
+fn bluetooth(bt: &spatiand_shell::Bluetooth) -> MenuModel {
+    use spatiand_shell::bluetooth::{Row, ADD_LABEL};
+    let view = bt.view();
+    let mut rows: Vec<MenuRow> = view
+        .devices
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let status = if bt.is_armed(i) {
+                "Y again to forget".to_string()
+            } else if bt.is_busy(&d.address) {
+                if d.connected { "disconnecting" } else { "connecting" }.to_string()
+            } else {
+                let mut s = if d.connected { "connected" } else { "not connected" }.to_string();
+                if let Some(b) = d.battery {
+                    s.push_str(&format!(" · {b}%"));
+                }
+                s
+            };
+            // Two with one name — the same keyboard paired twice, usually — are told apart by
+            // the end of their address.
+            let twins = view.devices.iter().filter(|o| o.label == d.label).count() > 1;
+            let label = if twins {
+                format!("{} ({})", d.label, &d.address[d.address.len().saturating_sub(5)..])
+            } else {
+                d.label.clone()
+            };
+            MenuRow::with(label, &status)
+        })
+        .collect();
+    rows.push(MenuRow::plain(ADD_LABEL));
+    rows.push(match view.powered {
+        Some(true) => MenuRow::with("Bluetooth", "on"),
+        Some(false) => MenuRow::with("Bluetooth", "off"),
+        None => MenuRow::with("Bluetooth", "no adapter"),
+    });
+    let cursor = bt.cursor();
+    let explain = match bt.row(cursor) {
+        Row::Device(i) => {
+            let d = &view.devices[i];
+            let kind = d.kind_word().map(|k| format!("A {k}, ")).unwrap_or_default();
+            if bt.is_armed(i) {
+                format!(
+                    "Press Y again to forget {}. It will have to be paired again before it \
+                     can connect.",
+                    d.label
+                )
+            } else if d.connected {
+                format!("{kind}{}. A disconnects it; Y twice forgets it.", d.address)
+            } else {
+                format!(
+                    "{kind}{}. A connects it — wake it first with a key or its button. If it \
+                     never connects, it may have paired again under another address: forget it \
+                     with Y twice and add it again.",
+                    d.address
+                )
+            }
+        }
+        Row::Add => "Find a new device and pair it, in a window in front of you. Put the \
+                     device in pairing mode first."
+            .to_string(),
+        Row::Power => match view.powered {
+            Some(true) => "Turns Bluetooth off. Every device here disconnects.".into(),
+            Some(false) => "Bluetooth is off. A turns it on.".into(),
+            None => "No Bluetooth adapter answered.".into(),
+        },
+    };
+    let detail = if view.note.is_empty() {
+        explain
+    } else {
+        format!("{}\n\n{explain}", view.note)
+    };
+    let footer = match bt.row(cursor) {
+        Row::Device(_) => "A connect/disconnect    Y forget    B back",
+        _ => FOOTER_SELECT,
+    };
+    MenuModel {
+        title: "Bluetooth".into(),
+        rows,
+        cursor,
+        detail,
+        footer: footer.into(),
     }
 }
 

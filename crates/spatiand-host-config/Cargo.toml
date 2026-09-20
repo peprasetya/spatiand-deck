@@ -1,0 +1,23 @@
+[package]
+name = "spatiand-host-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The host's settings app: the first thing a host offers, and how everything else gets there.
+# It runs *inside* the host, as an ordinary Wayland window that is streamed to the headset
+# like any other — so it is built with an ordinary toolkit and knows nothing about streaming.
+#
+# egui because it draws itself with GL and needs nothing from the desktop: no theme engine, no
+# portal, no file-chooser service. A host is often a machine nobody sits at, and GTK or Qt
+# there means a desktop's worth of dependencies for one settings window.
+[dependencies]
+spatiand-stream = { path = "../spatiand-stream" }
+spatiand-host-catalog = { path = "../spatiand-host-catalog" }
+spatiand-platform = { path = "../spatiand-platform" }
+log.workspace = true
+env_logger.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Pinned: its API moves between minor versions, and this is written against 0.31.
+eframe = { version = "=0.31.1", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }

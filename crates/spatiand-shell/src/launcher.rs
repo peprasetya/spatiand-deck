@@ -26,6 +26,9 @@ pub struct AppEntry {
     pub categories: Vec<String>,
 }
 
+/// The icon a remote computer's bubble looks up in the theme.
+pub const HOST_ICON: &str = "network-server";
+
 /// Angular spacing between adjacent bubbles, degrees.
 ///
 /// A bubble subtends about 4.6°, so 9° leaves nearly a full bubble of space between
@@ -71,10 +74,43 @@ pub struct BubblePlacement {
 /// and it becomes a filesystem browser, which is worse than either.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Level {
-    /// The groups themselves.
+    /// The groups themselves, and a bubble for each remote computer after them.
     Groups,
     /// The applications inside one group.
     Apps(Group),
+    /// The applications another computer offers. Carries the index into the computers.
+    Host(usize),
+}
+
+/// One application a remote computer offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEntry {
+    /// The computer's own name for it, which is what launching it sends.
+    pub id: String,
+    pub name: String,
+    /// A picture of it: a path, which the renderer loads like any other icon.
+    pub icon: Option<String>,
+}
+
+/// A remote computer, as a tab in the launcher.
+///
+/// A tab rather than its applications mixed in with this machine's: the same name can be on
+/// both — a browser here and a browser there are not the same browser — and which machine
+/// something runs on is the first thing you choose, not the last.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostTab {
+    pub label: String,
+    /// What it is known by; launching names it.
+    pub address: String,
+    pub online: bool,
+    pub apps: Vec<RemoteEntry>,
+}
+
+/// What pressing A on an application asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Launch {
+    Local(AppEntry),
+    Remote { host: String, app: String },
 }
 
 /// The launcher's state.
@@ -85,6 +121,8 @@ pub struct Launcher {
     level: Level,
     /// Groups that actually contain something, in [`GROUPS`] order.
     groups: Vec<Group>,
+    /// Remote computers, shown after the groups.
+    hosts: Vec<HostTab>,
     /// Where the cursor was in the group list, so backing out returns to it rather than to the
     /// top -- opening the wrong app and coming back should not cost you your place.
     group_cursor: usize,
@@ -98,7 +136,81 @@ impl Launcher {
             apps,
             level: Level::Groups,
             groups,
+            hosts: Vec::new(),
             group_cursor: 0,
+        }
+    }
+
+    pub fn hosts(&self) -> &[HostTab] {
+        &self.hosts
+    }
+
+    /// Replace the remote computers.
+    ///
+    /// Called whenever one comes or goes or changes what it offers. Stays inside a computer's
+    /// tab if that computer is still there — a catalogue that grows while you look at it
+    /// should not throw you out — and otherwise returns to the top.
+    pub fn set_hosts(&mut self, hosts: Vec<HostTab>) {
+        if hosts == self.hosts {
+            return;
+        }
+        let open = match &self.level {
+            Level::Host(i) => self.hosts.get(*i).map(|h| h.address.clone()),
+            _ => None,
+        };
+        self.hosts = hosts;
+        match &self.level {
+            Level::Host(_) => {
+                match open.and_then(|a| self.hosts.iter().position(|h| h.address == a)) {
+                    Some(i) => {
+                        let cursor = self.grid.cursor();
+                        self.level = Level::Host(i);
+                        self.grid = Grid::new(COLUMNS, self.len());
+                        self.grid.set_cursor(cursor.min(self.len().saturating_sub(1)));
+                    }
+                    None => {
+                        self.level = Level::Groups;
+                        self.grid = Grid::new(COLUMNS, self.len());
+                    }
+                }
+            }
+            Level::Groups => {
+                let cursor = self.grid.cursor();
+                self.grid = Grid::new(COLUMNS, self.len());
+                self.grid.set_cursor(cursor.min(self.len().saturating_sub(1)));
+            }
+            Level::Apps(_) => {}
+        }
+    }
+
+    /// Every bubble the current level shows: its label, and the icon to look up for it.
+    ///
+    /// One list so the renderer does not need to know what kinds of bubble there are.
+    pub fn bubbles(&self) -> Vec<(String, Option<String>)> {
+        match &self.level {
+            Level::Groups => self
+                .groups
+                .iter()
+                .map(|g| (g.label.to_string(), Some(g.icon.to_string())))
+                .chain(self.hosts.iter().map(|h| {
+                    let label = if h.online {
+                        h.label.clone()
+                    } else {
+                        format!("{} (offline)", h.label)
+                    };
+                    (label, Some(HOST_ICON.to_string()))
+                }))
+                .collect(),
+            Level::Apps(_) => self
+                .apps_in_level()
+                .iter()
+                .map(|a| (a.name.clone(), a.icon.clone()))
+                .collect(),
+            Level::Host(i) => self
+                .hosts
+                .get(*i)
+                .map(|h| h.apps.iter().map(|a| (a.name.clone(), a.icon.clone())).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -113,7 +225,7 @@ impl Launcher {
     /// The applications in the group currently open, in display order.
     pub fn apps_in_level(&self) -> Vec<&AppEntry> {
         match &self.level {
-            Level::Groups => Vec::new(),
+            Level::Groups | Level::Host(_) => Vec::new(),
             Level::Apps(group) => self
                 .apps
                 .iter()
@@ -125,8 +237,9 @@ impl Launcher {
     /// How many bubbles the current level shows.
     pub fn len(&self) -> usize {
         match &self.level {
-            Level::Groups => self.groups.len(),
+            Level::Groups => self.groups.len() + self.hosts.len(),
             Level::Apps(_) => self.apps_in_level().len(),
+            Level::Host(i) => self.hosts.get(*i).map_or(0, |h| h.apps.len()),
         }
     }
 
@@ -134,19 +247,33 @@ impl Launcher {
     ///
     /// `Ok(Some(app))` means launch it; `Ok(None)` means the level changed and there is
     /// nothing else to do.
-    pub fn activate(&mut self) -> Option<AppEntry> {
+    pub fn activate(&mut self) -> Option<Launch> {
         match self.level.clone() {
             Level::Groups => {
-                let group = *self.groups.get(self.grid.cursor())?;
-                self.group_cursor = self.grid.cursor();
-                self.level = Level::Apps(group);
+                let cursor = self.grid.cursor();
+                self.group_cursor = cursor;
+                if let Some(group) = self.groups.get(cursor).copied() {
+                    self.level = Level::Apps(group);
+                } else if cursor - self.groups.len() < self.hosts.len() {
+                    self.level = Level::Host(cursor - self.groups.len());
+                } else {
+                    return None;
+                }
                 self.grid = Grid::new(COLUMNS, self.len());
                 None
             }
             Level::Apps(_) => self
                 .apps_in_level()
                 .get(self.grid.cursor())
-                .map(|a| (*a).clone()),
+                .map(|a| Launch::Local((*a).clone())),
+            Level::Host(i) => {
+                let host = self.hosts.get(i)?;
+                let app = host.apps.get(self.grid.cursor())?;
+                Some(Launch::Remote {
+                    host: host.address.clone(),
+                    app: app.id.clone(),
+                })
+            }
         }
     }
 
@@ -157,9 +284,9 @@ impl Launcher {
     pub fn back(&mut self) -> bool {
         match self.level {
             Level::Groups => false,
-            Level::Apps(_) => {
+            Level::Apps(_) | Level::Host(_) => {
                 self.level = Level::Groups;
-                self.grid = Grid::new(COLUMNS, self.groups.len());
+                self.grid = Grid::new(COLUMNS, self.len());
                 self.grid.set_cursor(self.group_cursor);
                 true
             }
@@ -168,16 +295,7 @@ impl Launcher {
 
     /// Label for whatever is focused, for the caption under the grid.
     pub fn focused_label(&self) -> Option<String> {
-        match &self.level {
-            Level::Groups => self
-                .groups
-                .get(self.grid.cursor())
-                .map(|g| g.label.to_string()),
-            Level::Apps(_) => self
-                .apps_in_level()
-                .get(self.grid.cursor())
-                .map(|a| a.name.clone()),
-        }
+        self.bubbles().get(self.grid.cursor()).map(|(label, _)| label.clone())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -195,7 +313,7 @@ impl Launcher {
     /// The focused application, or `None` at the group level.
     pub fn focused(&self) -> Option<AppEntry> {
         match self.level {
-            Level::Groups => None,
+            Level::Groups | Level::Host(_) => None,
             Level::Apps(_) => self
                 .apps_in_level()
                 .get(self.grid.cursor())
@@ -212,7 +330,7 @@ impl Launcher {
         self.groups = occupied_groups(&self.apps);
         self.level = Level::Groups;
         self.group_cursor = 0;
-        self.grid = Grid::new(COLUMNS, self.groups.len());
+        self.grid = Grid::new(COLUMNS, self.len());
     }
 
     pub fn step(&mut self, direction: Direction) -> bool {
@@ -519,5 +637,64 @@ mod tests {
             "columns {COLUMN_SPACING_DEG} deg vs {bubble_deg} deg bubbles"
         );
         assert!(ROW_SPACING_DEG > bubble_deg * 1.4);
+    }
+
+    fn tab(address: &str, apps: &[&str]) -> HostTab {
+        HostTab {
+            label: address.to_string(),
+            address: address.to_string(),
+            online: true,
+            apps: apps
+                .iter()
+                .map(|a| RemoteEntry {
+                    id: a.to_lowercase(),
+                    name: a.to_string(),
+                    icon: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_remote_computer_is_a_bubble_after_the_groups_and_opens_to_its_apps() {
+        let mut l = Launcher::new(vec![app("Editor")]);
+        l.set_hosts(vec![tab("workshop", &["Chrome", "Firestorm"])]);
+        assert_eq!(l.len(), 2, "one group and one computer");
+        assert_eq!(l.bubbles()[1].0, "workshop");
+        l.step(Direction::Right);
+        assert_eq!(l.activate(), None, "opening a tab launches nothing");
+        assert_eq!(l.level(), &Level::Host(0));
+        assert_eq!(l.len(), 2);
+        l.step(Direction::Right);
+        assert_eq!(
+            l.activate(),
+            Some(Launch::Remote {
+                host: "workshop".into(),
+                app: "firestorm".into()
+            })
+        );
+        assert!(l.back());
+        assert_eq!(l.cursor(), 1, "backing out lands on the computer it came from");
+    }
+
+    #[test]
+    fn an_offline_computer_says_so_on_its_bubble() {
+        let mut l = Launcher::new(vec![]);
+        let mut t = tab("workshop", &[]);
+        t.online = false;
+        l.set_hosts(vec![t]);
+        assert_eq!(l.bubbles()[0].0, "workshop (offline)");
+    }
+
+    #[test]
+    fn a_catalogue_that_changes_while_open_keeps_you_in_the_tab() {
+        let mut l = Launcher::new(vec![]);
+        l.set_hosts(vec![tab("a", &["One"])]);
+        l.activate();
+        l.set_hosts(vec![tab("new", &[]), tab("a", &["One", "Two"])]);
+        assert_eq!(l.level(), &Level::Host(1), "followed by address, not by position");
+        assert_eq!(l.len(), 2);
+        l.set_hosts(vec![tab("new", &[])]);
+        assert_eq!(l.level(), &Level::Groups, "and out, once it is gone");
     }
 }

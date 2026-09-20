@@ -14,24 +14,28 @@
 
 use crate::grid::Direction;
 
+pub mod bluetooth;
 pub mod category;
 pub mod environment;
 pub mod files;
 pub mod grid;
+pub mod hosts;
 pub mod hud;
 pub mod keyboard;
 pub mod launcher;
 pub mod switcher;
 
+pub use bluetooth::{Bluetooth, BluetoothAction, BluetoothView, DeviceRow};
 pub use category::{Group, GROUPS};
 pub use environment::{
     EnvironmentAction, EnvironmentChoice, EnvironmentEntry, EnvironmentPicker, EnvironmentRow,
 };
 pub use files::{FileAction, FileBrowser, FileEntry};
 pub use grid::{Direction as NavDirection, Grid};
+pub use hosts::{HostRow, HostStatus, Hosts, HostsAction, PairingView};
 pub use hud::{DesktopPanels, Hud, HudAction, HudItem};
 pub use keyboard::{Key, Keyboard};
-pub use launcher::{AppEntry, BubblePlacement, Launcher, Level};
+pub use launcher::{AppEntry, BubblePlacement, HostTab, Launch, Launcher, Level, RemoteEntry};
 pub use switcher::{Switcher, WindowEntry};
 
 /// What the wearer meant, independent of which button they pressed.
@@ -77,6 +81,10 @@ pub enum Mode {
     /// The controller layout editor. The shell only routes the controls to it; what it shows
     /// and what a press does belong to the compositor's layout engine.
     Controller,
+    /// Remote computers: the paired ones, and adding another. Reached from the HUD.
+    Hosts,
+    /// Bluetooth devices: the paired ones, connecting them, and adding another. From the HUD.
+    Bluetooth,
 }
 
 /// A menu control, passed through to the controller layout editor.
@@ -112,6 +120,37 @@ pub enum ShellEvent {
     /// Ask this window to close itself, politely. The list stays open: closing several is one
     /// press each, and the compositor hands back a fresh list as they go.
     CloseWindow(usize),
+    /// Start this application on that computer.
+    LaunchRemote { host: String, app: String },
+    /// Start pairing with a computer at this address.
+    PairHost(String),
+    /// The wearer has compared the codes and they match.
+    ConfirmPairing,
+    /// Stop the pairing in progress.
+    CancelPairing,
+    /// Stop knowing this computer.
+    ForgetHost(String),
+    /// Something to do to a Bluetooth device or the adapter. Never [`BluetoothAction::None`].
+    Bluetooth(BluetoothAction),
+}
+
+/// The event a remote computers action becomes, if it becomes one.
+fn hosts_event(action: HostsAction) -> Option<ShellEvent> {
+    match action {
+        HostsAction::None => None,
+        HostsAction::Pair(address) => Some(ShellEvent::PairHost(address)),
+        HostsAction::Confirm => Some(ShellEvent::ConfirmPairing),
+        HostsAction::Cancel => Some(ShellEvent::CancelPairing),
+        HostsAction::Forget(address) => Some(ShellEvent::ForgetHost(address)),
+    }
+}
+
+/// The event a Bluetooth action becomes, if it becomes one.
+fn bluetooth_event(action: BluetoothAction) -> Option<ShellEvent> {
+    match action {
+        BluetoothAction::None => None,
+        action => Some(ShellEvent::Bluetooth(action)),
+    }
 }
 
 pub struct Shell {
@@ -121,6 +160,8 @@ pub struct Shell {
     environments: EnvironmentPicker,
     files: FileBrowser,
     switcher: Switcher,
+    hosts: Hosts,
+    bluetooth: Bluetooth,
 }
 
 impl Shell {
@@ -134,6 +175,8 @@ impl Shell {
             environments: EnvironmentPicker::default(),
             files: FileBrowser::default(),
             switcher: Switcher::default(),
+            hosts: Hosts::default(),
+            bluetooth: Bluetooth::default(),
         }
     }
 
@@ -159,6 +202,57 @@ impl Shell {
 
     pub fn switcher(&self) -> &Switcher {
         &self.switcher
+    }
+
+    pub fn hosts(&self) -> &Hosts {
+        &self.hosts
+    }
+
+    pub fn bluetooth(&self) -> &Bluetooth {
+        &self.bluetooth
+    }
+
+    /// What the compositor last found out about Bluetooth.
+    pub fn set_bluetooth(&mut self, view: BluetoothView) {
+        self.bluetooth.set_view(view);
+    }
+
+    /// Hand the remote computers page its list, and the launcher its tabs. The compositor
+    /// calls this whenever a computer comes, goes or changes what it offers.
+    pub fn set_hosts(&mut self, rows: Vec<HostRow>, tabs: Vec<HostTab>) {
+        self.hosts.set_rows(rows);
+        self.launcher.set_hosts(tabs);
+    }
+
+    /// How the pairing in progress is going.
+    pub fn set_pairing(&mut self, view: PairingView) {
+        self.hosts.set_pairing(view);
+    }
+
+    /// Whether the on-screen keyboard should type into the shell rather than into a window.
+    pub fn wants_text(&self) -> bool {
+        self.mode == Mode::Hosts && self.hosts.wants_text()
+    }
+
+    /// Text typed while [`wants_text`](Self::wants_text).
+    pub fn type_text(&mut self, text: &str) {
+        if self.wants_text() {
+            self.hosts.type_text(text);
+        }
+    }
+
+    pub fn type_backspace(&mut self) {
+        if self.wants_text() {
+            self.hosts.backspace();
+        }
+    }
+
+    /// Enter, while typing.
+    pub fn type_enter(&mut self) -> Option<ShellEvent> {
+        if !self.wants_text() {
+            return None;
+        }
+        hosts_event(self.hosts.submit())
     }
 
     /// Hand the switcher the open windows. The compositor calls this immediately before the
@@ -247,6 +341,7 @@ impl Shell {
             // you close, and the HUD's rows are actions.
             Intent::Close => match self.mode {
                 Mode::Switcher => self.switcher.activate().map(ShellEvent::CloseWindow),
+                Mode::Bluetooth => bluetooth_event(self.bluetooth.forget()),
                 _ => None,
             },
             Intent::Back => match self.mode {
@@ -265,6 +360,12 @@ impl Shell {
                 // reach two levels down and often leave empty-handed.
                 Mode::Environment => self.enter(Mode::Hud),
                 Mode::Files => self.enter(Mode::Environment),
+                // Climbs its own pages, then back to the HUD it was opened from.
+                Mode::Hosts => match self.hosts.back() {
+                    (true, action) => hosts_event(action),
+                    (false, _) => self.enter(Mode::Hud),
+                },
+                Mode::Bluetooth => self.enter(Mode::Hud),
                 _ => self.enter(Mode::World),
             },
             Intent::Navigate(direction) => {
@@ -277,6 +378,8 @@ impl Shell {
                     Mode::Files => self.files.step(direction),
                     Mode::Launcher => self.launcher.step(direction),
                     Mode::Switcher => self.switcher.step(direction),
+                    Mode::Hosts => self.hosts.step(direction),
+                    Mode::Bluetooth => self.bluetooth.step(direction),
                     Mode::Controller => false,
                     // In the world the D-pad will move focus between windows; until windows
                     // are drawn there is nothing to move between.
@@ -298,6 +401,14 @@ impl Shell {
                         // that list in.
                         HudAction::OpenSwitcher => self.mode = Mode::Switcher,
                         HudAction::ControllerLayout => self.mode = Mode::Controller,
+                        HudAction::OpenHosts => {
+                            self.hosts.open();
+                            self.mode = Mode::Hosts;
+                        }
+                        HudAction::OpenBluetooth => {
+                            self.bluetooth.open();
+                            self.mode = Mode::Bluetooth;
+                        }
                         // Everything else takes you back to the world, settings panels
                         // included: staying on the menu after recentring hides the thing you
                         // just changed, and staying on it after opening Wi-Fi leaves a menu
@@ -332,9 +443,22 @@ impl Shell {
                 },
                 Mode::Launcher => {
                     // A group opens; an application launches and gets out of the way.
-                    let app = self.launcher.activate()?;
+                    let launch = self.launcher.activate()?;
                     self.mode = Mode::World;
-                    Some(ShellEvent::Launch(app))
+                    Some(match launch {
+                        Launch::Local(app) => ShellEvent::Launch(app),
+                        Launch::Remote { host, app } => ShellEvent::LaunchRemote { host, app },
+                    })
+                }
+                Mode::Hosts => hosts_event(self.hosts.activate()),
+                Mode::Bluetooth => {
+                    let action = self.bluetooth.activate();
+                    // The wizard is a window; a menu left over it would hide it and hold the
+                    // pointer.
+                    if action == BluetoothAction::Add {
+                        self.mode = Mode::World;
+                    }
+                    bluetooth_event(action)
                 }
                 Mode::Switcher => {
                     let id = self.switcher.activate()?;
@@ -743,5 +867,58 @@ mod tests {
         s.handle(Intent::Accept);
         assert_eq!(s.mode(), Mode::Files);
         assert!(s.menu_is_open());
+    }
+
+    #[test]
+    fn pairing_a_computer_from_the_hud_is_typing_its_address_and_pressing_enter() {
+        let mut s = shell();
+        s.handle(Intent::ToggleHud);
+        while s.hud().focused().action != HudAction::OpenHosts {
+            assert!(s.handle(Intent::Navigate(Direction::Down)).is_none());
+        }
+        s.handle(Intent::Accept);
+        assert_eq!(s.mode(), Mode::Hosts);
+        assert!(!s.wants_text(), "the list is not a text field");
+
+        // The only row with nothing paired is the adding one.
+        assert_eq!(s.handle(Intent::Accept), None);
+        assert!(s.wants_text());
+        s.type_text("workshop");
+        assert_eq!(s.type_enter(), Some(ShellEvent::PairHost("workshop".into())));
+        assert!(!s.wants_text());
+
+        // B from the comparison cancels it, and B again returns to the HUD it came from.
+        assert_eq!(s.handle(Intent::Back), Some(ShellEvent::CancelPairing));
+        assert_eq!(s.handle(Intent::Back), Some(ShellEvent::ModeChanged(Mode::Hud)));
+    }
+
+    #[test]
+    fn a_remote_app_launches_as_a_remote_launch() {
+        let mut s = shell();
+        s.set_hosts(
+            vec![],
+            vec![HostTab {
+                label: "deepMagpie".into(),
+                address: "workshop".into(),
+                online: true,
+                apps: vec![RemoteEntry {
+                    id: "chrome".into(),
+                    name: "Chrome".into(),
+                    icon: None,
+                }],
+            }],
+        );
+        s.handle(Intent::ToggleLauncher);
+        // One group of local apps, then the computer.
+        s.handle(Intent::Navigate(Direction::Right));
+        s.handle(Intent::Accept);
+        assert_eq!(
+            s.handle(Intent::Accept),
+            Some(ShellEvent::LaunchRemote {
+                host: "workshop".into(),
+                app: "chrome".into()
+            })
+        );
+        assert_eq!(s.mode(), Mode::World);
     }
 }

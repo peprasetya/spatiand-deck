@@ -10,6 +10,11 @@ members = [
     "crates/spatiand-shell",
     "crates/spatiand-platform",
     "crates/spatiand-proto",
+    "crates/spatiand-stream",
+    "crates/spatiand-host",
+    "crates/spatiand-host-catalog",
+    "crates/spatiand-host-config",
+    "crates/spatiand-video",
     "crates/spatiand",
 ]
 

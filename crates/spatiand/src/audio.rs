@@ -67,6 +67,11 @@ pub struct Audio {
     bound: HashMap<usize, Slot>,
     /// How wide each sink was opened, so its channels are aimed as the ones it actually has.
     widths: HashMap<Slot, Width>,
+    /// Sinks kept by name rather than by process: a remote application's, whose process is on
+    /// another computer. Every window of one application shares its sink.
+    keyed: HashMap<String, Slot>,
+    /// Which window each sink was last aimed from, only so a change can be said once.
+    aimed: HashMap<Slot, usize>,
     next: Slot,
 }
 
@@ -86,6 +91,8 @@ impl Audio {
             launched: Vec::new(),
             bound: HashMap::new(),
             widths: HashMap::new(),
+            keyed: HashMap::new(),
+            aimed: HashMap::new(),
             next: 1,
         }
     }
@@ -139,6 +146,38 @@ impl Audio {
         log::info!("window {window} sounds through slot {slot}");
     }
 
+    /// Give a window the sink kept under `key`, opening one if this is the first window with
+    /// that key. For remote applications, whose sound is played into it from here.
+    pub fn adopt_keyed(&mut self, window: usize, key: &str, width: Width) {
+        let Some(engine) = self.engine.as_ref() else {
+            return;
+        };
+        if self.bound.contains_key(&window) {
+            return;
+        }
+        let slot = match self.keyed.get(key) {
+            Some(slot) => *slot,
+            None => {
+                let slot = self.next;
+                self.next += 1;
+                engine.open(slot, width);
+                self.widths.insert(slot, width);
+                self.keyed.insert(key.to_string(), slot);
+                slot
+            }
+        };
+        self.bound.insert(window, slot);
+        log::info!("window {window} ({key}) sounds through slot {slot}");
+    }
+
+    /// Where each keyed sink is, by key: what remote sound players aim at.
+    pub fn keyed_sinks(&self) -> HashMap<String, String> {
+        self.keyed
+            .iter()
+            .map(|(key, slot)| (key.clone(), spatiand_audio::server::sink_name(*slot)))
+            .collect()
+    }
+
     /// Walk up from `pid` looking for a process we launched.
     fn slot_of_process(&self, pid: u32) -> Option<Slot> {
         let mut at = pid;
@@ -188,6 +227,7 @@ impl Audio {
             return;
         }
         self.launched.retain(|(_, s)| *s != slot);
+        self.keyed.retain(|_, s| *s != slot);
         self.widths.remove(&slot);
         if let Some(engine) = &self.engine {
             engine.close(slot);
@@ -205,7 +245,7 @@ impl Audio {
     ///
     /// So each sink is aimed exactly once, from whichever of its windows is the thing making
     /// the sound. See [`Source::rank`] for what that means.
-    pub fn aim_all(&self, sources: &[Source], head: DQuat) {
+    pub fn aim_all(&mut self, sources: &[Source], head: DQuat) {
         // Best source per sink, in one pass. Small maps: an app with more than a handful of
         // windows is unusual and one with more than a handful of *sinks* is impossible.
         let mut best: HashMap<Slot, &Source> = HashMap::new();
@@ -222,6 +262,19 @@ impl Audio {
                 .or_insert(source);
         }
         for (slot, source) in best {
+            // Which window a sink's sound comes from is a decision, and one the wearer feels
+            // rather than sees: a browser's caption bubble taking its page's sound sounds
+            // like the sound moving for no reason. Said once, when it changes, so the log
+            // answers "why is it coming from there" without being asked again every frame.
+            if self.aimed.get(&slot) != Some(&source.window) {
+                self.aimed.insert(slot, source.window);
+                log::info!(
+                    "slot {slot}'s sound comes from window {} ({}x{})",
+                    source.window,
+                    source.pixels.0,
+                    source.pixels.1
+                );
+            }
             self.point(slot, source.stage(), head);
         }
     }
@@ -287,6 +340,8 @@ pub fn width_for(categories: &[String]) -> Width {
 pub struct Source {
     /// The window's id, the same one the sink was bound to.
     pub window: usize,
+    /// How big the window's own picture is. See [`Source::rank`].
+    pub pixels: (u32, u32),
     pub kind: Kind,
     /// Whether this is the window the wearer is working in. Breaks a tie between windows of
     /// the same size — see [`Source::rank`].
@@ -313,11 +368,18 @@ impl Source {
     /// * **An environment beats everything.** An app that has taken the room is showing a
     ///   film; anything else it has open is a control sitting in front of that film, and a
     ///   control is not where a soundtrack comes from.
-    /// * **Otherwise the biggest wins**, by solid angle. Not the focused one -- clicking a
+    /// * **Otherwise the biggest wins, in its own pixels**. Not the focused one -- clicking a
     ///   preferences panel should not move the music -- and not the newest, which is the
     ///   accident this replaces. A player's video panel is much larger than its transport
     ///   bar, a browser's page much larger than its popup, so in every case that prompted
     ///   this the biggest window *is* the one with the picture in it.
+    ///
+    ///   In *pixels*, not in how big it looks from here, and the difference is the wearer:
+    ///   pulling a window smaller or pushing it further away is a thing they do to see it
+    ///   better, and it must not hand the sound to a caption bubble standing next to it. A
+    ///   window's pixel size is the application's own statement about what that window is
+    ///   for, and it does not change because somebody moved it. Reported as a side, not an
+    ///   area, so the bands below still read as "a quarter bigger".
     /// * **Between windows of the same size, the focused one wins.** This is what "the same
     ///   size" was hiding: a Steam game is *two* applications sharing one sink, Steam and the
     ///   game, and their windows are both whatever size a new window is. The tie went to the
@@ -332,10 +394,10 @@ impl Source {
     /// Ties that survive all of that go to the lower window id, purely so that two identical
     /// windows do not make the aim depend on the order a hash map happened to yield.
     fn rank(&self) -> (u8, i32, bool, OrderedSize, std::cmp::Reverse<usize>) {
+        let side = ((self.pixels.0 as f64) * (self.pixels.1 as f64)).sqrt();
         let (tier, size) = match self.kind {
             Kind::Environment { .. } => (1, 0.0),
-            // Width over radius: how big it looks, not how big it is.
-            Kind::Window(p) => (0, p.width / p.radius.max(1e-6)),
+            Kind::Window(_) => (0, side),
         };
         (
             tier,
@@ -464,6 +526,9 @@ mod tests {
     fn win(window: usize, yaw: f64, width: f64) -> Source {
         Source {
             window,
+            // A window's pixels are what decides now, so the test windows are given pixels
+            // in proportion to how big they are meant to be.
+            pixels: ((width * 1000.0) as u32, (width * 625.0) as u32),
             kind: Kind::Window(Placement {
                 yaw,
                 width,
@@ -483,6 +548,7 @@ mod tests {
     fn sky(window: usize, yaw: f64) -> Source {
         Source {
             window,
+            pixels: (1920, 1080),
             kind: Kind::Environment { yaw },
             focused: false,
         }
@@ -493,7 +559,7 @@ mod tests {
         // Everything has to be safe to call for a window that never claimed a sink, because
         // most windows never will -- and the failure mode of getting this wrong is a panic in
         // the render loop.
-        let audio = Audio::new(false, Directness::default());
+        let mut audio = Audio::new(false, Directness::default());
         assert!(!audio.is_on());
         assert_eq!(audio.status(7), None);
         audio.set_muted(7, true);

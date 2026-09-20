@@ -170,6 +170,34 @@ pub fn settle(state: &mut Spatiand, renderer: &mut GlesRenderer) {
         return;
     }
     for (buffer, notifier) in std::mem::take(&mut state.pending_dmabufs) {
+        // **Whether this import will be an *external* texture, said out loud.**
+        //
+        // Smithay decides that by one test: is the buffer's format-and-modifier one EGL can
+        // *render to*? If not, the EGLImage can only be sampled through
+        // `GL_TEXTURE_EXTERNAL_OES` and a `samplerExternalOES`, never as an ordinary
+        // `GL_TEXTURE_2D`. Binding an external texture to the 2D target is not an error; it
+        // silently samples nothing, which is what a window of flat grey — or a diagonal
+        // smear, when tiled memory is read as if it were linear — actually is.
+        //
+        // Local clients never hit this, because they post formats the GPU can also render to.
+        // A hardware video decoder does not have that courtesy.
+        {
+            use smithay::backend::allocator::Buffer;
+            let format = buffer.format();
+            let renderable = renderer
+                .egl_context()
+                .dmabuf_render_formats()
+                .contains(&format);
+            if !renderable {
+                let code = u32::from(format.code as u32).to_le_bytes();
+                log::warn!(
+                    "a client's dmabuf is {} modifier {:#x}, which this EGL cannot render to: \
+                     it will import as an EXTERNAL texture",
+                    String::from_utf8_lossy(&code),
+                    u64::from(format.modifier),
+                );
+            }
+        }
         match renderer.import_dmabuf(&buffer, None) {
             Ok(_) => {
                 // Said once, because "dmabuf is advertised" and "a client is actually using

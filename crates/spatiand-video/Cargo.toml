@@ -1,0 +1,29 @@
+[package]
+name = "spatiand-video"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Decoding, for the headset end. Deliberately separate from the compositor: it can be built and
+# run on its own, which is how the picture is checked without a session, glasses or a person.
+#
+# libva and nothing else. The Deck's build container has no VA headers and no libva to link
+# against, so both are supplied by hand — see docs/remote.md and `spatiand-host-build` in
+# memory. That is also why this is not built on the ffmpeg the host uses: the Deck has no
+# ffmpeg headers either, and the two ends do not have to agree on a library, only on a codec.
+[dependencies]
+spatiand-stream = { path = "../spatiand-stream" }
+log.workspace = true
+libc = "0.2"
+# libavcodec, the same library the host encodes with. The first attempt used `cros-codecs`
+# over libva, which is pure Rust and needs no headers — and cannot run here: it opens its
+# decoder with a 16x16 probe context, and this GPU refuses any video context below 64x64. Both
+# codecs, measured. See docs/remote.md.
+#
+# The Deck has ffmpeg 7.1's libraries but no headers, so the headers are vendored and the
+# libraries are the system's; `ffmpeg7_1` pins the version this is built against.
+rsmpeg = { version = "0.18", default-features = false, features = ["ffmpeg7_1", "link_system_ffmpeg"] }
+
+[dev-dependencies]
+env_logger.workspace = true

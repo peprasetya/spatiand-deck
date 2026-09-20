@@ -139,6 +139,8 @@ impl Wanted {
     fn load(&self, size: u32) -> Option<TextImage> {
         let path = match self {
             Wanted::Named(name) => spatiand_platform::resolve_icon(name),
+            // A remote window's icon came from its host, not from anything installed here.
+            Wanted::App(id) if id.starts_with("remote.") => crate::remote::icon_for(id),
             Wanted::App(id) => spatiand_platform::icon_for_app(id),
         }?;
         load(&path, size)

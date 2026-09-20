@@ -1,0 +1,29 @@
+[package]
+name = "spatiand-stream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+log.workspace = true
+postcard = { version = "1", features = ["alloc"] }
+# The link. QUIC because one connection has to carry both things that must arrive and things
+# that must arrive *now*; see `transport`.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.14"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time", "io-util"] }
+env_logger.workspace = true
+
+# A session with no headset: the way to test a host over a real network before any of the
+# decoding and drawing exists. It needs nothing but this crate, so it builds anywhere — the
+# Deck included, where there is no ffmpeg to build the host against.
+[[example]]
+name = "probe-session"

@@ -217,6 +217,17 @@ pub fn run(
     let mut right_trigger = spatiand_input::Trigger::default();
     let mut left_trigger = spatiand_input::Trigger::default();
     let mut prefs = crate::prefs::Prefs::load();
+    // Remote hosts, if any are configured. Held for the life of the session: dropping one
+    // closes its windows. Paired and forgotten from the HUD, as the session runs.
+    let mut remotes = crate::remote::Remotes::start(&mut runtime.display_handle, &prefs);
+    // Bluetooth devices for the HUD's page, asked on a thread of its own.
+    let mut bluetooth = crate::bluetooth::Devices::start();
+    // An event the keyboard produced after this frame's events were already handled — Enter
+    // on the address page — carried over to the next frame.
+    let mut typed_event: Option<ShellEvent> = None;
+    // Whether the keyboard is showing because the shell asked for text, rather than because
+    // the wearer opened it; only then does it close again by itself.
+    let mut keyboard_for_shell = false;
     let mut keyboard = spatiand_shell::Keyboard {
         click: prefs.keyboard_click,
         ..Default::default()
@@ -337,7 +348,9 @@ pub fn run(
     // Bluetooth module is installed", and a row that opens nothing reads as a broken HUD.
     let panels = DesktopPanels {
         network: spatiand_platform::panel_available("wifi"),
-        bluetooth: spatiand_platform::panel_available("bluetooth"),
+        // The page lists devices through BlueZ itself and opens the wizard only for adding
+        // one, so BlueZ being there is what the row needs.
+        bluetooth: crate::bluetooth::available(),
     };
     log::info!(
         "desktop settings panels: wi-fi {}, bluetooth {}",
@@ -371,6 +384,12 @@ pub fn run(
         stored.unwrap_or(AxisMap::XREAL_AIR),
         TrackerConfig::default(),
     );
+    // The gyro offset and the magnetometer's own field, from last time and for next time.
+    let mut sensor_memory = crate::sensors::SensorMemory::new();
+    // Windows that arrived before their app id was set, still to be matched to a sink.
+    let mut awaiting_app_id: Vec<(usize, std::time::Instant)> = Vec::new();
+    // Raw samples to a file, when the session environment asks: see `imu_record`.
+    let mut imu_recorder = crate::imu_record::Recorder::from_env();
 
     // Page-flip completion drives the render loop.
     //
@@ -411,6 +430,7 @@ pub fn run(
             Ok(h) => {
                 log::info!("headset: {}", h.info().name);
                 settle_axes(h.info(), stored, &mut tracker, &mut calibration);
+                sensor_memory.restore(&h.info().name, &mut tracker);
                 // Once, here, rather than on the sidecar's poll: an MCU exchange blocks for up
                 // to 1.5 s waiting for its ack, and the render loop cannot afford that twice a
                 // second. A headset that will not answer simply has no slider.
@@ -1186,6 +1206,14 @@ pub fn run(
                     });
                     if let Some(window) = window {
                         let title = runtime.state.display_title(&window);
+                        let remote = runtime
+                            .state
+                            .app_id_of(&window)
+                            .filter(|id| id.starts_with("remote."));
+                        if let Some(app_id) = remote {
+                            log::warn!("force-closing {title} on its host");
+                            remotes.force_quit(&app_id);
+                        } else {
                         match runtime.state.pid_of(&window) {
                             Some(pid) => {
                                 log::warn!("force-closing {title} (pid {pid})");
@@ -1195,14 +1223,39 @@ pub fn run(
                             }
                             None => log::warn!("cannot force-close {title}: no process id"),
                         }
+                        }
                     }
                 }
             } else {
                 force_close_since = None;
             }
 
+            shell_events.extend(typed_event.take());
+            remotes.tick(&mut runtime.display_handle, &mut prefs, &mut shell);
+            if let Some(command) = bluetooth.tick(&mut shell) {
+                if let Err(e) =
+                    spatiand_platform::launch(&command, &runtime.state.socket_name, &[])
+                {
+                    log::warn!("could not open the Bluetooth wizard: {e}");
+                }
+            }
+            // The address page wants the keyboard, so it gets it, and gives it back after.
+            if shell.wants_text() && !keyboard.open {
+                keyboard.open = true;
+                keyboard_for_shell = true;
+            } else if !shell.wants_text() && keyboard_for_shell {
+                keyboard.open = false;
+                keyboard_for_shell = false;
+            }
+
             for event in shell_events {
                 match event {
+                    ShellEvent::LaunchRemote { host, app } => remotes.launch(&host, &app),
+                    ShellEvent::PairHost(address) => remotes.pair(address),
+                    ShellEvent::ConfirmPairing => remotes.confirm(),
+                    ShellEvent::CancelPairing => remotes.cancel(),
+                    ShellEvent::ForgetHost(address) => remotes.forget(&address, &mut prefs),
+                    ShellEvent::Bluetooth(action) => bluetooth.act(action),
                     ShellEvent::ModeChanged(mode) => {
                         if mode == Mode::World {
                             scene.forget_anchor();
@@ -1378,6 +1431,10 @@ pub fn run(
                                 if keyboard.open { "shown" } else { "hidden" }
                             );
                         }
+                        // The shell has already opened the page; `remotes.tick` keeps it filled.
+                        HudAction::OpenHosts => {}
+                        // The shell has opened the page; ask BlueZ now rather than at the tick.
+                        HudAction::OpenBluetooth => bluetooth.refresh(),
                         HudAction::ReturnToDesktop => leaving = true,
                         HudAction::OpenSystemSettings(panel) => {
                             // What "wifi" means on this machine is the platform crate's
@@ -1497,11 +1554,17 @@ pub fn run(
                 }
             }
 
+            sensor_memory.tick(&tracker);
             if let Some(x) = hmd.as_mut() {
                 while let Ok(Some(event)) = x.poll(Duration::ZERO) {
                     match event {
                         HmdEvent::Imu(sample) => {
                             last_imu = std::time::Instant::now();
+                            if let Some(r) = imu_recorder.as_mut() {
+                                if !r.write(&sample) {
+                                    imu_recorder = None;
+                                }
+                            }
                             if let Some(c) = calibration.as_mut() {
                                 c.feed(&sample);
                             }
@@ -1574,6 +1637,9 @@ pub fn run(
                             None => {
                                 log::info!("adopting measured axes: {}", map.summary());
                                 tracker.set_axes(map);
+                                if let Some(h) = hmd.as_ref() {
+                                    sensor_memory.restore(&h.info().name, &mut tracker);
+                                }
                             }
                         }
                     }
@@ -1880,11 +1946,49 @@ pub fn run(
             {
                 shell.set_windows(runtime.state.open_windows());
             }
-            for (id, pid) in std::mem::take(&mut runtime.state.arrived_windows) {
-                spatial_audio.adopt(id, pid);
+            let mut sinks_changed = false;
+            for (id, pid, app_id) in std::mem::take(&mut runtime.state.arrived_windows) {
+                // A remote application's windows share a sink named for the application; its
+                // sound arrives over the network and is played into it. See `remote::sound`.
+                match app_id {
+                    Some(app_id) if app_id.starts_with("remote.") => {
+                        spatial_audio.adopt_keyed(id, &app_id, spatiand_audio::server::Width::Stereo);
+                        sinks_changed = true;
+                    }
+                    Some(_) => spatial_audio.adopt(id, pid),
+                    // A toplevel is announced before its app id is set — the id comes with the
+                    // first commit — so a window that arrived without one is looked at again
+                    // until it has one. Missing this is what left a remote browser's sound on
+                    // the Deck's speakers instead of at its window.
+                    None => {
+                        spatial_audio.adopt(id, pid);
+                        awaiting_app_id.push((id, std::time::Instant::now()));
+                    }
+                }
             }
+            awaiting_app_id.retain(|(id, since)| {
+                match runtime.state.app_id_of_id(*id) {
+                    Some(app_id) => {
+                        if app_id.starts_with("remote.") {
+                            spatial_audio.adopt_keyed(
+                                *id,
+                                &app_id,
+                                spatiand_audio::server::Width::Stereo,
+                            );
+                            sinks_changed = true;
+                        }
+                        false
+                    }
+                    None => since.elapsed() < std::time::Duration::from_secs(10),
+                }
+            });
             for id in std::mem::take(&mut runtime.state.departed_windows) {
+                awaiting_app_id.retain(|(w, _)| *w != id);
                 spatial_audio.forget(id);
+                sinks_changed = true;
+            }
+            if sinks_changed {
+                crate::remote::sound::set_sinks(spatial_audio.keyed_sinks());
             }
             // Where every window's sound is, now, and what it is doing. The head has moved
             // since the last frame even if nothing else has, so the aim is unconditional --
@@ -1915,8 +2019,18 @@ pub fn run(
                     } else {
                         continue;
                     };
+                    // The window's own picture, which is what decides whose sound this is;
+                    // see `audio::Source::rank`.
+                    let pixels = smithay::backend::renderer::utils::with_renderer_surface_state(
+                        &surface,
+                        |s| s.surface_size(),
+                    )
+                    .flatten()
+                    .map(|size| (size.w.max(0) as u32, size.h.max(0) as u32))
+                    .unwrap_or((0, 0));
                     sources.push(crate::audio::Source {
                         window: id,
+                        pixels,
                         kind,
                         focused: runtime.state.layout.is_focused(window),
                     });
@@ -2008,7 +2122,9 @@ pub fn run(
                 left_scroll.forget();
             }
 
-            if shell.menu_is_open() {
+            // A menu takes the pointer away -- except a menu asking for text, which needs it to
+            // reach the keyboard. Windows still get nothing from it then; see below.
+            if shell.menu_is_open() && !shell.wants_text() {
                 // A menu takes the pointer away. Anything held has to be let go, or the client
                 // underneath is left believing a drag is still running.
                 pointers.release_all(&mut runtime.state, time_ms);
@@ -2402,7 +2518,12 @@ pub fn run(
                                         clicks.play();
                                     }
                                     if let Some(stroke) = keyboard.press(key) {
-                                        send_stroke(&mut runtime.state, stroke, time_ms);
+                                        if shell.wants_text() {
+                                            typed_event = typed_event
+                                                .or(type_into_shell(&mut shell, key, &stroke));
+                                        } else {
+                                            send_stroke(&mut runtime.state, stroke, time_ms);
+                                        }
                                     }
                                     keyboard.after_press(key);
                                 }
@@ -2425,7 +2546,12 @@ pub fn run(
                         }
                     }
 
-                    if !typed && right_click && pointers.drag.is_none() && !right_was_down {
+                    if !typed
+                        && !shell.wants_text()
+                        && right_click
+                        && pointers.drag.is_none()
+                        && !right_was_down
+                    {
                         // Anything but a click on the menu itself closes the menus -- the title
                         // bar, another window, empty sky. Spatiand hands out no popup grabs, so
                         // this is the only thing that ever tells a client its menu is over.
@@ -2866,7 +2992,12 @@ pub fn run(
                                         clicks.play();
                                     }
                                     if let Some(stroke) = keyboard.press(key) {
-                                        send_stroke(&mut runtime.state, stroke, time_ms);
+                                        if shell.wants_text() {
+                                            typed_event = typed_event
+                                                .or(type_into_shell(&mut shell, key, &stroke));
+                                        } else {
+                                            send_stroke(&mut runtime.state, stroke, time_ms);
+                                        }
                                     }
                                     keyboard.after_press(key);
                                     continue;
@@ -3720,6 +3851,30 @@ fn toggle_click(
     // Nothing to do when it goes off: the stream is held open by `Clicks::wanted`, which the
     // frame below sets from this same flag, so switching the sound off gives the device back
     // on the next pass. A second way to say it here is a second thing to keep in step.
+}
+
+/// A key pressed while the shell is asking for text: the address of a computer to pair with.
+///
+/// Letters come from the key's own face, so what is typed is what the key says — including
+/// shift, which is how a colon is reached. Enter submits, and the event it makes is handed
+/// back for the next frame's events.
+fn type_into_shell(
+    shell: &mut Shell,
+    key: &spatiand_shell::Key,
+    stroke: &spatiand_shell::keyboard::Stroke,
+) -> Option<ShellEvent> {
+    use spatiand_shell::keyboard as kb;
+    match stroke.code {
+        kb::KEY_BACKSPACE => shell.type_backspace(),
+        kb::KEY_ENTER => return shell.type_enter(),
+        _ => {
+            let face = key.face(stroke.shift);
+            if face.chars().count() == 1 {
+                shell.type_text(face);
+            }
+        }
+    }
+    None
 }
 
 fn send_stroke(state: &mut Spatiand, stroke: spatiand_shell::keyboard::Stroke, time_ms: u32) {

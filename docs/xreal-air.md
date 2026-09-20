@@ -841,3 +841,85 @@ and a UI.
 
 A working macOS implementation of all of the above lives in `Tools/hidprobe.swift`:
 `list`, `imu [sec]`, `sweep`, `getmode`, `setmode 2d|3d`.
+
+## The magnetometer as a yaw anchor — 2026-09-19
+
+`|mag| ≈ 0.3` is the reading, not the Earth's field. HoloFrame fitted the magnetometer's own
+offset (the glasses' speaker magnets, fixed to the head) at about **0.25 G against a true field
+of about 0.16 G**, and a yaw anchor fed the raw reading steered toward a heading 23–32° wrong.
+Spatiand had ported that anchor before the finding, so it was a source of drift rather than a
+cure for it.
+
+What `spatiand-track` does now (`hard_iron.rs`, `tracker.rs`):
+
+- **The offset is measured while the glasses are worn.** Over 20-second windows the gyro holds
+  orientation well enough that `R·(P·m − c)` must be constant; that is linear in the offset `c`
+  once each window's field is eliminated. No figure-eights: ordinary looking around, up and
+  down as well as sideways, is enough within a minute or two.
+- **The magnetometer's axes are not assumed to be the gyro's.** All 24 distinguishable signed
+  axis arrangements are tried and the one that leaves a steady field is kept, decisively or not
+  at all. (An arrangement and its negative are indistinguishable and equivalent for heading.)
+- **No offset, no anchor.** Until measured (or restored) it stays off, as HoloFrame's does.
+- From HoloFrame's September work: bias learned only from desk-still windows (spread under
+  0.3 deg/s), remembered between sessions, deadband 0.15, and the anchor correcting the bias
+  itself as well as the heading.
+- Bias and offset are kept in `~/.config/spatiand/sensors.toml`, per device name and axis map.
+- Every 30 s the session log says what the anchor is doing: `tracker: bias …; magnetometer …;
+  yaw anchor …`.
+
+In simulation (scripted head, 0.25 G offset, swapped axes, a remembered bias 0.15 deg/s off):
+yaw holds within 1° over twelve minutes of looking around and under 2° while reading; the same
+head with the anchor off drifts past 20°. **Not yet measured on the glasses** — the first real
+session's log lines are the check.
+
+First session with it (2026-09-19): the fit reached coverage 0.005 and "cannot yet tell how its
+axes sit" in four minutes, so the anchor never ran, and the bias was learned once on the face and
+never again. `SPATIAND_IMU_RECORD=1` in `~/.config/spatiand/session.env` now records the raw IMU to
+`~/.local/share/spatiand/imu-<time>.bin` (HoloFrame's format), so the next step is tuning against
+real head movement rather than a simulated one.
+
+Replaying the first recording (`cargo run -p spatiand-track --example replay -- <imu.bin>`):
+
+- The magnetometer sends `(−16, −16, −16)` G now and then. Two such samples outweighed everything
+  else in the fit; readings over 2 G are now ignored.
+- A head is never desk-still: the stillest two seconds of eight minutes spread 0.43 deg/s, above
+  the 0.3 desk limit, so during wear only the *first* bias estimate is ever learned — and it was
+  taken mid-turn (spread 1.8). The first estimate now needs a spread under 0.8. Replayed from
+  nothing it lands at (+0.83, +0.50, −0.76) against a still-head reading of (+0.85, +0.60,
+  −0.72); before, it was off by more than a degree a second on one axis. The remembered bias
+  from the previous session was already right, which is why that session felt steady.
+- The offset fit stays undecided on eight minutes of ordinary wear: several axis arrangements
+  leave 7–11% unexplained, and the head never turns through enough directions to choose. The
+  anchor stays off, which is the safe outcome. Deciding it will need either a short deliberate
+  calibration motion or the arrangement taken from the hardware.
+
+## The deadband was drifting the world by itself — 2026-09-20
+
+Yaw still wandered over a long session, with the bias remembered correctly and the magnetic
+anchor off. Some of that was the tracker's own doing.
+
+Rates are faded toward zero by `speed²/(speed² + deadband²)`, which kills the residual bias
+that would otherwise integrate while you sit still. It also eats a share of every *slow*
+movement and almost none of a fast one — and reading is slow one way and fast the other. Drift
+slowly along a line, snap back quickly, and a little of each line is lost in the same
+direction, for as long as the reading goes on. Bias estimation cannot remove it, because it is
+not bias.
+
+The squelch now fades out as the head starts moving, measured on the smoothed rate rather than
+the instantaneous one — "this head is moving" rather than "this sample is noisy" — and is
+untouched at rest. Replayed against a scripted head that reads for twelve minutes with its
+bias exactly right and no anchor at all, so nothing else can be blamed:
+
+| | worst yaw error in the last minute |
+|---|---|
+| deadband always on | 5.1 deg |
+| faded out above 2 deg/s of motion | 0.4 deg |
+
+**What this does not fix.** Whatever bias is left still integrates while the head moves, and
+nothing in gyro and gravity can tell. Once calibrated, only a *desk-still* window teaches the
+bias (spread under 0.3 deg/s), and a head never reaches that — deliberately, because accepting
+head-still windows closes a feedback loop: the view drifts, you turn slowly to follow it, your
+turn is learned as bias, and the drift grows. A permanent answer needs an absolute heading,
+which means the magnetometer, which needs a hard-iron fit that ordinary wear cannot decide —
+the head does not turn through enough of the sphere. That is a deliberate calibration motion,
+and it is the next piece of work.

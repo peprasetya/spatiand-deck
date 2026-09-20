@@ -67,6 +67,8 @@ pub fn parse_joysticks(text: &str) -> Vec<JoystickNode> {
         let mut product = 0u16;
         let mut event = None;
         let mut joystick = false;
+        // `None` when the block does not say, which only a test fixture does not.
+        let mut pad_buttons = None;
         for line in block.lines() {
             if let Some(rest) = line.strip_prefix("N: Name=") {
                 name = rest.trim_matches('"').to_string();
@@ -78,6 +80,8 @@ pub fn parse_joysticks(text: &str) -> Vec<JoystickNode> {
                         product = u16::from_str_radix(p, 16).unwrap_or(0);
                     }
                 }
+            } else if let Some(rest) = line.strip_prefix("B: KEY=") {
+                pad_buttons = Some(has_pad_buttons(rest));
             } else if let Some(rest) = line.strip_prefix("H: Handlers=") {
                 for handler in rest.split_whitespace() {
                     if handler.starts_with("js") {
@@ -91,7 +95,12 @@ pub fn parse_joysticks(text: &str) -> Vec<JoystickNode> {
         let ours = name == crate::virtual_pad::NAME;
         let valve = vendor == 0x28DE;
         let sensors = name.contains("Motion Sensors") || name.contains("IMU");
-        if let (true, Some(event)) = (joystick && !ours && !valve && !sensors, event) {
+        // A joystick node is not a joystick. The kernel gives one to anything with an odd
+        // axis: a Bluetooth keyboard with a built-in trackpad reported `js0` for a single
+        // ABS_MISC, was grabbed here as a controller, and from then on typed nothing and moved
+        // no pointer. A pad has pad buttons; a keyboard does not.
+        let buttons = pad_buttons.unwrap_or(true);
+        if let (true, Some(event)) = (joystick && buttons && !ours && !valve && !sensors, event) {
             out.push(JoystickNode {
                 name,
                 vendor,
@@ -101,6 +110,21 @@ pub fn parse_joysticks(text: &str) -> Vec<JoystickNode> {
         }
     }
     out
+}
+
+/// Whether a `B: KEY=` bitmap has any joystick or gamepad button: `BTN_TRIGGER` (0x120) to
+/// `BTN_THUMBR` (0x13E). Keyboards and trackpads use the codes either side of that range.
+fn has_pad_buttons(bitmap: &str) -> bool {
+    // Words of a `long`, highest first; the last word holds bits 0..64.
+    let words: Vec<u64> = bitmap
+        .split_whitespace()
+        .rev()
+        .map(|w| u64::from_str_radix(w, 16).unwrap_or(0))
+        .collect();
+    (0x120u16..=0x13E).any(|bit| {
+        let (word, offset) = (bit as usize / 64, bit as usize % 64);
+        words.get(word).is_some_and(|w| w & (1 << offset) != 0)
+    })
 }
 
 const EV_KEY: u16 = 0x01;
@@ -390,7 +414,17 @@ H: Handlers=kbd event22 js5
 
 I: Bus=0003 Vendor=046d Product=c52b Version=0111
 N: Name="Logitech USB Receiver"
-H: Handlers=sysfs kbd event5"#;
+H: Handlers=sysfs kbd event5
+
+I: Bus=0005 Vendor=04e8 Product=7021 Version=0001
+N: Name="BT5.0 Keyboard"
+H: Handlers=sysrq kbd leds event11 mouse3 js0 
+B: KEY=101f 0 3f00033fff 0 0 483ffff17aff32d bfd5444600000000 ff0001 130ff38b17d007 ffff7bfad9415fff ffbeffdfffefffff fffffffffffffffe
+
+I: Bus=0005 Vendor=054c Product=09cc Version=8100
+N: Name="Wireless Controller"
+H: Handlers=event23 js7
+B: KEY=7fdb000000000000 0 0 0 0"#;
 
     #[test]
     fn only_real_extra_pads_are_merged() {
@@ -404,7 +438,9 @@ H: Handlers=sysfs kbd event5"#;
             [
                 "Microsoft X-Box 360 pad",
                 "DualSense Wireless Controller",
-                "Xbox Wireless Controller"
+                "Xbox Wireless Controller",
+                // A DualShock 4 as the kernel lists it, with its button bitmap.
+                "Wireless Controller"
             ]
         );
         assert_eq!(found[1].event, "event20");

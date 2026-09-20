@@ -1,0 +1,18 @@
+[package]
+name = "spatiand-host-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# What a host keeps on disk, and finding pictures for it: shared by the host, which serves the
+# catalogue, and by its settings app, which edits it. No GPU, no network, no Wayland — so it is
+# tested on a laptop, and so the settings app does not drag the whole host in with it.
+[dependencies]
+spatiand-stream = { path = "../spatiand-stream" }
+spatiand-platform = { path = "../spatiand-platform" }
+serde.workspace = true
+toml.workspace = true
+log.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico", "bmp"] }
+resvg = "0.45"

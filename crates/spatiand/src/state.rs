@@ -71,7 +71,8 @@ pub struct Spatiand {
     /// Collected here rather than acted on directly because the audio engine lives in the
     /// render loop, and a Wayland handler is not the place to reach into it. The process id is
     /// what ties a window back to the app that was launched for it — see [`crate::audio`].
-    pub arrived_windows: Vec<(usize, Option<u32>)>,
+    /// With the window's app id, which is how a remote application's windows find their sound.
+    pub arrived_windows: Vec<(usize, Option<u32>, Option<String>)>,
     /// Windows that have gone since the render loop last looked.
     pub departed_windows: Vec<usize>,
     pub running: bool,
@@ -403,13 +404,29 @@ impl Spatiand {
             return self.x11_pids.get(&x11.window_id()).copied().flatten();
         }
         use smithay::reexports::wayland_server::Resource;
-        window
+        let pid = window
             .toplevel()?
             .wl_surface()
             .client()?
             .get_credentials(&self.display_handle)
             .ok()
-            .map(|c| c.pid as u32)
+            .map(|c| c.pid as u32)?;
+        // **Never this process.** A remote window's client is a thread of the session itself,
+        // connected over a socket pair, so its credentials are the session's own. Answering
+        // with that pid made "hold Y to force quit" on a remote window a way to kill the whole
+        // session. A remote application is force-quit on its host instead; see
+        // `remote::Remotes::force_quit`.
+        (pid != std::process::id()).then_some(pid)
+    }
+
+    /// The app id of the window with this layout id, if it has one yet.
+    pub fn app_id_of_id(&self, id: usize) -> Option<String> {
+        let window = self
+            .space
+            .elements()
+            .find(|w| self.layout.id_of(w) == Some(id))?
+            .clone();
+        self.app_id_of(&window)
     }
 
     pub fn app_id_of(&self, window: &smithay::desktop::Window) -> Option<String> {
@@ -973,7 +990,8 @@ impl XdgShellHandler for Spatiand {
             .and_then(|c| c.get_credentials(&self.display_handle).ok())
             .map(|c| c.pid as u32);
         if let Some(id) = self.layout.id_of(&window) {
-            self.arrived_windows.push((id, pid));
+            let app_id = self.app_id_of(&window);
+            self.arrived_windows.push((id, pid, app_id));
         }
         log::info!(
             "new toplevel at yaw {:.0} deg ({} windows), offered {}x{}",
@@ -1182,7 +1200,8 @@ impl Spatiand {
                 .x11_surface()
                 .and_then(|x| self.x11_pids.get(&x.window_id()).copied())
                 .flatten();
-            self.arrived_windows.push((id, pid));
+            let app_id = self.app_id_of(window);
+            self.arrived_windows.push((id, pid, app_id));
             log::info!(
                 "X11 window placed at yaw {:.0} deg ({} windows)",
                 self.spawn_yaw.to_degrees(),
