@@ -28,6 +28,7 @@ mod control;
 mod encode;
 mod input;
 mod microphone;
+mod voice;
 mod net;
 mod pace;
 mod pad;
@@ -391,6 +392,10 @@ fn run_host(
     let router = route::Router::start();
     // Created before any application is, because a program reads the list of joysticks once.
     let mut pads = pad::Pads::start();
+    // And the recording device, for the same reason: a program reads the list of microphones
+    // once too, and one that appears when the wearer first speaks appears too late to be
+    // chosen. It is quiet until there is something to put in it.
+    microphone::start();
     let mut wiring = route::Wiring::default();
     let mut recording = false;
     // When the paired list was last read. `--trust` and `--forget` edit the file from another

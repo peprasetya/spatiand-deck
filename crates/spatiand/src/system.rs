@@ -406,10 +406,146 @@ pub fn audio_devices() -> crate::sidecar::Audio {
         return crate::sidecar::Audio::default();
     };
     let text = String::from_utf8_lossy(&out.stdout);
+    let mut inputs = parse_devices(&text, Direction::Input);
+    // The default may be a node the list hides on purpose; see `default_loopback`. Asking
+    // costs one more process every two seconds, and only while that is the case.
+    if !inputs.iter().any(|device| device.is_default) {
+        if let Some(hidden) = default_loopback(&text) {
+            mark_default_behind(&mut inputs, hidden);
+        }
+    }
     crate::sidecar::Audio {
         outputs: parse_devices(&text, Direction::Output),
-        inputs: parse_devices(&text, Direction::Input),
+        inputs,
     }
+}
+
+/// What a sound server calls its loopback copy of a capture device.
+///
+/// See [`recordable`], which is where this earns its keep.
+const LOOPBACK: &str = "alsa_loopback_device.";
+
+/// The node that can actually be recorded from, which is not always the one chosen.
+///
+/// **On this machine the real capture nodes deliver nothing.** Both microphones appear twice:
+/// once as the ALSA device, `alsa_input.usb-…Air…mono-fallback`, and once as a loopback copy
+/// of it under `Filters:`. Recording from the ALSA node yields a header and not one frame of
+/// sound, every time, from either microphone:
+///
+/// ```text
+///        0 bytes  <- alsa_input.usb-Vendor_Air_…mono-fallback
+///   563200 bytes  <- alsa_loopback_device.alsa_input.usb-Vendor_Air_…mono-fallback
+///        0 bytes  <- alsa_input.pci-…HiFi__Internal_Mic__source
+///   563200 bytes  <- alsa_loopback_device.alsa_input.pci-…HiFi__Internal_Mic__source
+/// ```
+///
+/// Neither is muted and both sit in the same state; the copy is simply what this system
+/// intends clients to use, which is why the sound server's own default pointed at one before
+/// anybody touched it. The picker lists the ALSA nodes because those are what carries a
+/// readable name — "Air Mono" rather than a bus path — so choosing "Glasses Microphone" used
+/// to set the default to a device that cannot be recorded from, and every microphone on the
+/// machine went quiet. That is what this is for.
+///
+/// It is self-limiting: on a machine with no such copy nothing matches and the chosen device
+/// is used unchanged. A sink has no loopback twin either, so an output passes straight
+/// through.
+fn recordable(id: u32) -> u32 {
+    let Some(name) = node_name(id) else { return id };
+    let Ok(out) = std::process::Command::new("wpctl").arg("status").output() else {
+        return id;
+    };
+    let twin = find_node(&String::from_utf8_lossy(&out.stdout), &format!("{LOOPBACK}{name}"));
+    match twin {
+        Some(twin) => {
+            log::info!("audio: recording from {LOOPBACK}{name} rather than the device itself");
+            twin
+        }
+        None => id,
+    }
+}
+
+/// What the sound server calls a node, as opposed to what it shows a person.
+fn node_name(id: u32) -> Option<String> {
+    property(id, "node.name")
+}
+
+/// One of a node's properties, asked for by name.
+fn property(id: u32, key: &str) -> Option<String> {
+    let out = std::process::Command::new("wpctl")
+        .args(["inspect", &id.to_string()])
+        .output()
+        .ok()?;
+    property_in(&String::from_utf8_lossy(&out.stdout), key)
+}
+
+/// Pull `<key> = "…"` out of what `wpctl inspect` printed.
+pub fn property_in(text: &str, key: &str) -> Option<String> {
+    let wanted = format!("{key} = ");
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches(['*', ' ']);
+        if let Some(value) = line.strip_prefix(&wanted) {
+            return Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// The default device, when it is one of the copies the list deliberately hides.
+///
+/// [`parse_devices`] skips the `Filters:` block because it is plumbing, and [`recordable`]
+/// makes the default a node inside it. Both are right, and together they left the panel with
+/// no device marked at all: the wearer picked a microphone, the dot appeared, the list was
+/// read again two seconds later and nothing in it was the default any more. This is the other
+/// half — it finds the hidden node so the device standing in front of it can be marked.
+pub fn default_loopback(text: &str) -> Option<u32> {
+    for line in text.lines() {
+        let trimmed = line.trim_start_matches(['│', '├', '└', '─', ' ']).trim();
+        let Some(rest) = trimmed.strip_prefix('*') else {
+            continue;
+        };
+        let Some((id, name)) = rest.trim_start().split_once('.') else {
+            continue;
+        };
+        let Ok(id) = id.trim().parse::<u32>() else { continue };
+        if name.trim_start().starts_with(LOOPBACK) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Mark the device that stands in front of `hidden`, matched on the name they share.
+///
+/// A copy carries the same `node.description` as the device it copies — "Air Mono" for both —
+/// which is what makes this a lookup rather than a guess.
+fn mark_default_behind(devices: &mut [AudioDevice], hidden: u32) {
+    let Some(description) = property(hidden, "node.description") else {
+        return;
+    };
+    let name = friendly_name(&description);
+    if let Some(device) = devices.iter_mut().find(|device| device.name == name) {
+        device.is_default = true;
+    }
+}
+
+/// The id of the node with exactly this name, from anywhere in `wpctl status`.
+///
+/// Anywhere, deliberately: the node wanted here is under `Filters:`, which [`parse_devices`]
+/// goes out of its way to skip because it is plumbing. It is still plumbing. It is just
+/// plumbing that has to be named when a device is chosen.
+pub fn find_node(text: &str, name: &str) -> Option<u32> {
+    for line in text.lines() {
+        let trimmed = line.trim_start_matches(['│', '├', '└', '─', ' ']).trim();
+        let trimmed = trimmed.strip_prefix('*').map_or(trimmed, str::trim_start);
+        let Some((id, rest)) = trimmed.split_once('.') else {
+            continue;
+        };
+        let Ok(id) = id.trim().parse::<u32>() else { continue };
+        if rest.split('[').next().unwrap_or(rest).trim() == name {
+            return Some(id);
+        }
+    }
+    None
 }
 
 /// Make a device the default, and move anything already playing over to it.
@@ -418,7 +554,10 @@ pub fn audio_devices() -> crate::sidecar::Audio {
 /// the old device, so picking "Glasses" mid-video would do nothing audible until the next
 /// thing started. `wpctl` has no "move existing streams" of its own, so the default is set and
 /// the sound server's own rescan is relied on — which is what the desktop's own picker does.
+///
+/// What is made default is not always what was picked; see [`recordable`].
 pub fn set_default_device(id: u32) {
+    let id = recordable(id);
     let result = std::process::Command::new("wpctl")
         .args(["set-default", &id.to_string()])
         .status();
@@ -551,6 +690,67 @@ pub fn friendly_name(raw: &str) -> String {
 #[cfg(test)]
 mod audio_tests {
     use super::*;
+
+    #[test]
+    fn the_microphone_that_can_be_recorded_from_is_found_behind_the_one_that_is_shown() {
+        // The wearer picks "Glasses Microphone", which is node 50. Recording from 50 yields
+        // nothing on this machine; 60, its loopback copy, is where the sound is. The `*` in
+        // front of 60 is there to be tripped over -- it marks the default, and it sits before
+        // the id.
+        let twin = find_node(
+            REAL,
+            "alsa_loopback_device.alsa_input.usb-Vendor_Air_A00011_32_00-00.mono-fallback",
+        );
+        assert_eq!(twin, Some(60));
+    }
+
+    #[test]
+    fn a_device_with_no_copy_of_itself_is_left_alone() {
+        // Nothing matches, and the answer is that nothing matches -- not the first line that
+        // happens to have a number in it. A machine that arranges its microphones normally
+        // must come through this unchanged.
+        assert_eq!(find_node(REAL, "alsa_loopback_device.alsa_input.nonesuch"), None);
+        assert_eq!(find_node(REAL, "Air Mono"), Some(50));
+    }
+
+    #[test]
+    fn the_hidden_default_is_found_so_the_panel_can_show_one() {
+        // The wearer's complaint, as a test: no device in the list carries the `*`, because
+        // the default is node 60 down in `Filters:`. Without finding it the panel shows a
+        // dot that appears when a microphone is picked and vanishes on the next read.
+        let sources = parse_devices(REAL, Direction::Input);
+        assert!(
+            !sources.iter().any(|device| device.is_default),
+            "nothing in the list is marked, which is the whole problem"
+        );
+        assert_eq!(default_loopback(REAL), Some(60));
+    }
+
+    #[test]
+    fn an_ordinary_default_is_not_mistaken_for_a_hidden_one() {
+        // A machine that marks a real device needs no rescue, and an output default -- node
+        // 81 in this capture -- must not be read as one either.
+        assert!(parse_devices(REAL, Direction::Output).iter().any(|d| d.is_default));
+        let plain = REAL.replace(
+            "*   60. alsa_loopback_device",
+            "    60. alsa_loopback_device",
+        );
+        assert_eq!(default_loopback(&plain), None);
+    }
+
+    #[test]
+    fn a_nodes_real_name_is_read_from_what_inspect_prints() {
+        const INSPECT: &str = r#"id 215, type PipeWire:Interface:Node
+    alsa.card = "1"
+  * media.class = "Audio/Source"
+  * node.name = "alsa_input.usb-Vendor_Air_A00011_32_00-00.mono-fallback"
+"#;
+        assert_eq!(
+            property_in(INSPECT, "node.name").as_deref(),
+            Some("alsa_input.usb-Vendor_Air_A00011_32_00-00.mono-fallback")
+        );
+        assert_eq!(property_in("id 4, type PipeWire:Interface:Node\n", "node.name"), None);
+    }
 
     /// Captured verbatim from the Deck with the glasses plugged in, because a parser for a
     /// human-readable format is only ever as good as the samples it was written against.

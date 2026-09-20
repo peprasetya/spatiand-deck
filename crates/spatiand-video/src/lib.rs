@@ -27,6 +27,7 @@ pub mod convert;
 pub mod decode;
 pub mod export;
 pub mod split;
+pub mod voice;
 
 pub use convert::{Converted, Converter};
 pub use decode::{Decoder, Picture, VideoError};

@@ -466,7 +466,7 @@ in `~/.cache/spatiand/remote-icons/` and uses them for the launcher bubble and t
 The settings app carries its own icon, since no two icon themes agree on one.
 
 **Titles** are the window's own, followed by the host's name: "heavy.html - Google Chrome —
-deepMagpie". They follow the application as it renames the window.
+workshop". They follow the application as it renames the window.
 
 Protocol version is now **2**: catalogue entries carry the chosen icon beside the rendered one.
 
@@ -648,14 +648,95 @@ and becomes a **source in the host's graph**: `pw-cat --playback` declaring itse
 `PULSE_SOURCE`, and one that picks its own input device is moved to it the same way its sound
 is.
 
-**It is only open while something is listening.** The host asks when one of its applications
-opens a capture stream and withdraws when the last one closes, so a microphone in one room is
-never live because a program in another happens to be running. `remote_microphone = false` in
-the preferences means it never is at all.
+**The device exists from the moment the host starts, and is quiet until the wearer speaks.**
+It did not at first, and that was the whole bug: the source was built when the session began
+sending, and nothing sends until something records, and nothing records from a device it
+cannot see. Firestorm's own log has the miss in it, a second wide:
 
-Two things this does not do yet: it is raw rather than Opus (768 kbit/s, and only while
-someone is speaking into an application that is listening), and there is no indicator in the
-view saying the microphone is on — the log says so at both ends.
+```text
+15:48:28  LLWebRTCVoiceClient::addCaptureDevice : 'Ryzen HD Audio Controller Stereo Microphone'
+15:48:28  LLWebRTCVoiceClient::addCaptureDevice : 'Ryzen HD Audio Controller Digital Microphone'
+15:48:29  microphone: an application here is listening; asking the session for the wearer's
+15:48:29  microphone: microphone at 48000 Hz x 1
+```
+
+Chrome showed the same thing from the other side: every *output* was in its list, including
+all four of the host's own window sinks, and there was no extra input at all — because sinks
+are made when an application starts and lasted, and the source was made on demand and did not.
+So the source is opened at startup and fed silence when there is nothing else to feed it. This
+is the rule the virtual gamepad already follows, for the same reason: **a program reads the
+list of devices once.**
+
+**A device in the graph is not an open microphone in somebody's room.** The two questions stay
+separate. The source here is always present; the headset is only asked to *capture* while an
+application is actually recording, which is still what the graph watcher decides, and
+`remote_microphone = false` in the preferences means it never is at all. Silence costs 96 kB a
+second on a pipe inside one machine and nothing on the link.
+
+Nothing is left behind. `pw-cat` reads a pipe the host holds, so when the host goes the pipe
+closes and it leaves with it, rather than staying in the desktop's sound menu as a microphone
+that hears nothing.
+
+**An application still has to choose it.** Firestorm reads its capture list at startup and
+when its voice preferences open, so it wants a fresh launch and then *Preferences → Sound &
+Media → Voice → Input device*. Left on the default it is caught anyway: a capture stream
+belonging to an application the host started is moved to this source within a second by the
+same watcher that moves sound.
+
+**And the headset has to be recording something.** The device appearing on the host was only
+half of it: the Deck was sending a perfectly good stream of digital silence. Every microphone
+on this machine is listed twice — once as the ALSA device and once as a loopback copy of it
+under `Filters:` — and **only the copy delivers frames**. Recording from the ALSA node gives a
+header and not one sample, from either microphone, every time. The sound server's own default
+pointed at a copy until Spatiand's picker overwrote it, because the picker lists the ALSA
+nodes: they are the ones with a readable name. So choosing "Glasses Microphone" silently
+turned off every microphone on the Deck, for anything, not just for this. `system::recordable`
+is the fix and carries the measurement; the picker still shows the readable name and now sets
+the default to the node behind it.
+
+The lesson is the one worth keeping: **a device that a sound server lists is not necessarily a
+device that yields sound.** Nothing in the graph said so — neither node was muted, both sat in
+the same state, the stream opened, the header arrived and the host built its source. The only
+symptom was silence. So `remote::microphone` now says in the log when what it is capturing is
+all zeroes, rather than leaving that to be found by measuring the graph from another machine.
+
+**Late sound is worse than missing sound.** The first working version arrived about half a
+second behind the speaker — far enough that the gauge in Firestorm moved visibly after the
+word. It was tempting to look for it in the audio graph, and it was not there: measured on
+both machines with `pw-top`, every node in the path runs at a quantum of 512 samples or less,
+about ten milliseconds. The delay was in the queues in front of the graph.
+
+A pipe feeding a reader that consumes in real time **never catches up**. One burst — the link
+delivering a lump it was holding, a scheduling hiccup, a retransmission — and every word after
+it is late by that much for the rest of the session, because the far end takes one second of
+sound per second and not a byte more. Nothing drains it. The old arrangement made this as easy
+as possible: a queue thirty-two deep on the host, sixteen on the Deck, and a `blocking_send`
+that would rather wait than lose anything.
+
+So both ends now throw sound away instead of falling behind. The host keeps its own reckoning
+of how much it has written that nobody has played yet and stops writing past sixty
+milliseconds of it; the Deck keeps four chunks, forty milliseconds, and drops the overflow
+rather than waiting on it. A gap in a sentence is easy to talk over. A voice half a second
+behind a face is not.
+
+**It is Opus now, not samples.** Mono at 48 kHz raw is 768 kbit/s spent on one person talking,
+on the uplink, which is the direction with the least to spare; the same voice in Opus is about
+24. Nothing was installed for it: the ffmpeg both ends already link carries Opus through
+`libopus` — the Deck's `libavcodec` links `libopus.so.0` and so does this machine's — and the
+two ends never had to agree on a library, only on a codec, which is the arrangement HEVC
+already uses. The Deck builds against ffmpeg 7.1 and the host against 8, and neither cares.
+
+Twenty milliseconds a frame, `application=voip`, and `packet_loss=5` so the encoder protects
+itself rather than relying on a retransmission that would arrive after the moment for it had
+passed. The delay a codec adds is one frame; that is nothing beside what a queue adds when a
+link cannot keep up with raw. A machine whose ffmpeg cannot encode Opus says so in its log and
+sends samples, and the header carries which it is, so neither end has to assume.
+
+An application's sound going the other way stays raw. That is the downlink, which has room,
+and a codec on it would cost delay on every window that makes a noise.
+
+One thing this does not do yet: there is no indicator in the view saying the microphone is
+live — the log says so at both ends, and nothing else does.
 
 ## One sink per application, not per window
 

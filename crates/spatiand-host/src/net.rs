@@ -161,17 +161,12 @@ async fn session(
         let connection = connection.clone();
         let inbox = inbox.clone();
         async move {
-            // The wearer's microphone, if it ever arrives. Held here so it goes when the
-            // session does.
-            let microphone = std::sync::Arc::new(std::sync::Mutex::new(
-                crate::microphone::Microphone::new(),
-            ));
             loop {
                 let stream = match connection.accept_uni().await {
                     Ok(stream) => stream,
                     Err(_) => return,
                 };
-                tokio::spawn(heard(stream, inbox.clone(), microphone.clone()));
+                tokio::spawn(heard(stream, inbox.clone()));
             }
         }
     });
@@ -275,11 +270,7 @@ async fn session(
 /// means a malformed message can never desynchronise the next one. The exception is sound
 /// coming *up* from the headset, which is endless and so is recognised by its magic before
 /// anything tries to read it to the end. See `spatiand_stream::audio` and `crate::microphone`.
-async fn heard(
-    mut stream: quinn::RecvStream,
-    inbox: Sender<FromSession>,
-    microphone: std::sync::Arc<std::sync::Mutex<crate::microphone::Microphone>>,
-) {
+async fn heard(mut stream: quinn::RecvStream, inbox: Sender<FromSession>) {
     // Enough to tell the two apart, and read in a way that tolerates a message shorter than
     // the magic: `Detach` is a couple of bytes.
     let mut first = Vec::new();
@@ -313,7 +304,7 @@ async fn heard(
         }
         return;
     }
-    listen(stream, &first, &microphone).await;
+    listen(stream, &first).await;
 }
 
 /// Read the session's control stream: length-prefixed messages, in order, until it ends.
@@ -359,12 +350,9 @@ async fn listen_control(mut stream: quinn::RecvStream, rest: Vec<u8>, inbox: Sen
 }
 
 /// Play the wearer's microphone into the graph until the session stops sending it.
-async fn listen(
-    mut stream: quinn::RecvStream,
-    first: &[u8],
-    microphone: &std::sync::Mutex<crate::microphone::Microphone>,
-) {
-    use spatiand_stream::audio::AudioHeader;
+async fn listen(mut stream: quinn::RecvStream, first: &[u8]) {
+    let microphone = crate::microphone::shared();
+    use spatiand_stream::audio::{AudioHeader, Coding};
     let length = match AudioHeader::length(&first[..8].try_into().unwrap()) {
         Some(length) => length,
         None => return,
@@ -388,26 +376,64 @@ async fn listen(
         header.rate,
         header.channels
     );
-    if !rest.is_empty() {
-        if let Ok(mut microphone) = microphone.lock() {
-            microphone.feed(&rest, header.rate, header.channels);
+    // Opus unless the session says otherwise, in which case what arrives is samples and goes
+    // straight in. An end that cannot encode falls back and says so in its own log.
+    let mut voice = match header.coding {
+        Coding::Pcm => None,
+        Coding::Opus => match crate::voice::Decoder::new(header.rate, header.channels) {
+            Ok(decoder) => Some((decoder, spatiand_stream::audio::Packets::default())),
+            Err(e) => {
+                log::warn!("microphone: cannot decode what the session is sending ({e})");
+                return;
+            }
+        },
+    };
+    let mut put = |bytes: &[u8]| -> bool {
+        let Some((decoder, packets)) = voice.as_mut() else {
+            if let Ok(mut microphone) = microphone.lock() {
+                microphone.feed(bytes, header.rate, header.channels);
+            }
+            return true;
+        };
+        packets.feed(bytes);
+        loop {
+            match packets.next() {
+                Ok(None) => return true,
+                Err(e) => {
+                    log::warn!("microphone: {e}");
+                    return false;
+                }
+                Ok(Some(packet)) => match decoder.decode(&packet) {
+                    // One bad packet is a click, not a reason to hang up.
+                    Err(e) => log::warn!("microphone: a packet would not decode ({e})"),
+                    Ok(pcm) => {
+                        if let Ok(mut microphone) = microphone.lock() {
+                            microphone.feed(&pcm, header.rate, header.channels);
+                        }
+                    }
+                },
+            }
         }
+    };
+    if !rest.is_empty() {
+        put(&rest);
     }
     let mut buffer = vec![0u8; 8192];
     loop {
         match stream.read(&mut buffer).await {
             Ok(Some(n)) => {
-                if let Ok(mut microphone) = microphone.lock() {
-                    microphone.feed(&buffer[..n], header.rate, header.channels);
+                if !put(&buffer[..n]) {
+                    break;
                 }
             }
             Ok(None) | Err(_) => break,
         }
     }
+    drop(put);
     if let Ok(mut microphone) = microphone.lock() {
-        microphone.stop();
+        microphone.quiet();
     }
-    log::info!("microphone: the session stopped sending");
+    log::info!("microphone: the session stopped sending; the device here stays and goes quiet");
 }
 
 /// Open a stream for one application's sound and keep writing to it, from a task of its own.
@@ -426,6 +452,9 @@ fn sound_stream(connection: &Connection, app: String) -> tokio::sync::mpsc::Send
             app: app.clone(),
             rate: spatiand_stream::audio::RATE,
             channels: spatiand_stream::audio::CHANNELS,
+            // An application's sound stays raw: it is the downlink, which has room, and a
+            // codec there would cost delay on every window that makes a noise.
+            coding: spatiand_stream::audio::Coding::Pcm,
         };
         if stream.write_all(&header.encode()).await.is_err() {
             return;
