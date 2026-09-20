@@ -17,6 +17,34 @@ use spatiand_stream::{Input, WindowId};
 
 use crate::state::Host;
 
+/// Let go of everything a session left held, as it goes.
+///
+/// A link that drops mid-click leaves the application holding a button, and mid-keystroke
+/// holding a key — which for an X11 client means it repeats until something releases it.
+/// Nothing else will, so this does.
+pub fn release_everything(host: &mut Host, time_ms: u32) {
+    let held = std::mem::take(&mut host.held_buttons);
+    if let Some(pointer) = host.seat.get_pointer() {
+        for button in held {
+            pointer.button(
+                host,
+                &ButtonEvent {
+                    button,
+                    state: ButtonState::Released,
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: time_ms,
+                },
+            );
+        }
+        pointer.frame(host);
+    }
+    // Keyboard focus going away is what tells a client its keys are no longer held; XWayland
+    // turns it into the release an X11 client is waiting for.
+    if let Some(keyboard) = host.seat.get_keyboard() {
+        keyboard.set_focus(host, None, SERIAL_COUNTER.next_serial());
+    }
+}
+
 /// Apply one event to one window.
 pub fn apply(host: &mut Host, window: WindowId, input: Input, time_ms: u32) {
     let Some(target) = host.windows.iter().find(|t| t.id == window).map(|t| t.window.clone())
@@ -106,6 +134,13 @@ pub fn apply(host: &mut Host, window: WindowId, input: Input, time_ms: u32) {
                         let _ = smithay::desktop::PopupManager::dismiss_popup(&surface, popup);
                     }
                 }
+            }
+            if pressed {
+                if !host.held_buttons.contains(&button) {
+                    host.held_buttons.push(button);
+                }
+            } else {
+                host.held_buttons.retain(|held| *held != button);
             }
             pointer.button(
                 host,

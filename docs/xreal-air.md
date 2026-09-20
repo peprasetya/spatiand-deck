@@ -923,3 +923,53 @@ turn is learned as bias, and the drift grows. A permanent answer needs an absolu
 which means the magnetometer, which needs a hard-iron fit that ordinary wear cannot decide —
 the head does not turn through enough of the sphere. That is a deliberate calibration motion,
 and it is the next piece of work.
+
+## The magnetic anchor was the thing breaking the gyro — 2026-09-20
+
+Yaw wandered, minutes at a time, sometimes left and sometimes right, and worse than the day
+before. One session's log said why, in its own thirty-second lines:
+
+```text
+bias ... -0.740   yaw anchor holding, +0.5 deg off      <- steady for three quarters of an hour
+bias ... -0.939   yaw anchor paused: the field here differs from where it was learned
+bias ... -0.414   ...
+bias ... +0.147   yaw anchor holding, +1.3 deg off
+bias ... -1.051   yaw anchor holding, +36.1 deg off
+bias ... -1.357   yaw anchor paused
+```
+
+The yaw bias — the number every rotation is measured against — swung across 1.5 deg/s, in both
+directions. That is 90 degrees a minute of world walking away, and it was the anchor doing it.
+
+**The integral had a speed limit and no destination.** A persistent heading error is evidence
+that the gyro's bias is off, so a little of it is folded into the bias; that is the integral
+half of a PI controller and it is right. It was slew-limited to 0.02 deg/s of bias per second
+and otherwise free, so an error that never went away — a reference measured against a field
+that has since changed, a hard-iron offset that was never right — moved the bias as far as it
+liked, a degree per second in a minute. And when the anchor gave up, the corruption stayed: the
+tracker was left flying on a bias the magnetometer had invented.
+
+Three changes, none of them clever:
+
+- **The trim is not the bias.** What the anchor contributes is kept in its own value, added to
+  the bias but never written into it. The bias belongs to holding still and is worth
+  remembering between sessions; the trim belongs to a magnetic reference that may be a
+  fiction, and is never saved.
+- **It is bounded, and it is given back.** At most `mag_trim_limit` (0.25 deg/s), which is
+  the size of a stale bias estimate and nothing like the size of a wrong reference; and it
+  fades to nothing over two minutes whenever the anchor is not being believed.
+- **A reference can be wrong, and saying so is part of the job.** Beyond 10 degrees of error
+  the integral stops learning, because what it would learn is the reference's mistake. Beyond
+  25 degrees for twenty seconds the reference is dropped and measured again, instead of being
+  reported as "holding" while 36 degrees out.
+
+Two tests hold this down: a tracker given a deliberately wrong hard-iron offset, where the
+learned bias must not move at all and the trim must stay inside its bound (it pins at 0.241
+deg/s, so the clamp is what is doing the work); and one where the magnetometer stops making
+sense, where the trim must be gone afterwards.
+
+**What this does not fix** is the reason the reference was wrong. The hard-iron fit is still
+undecided on ordinary wear — the head does not turn through enough of the sphere to tell 24
+possible axis arrangements apart, and on a real recording the best four sat within three
+percentage points of each other. A deliberate calibration motion is what settles that, and it
+is the next piece of work.

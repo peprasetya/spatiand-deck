@@ -290,6 +290,12 @@ async fn heard(
             Ok(None) | Err(_) => break,
         }
     }
+    // Everything the session says comes down one ordered stream; see
+    // `spatiand_stream::CONTROL_MAGIC` for why it has to be one.
+    if first.len() >= 8 && first[..4] == spatiand_stream::CONTROL_MAGIC {
+        listen_control(stream, first[4..].to_vec(), inbox).await;
+        return;
+    }
     let magic = first.len() >= 8
         && spatiand_stream::audio::AudioHeader::length(&first[..8].try_into().unwrap()).is_some();
     if !magic {
@@ -308,6 +314,48 @@ async fn heard(
         return;
     }
     listen(stream, &first, &microphone).await;
+}
+
+/// Read the session's control stream: length-prefixed messages, in order, until it ends.
+///
+/// In order is the point. A key's press and its release only mean anything in the sequence
+/// they were done in, and this is the only thing that guarantees it — see
+/// `spatiand_stream::CONTROL_MAGIC`.
+async fn listen_control(mut stream: quinn::RecvStream, rest: Vec<u8>, inbox: Sender<FromSession>) {
+    /// No single message is anywhere near this. A length beyond it is a desynchronised
+    /// stream, and reading it would be an allocation the other end chose.
+    const LARGEST: usize = 1 << 20;
+    let mut held = rest;
+    let mut buffer = vec![0u8; 16 * 1024];
+    loop {
+        // Everything whole that is already in hand.
+        loop {
+            if held.len() < 4 {
+                break;
+            }
+            let length = u32::from_le_bytes(held[..4].try_into().unwrap()) as usize;
+            if length > LARGEST {
+                log::warn!("a session's control stream said a message was {length} bytes; closing it");
+                return;
+            }
+            if held.len() < 4 + length {
+                break;
+            }
+            match spatiand_stream::from_bytes::<ClientMessage>(&held[4..4 + length]) {
+                Ok(message) => {
+                    if inbox.send(FromSession::Said(message)).is_err() {
+                        return;
+                    }
+                }
+                Err(e) => log::warn!("a session sent something unreadable: {e}"),
+            }
+            held.drain(..4 + length);
+        }
+        match stream.read(&mut buffer).await {
+            Ok(Some(n)) => held.extend_from_slice(&buffer[..n]),
+            Ok(None) | Err(_) => return,
+        }
+    }
 }
 
 /// Play the wearer's microphone into the graph until the session stops sending it.

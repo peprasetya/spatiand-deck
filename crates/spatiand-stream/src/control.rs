@@ -22,6 +22,16 @@
 
 use serde::{Deserialize, Serialize};
 
+/// What the session's control stream starts with, so the host can tell it from sound.
+///
+/// **One stream, in order, for everything the session says.** It used to be a stream per
+/// message — which QUIC delivers reliably and, between streams, in whatever order it likes.
+/// A key's press and its release are two messages, so under load the release could arrive
+/// first and the key stayed down for ever, repeating; the same for a mouse button, which is
+/// how a single click in a viewer became a drag that never ended. Order is not a detail here,
+/// it is the whole meaning of a press and a release.
+pub const CONTROL_MAGIC: [u8; 4] = *b"SPct";
+
 use crate::catalog::{App, Eyes};
 use crate::video::Codec;
 

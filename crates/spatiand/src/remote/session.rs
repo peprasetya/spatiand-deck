@@ -264,13 +264,15 @@ async fn serve(
     // Sent only while the host says something there is listening, and never if the wearer
     // has said no.
     let mut microphone = super::microphone::Microphone::default();
+    // One ordered stream for everything this end says; see `talk`.
+    let (out, outbox) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
+    let writer = tokio::spawn(talk(connection.clone(), outbox));
     let mut said = Instant::now();
     let mut worked = Instant::now();
     let mut frames = 0u64;
     let mut decode_ms: Vec<f32> = Vec::new();
     {
-        say(
-            connection,
+        say(&out,
             ClientMessage::Hello {
                 version: spatiand_stream::VERSION,
                 codecs: vec![Codec::H265, Codec::H264],
@@ -278,10 +280,9 @@ async fn serve(
                 refresh_mhz: 72_000,
                 session: "spatiand".into(),
             },
-        )
-        .await;
+        );
         for app in &config.launch {
-            say(connection, ClientMessage::Launch { app: app.clone() }).await;
+            say(&out, ClientMessage::Launch { app: app.clone() });
         }
 
         let control = match connection.accept_uni().await {
@@ -444,10 +445,9 @@ async fn serve(
                                     stream.queue.clear();
                                     stream.broken = true;
                                     stream.asked = Some(Instant::now());
-                                    say(connection, ClientMessage::WantKeyframe {
+                                    say(&out, ClientMessage::WantKeyframe {
                                         window: WindowId(window),
-                                    })
-                                    .await;
+                                    });
                                 }
                                 if frame.keyframe {
                                     // Everything before a keyframe is irrelevant to everything
@@ -468,10 +468,9 @@ async fn serve(
                                     stream.skipped += stream.queue.len() as u64 + 1;
                                     stream.queue.clear();
                                     stream.broken = true;
-                                    say(connection, ClientMessage::WantKeyframe {
+                                    say(&out, ClientMessage::WantKeyframe {
                                         window: WindowId(window),
-                                    })
-                                    .await;
+                                    });
                                 } else {
                                     stream.queue.push_back((frame.captured_us, frame.bytes));
                                 }
@@ -483,10 +482,9 @@ async fn serve(
                                 stream.queue.clear();
                                 stream.broken = true;
                             }
-                            say(connection, ClientMessage::WantKeyframe {
+                            say(&out, ClientMessage::WantKeyframe {
                                 window: WindowId(window),
-                            })
-                            .await;
+                            });
                         }
                         Arrival::Partial | Arrival::Stale => {}
                     }
@@ -495,14 +493,14 @@ async fn serve(
                     match command {
                         Some(Command::Launch(app)) => {
                             log::info!("remote: asking {} to start {app}", config.host);
-                            say(connection, ClientMessage::Launch { app }).await;
+                            say(&out, ClientMessage::Launch { app });
                         }
                         Some(Command::ForceQuit(app)) => {
                             log::warn!("remote: asking {} to kill {app}", config.host);
-                            say(connection, ClientMessage::ForceQuit { app }).await;
+                            say(&out, ClientMessage::ForceQuit { app });
                         }
                         Some(Command::Pad(state)) => {
-                            say(connection, ClientMessage::Pad(state)).await;
+                            say(&out, ClientMessage::Pad(state));
                         }
                         None => {}
                     }
@@ -528,10 +526,9 @@ async fn serve(
                     && stream.asked.is_none_or(|at| at.elapsed() >= Duration::from_millis(500))
                 {
                     stream.asked = Some(Instant::now());
-                    say(connection, ClientMessage::WantKeyframe {
+                    say(&out, ClientMessage::WantKeyframe {
                         window: WindowId(*id),
-                    })
-                    .await;
+                    });
                 }
             }
 
@@ -563,10 +560,9 @@ async fn serve(
                             stream.skipped += stream.queue.len() as u64;
                             stream.queue.clear();
                             stream.broken = true;
-                            say(connection, ClientMessage::WantKeyframe {
+                            say(&out, ClientMessage::WantKeyframe {
                                 window: WindowId(*id),
-                            })
-                            .await;
+                            });
                         }
                     }
                 }
@@ -682,27 +678,24 @@ async fn serve(
                 }
                 resize_sent.insert(id, Instant::now());
                 log::info!("remote: window {id} is now {width}x{height}; telling the host");
-                say(connection, ClientMessage::Configure {
+                say(&out, ClientMessage::Configure {
                     window: WindowId(id),
                     width,
                     height,
-                })
-                .await;
+                });
             }
             for id in std::mem::take(&mut client.closing) {
-                say(connection, ClientMessage::Close { window: WindowId(id) }).await;
+                say(&out, ClientMessage::Close { window: WindowId(id) });
             }
             // Everything the wearer did, in the order they did it. Reliable and ordered,
             // because a key that arrives twice or out of turn is worse than one that is late.
             for (id, input) in std::mem::take(&mut client.input) {
-                say(
-                    connection,
+                say(&out,
                     ClientMessage::Input {
                         window: WindowId(id),
                         input,
                     },
-                )
-                .await;
+                );
             }
 
             if said.elapsed() >= Duration::from_secs(2) {
@@ -729,7 +722,11 @@ async fn serve(
                 said = Instant::now();
             }
         }
-        say(connection, ClientMessage::Detach).await;
+        say(&out, ClientMessage::Detach);
+        // A goodbye is only worth anything if it goes out before the link does. Dropping the
+        // sender ends the writer, which finishes the stream once the queue is empty.
+        drop(out);
+        let _ = tokio::time::timeout(Duration::from_millis(200), writer).await;
         Ended::Stopped
     }
 }
@@ -752,12 +749,44 @@ async fn connect(
 }
 
 /// One message, one stream.
-async fn say(connection: &quinn::Connection, message: ClientMessage) {
-    let Ok(bytes) = spatiand_stream::to_bytes(&message) else {
-        return;
+/// Queue something for the host. Never blocks; order is kept by the writer below.
+fn say(out: &tokio::sync::mpsc::UnboundedSender<ClientMessage>, message: ClientMessage) {
+    let _ = out.send(message);
+}
+
+/// Write everything the session says down **one** stream, in the order it was said.
+///
+/// It used to be a stream per message, which QUIC delivers reliably and, between streams, in
+/// whatever order it likes. A key's press and its release are two messages: under load the
+/// release could arrive first, and the key then stayed down for ever — repeating, because
+/// XWayland repeats a key it has not been told about — while a single click became a drag
+/// that never ended. One ordered stream is the whole fix, and it is also fewer streams.
+async fn talk(
+    connection: quinn::Connection,
+    mut outbox: tokio::sync::mpsc::UnboundedReceiver<ClientMessage>,
+) {
+    let mut stream = match connection.open_uni().await {
+        Ok(stream) => stream,
+        Err(e) => {
+            log::warn!("remote: no control stream ({e}); nothing can be said to this host");
+            return;
+        }
     };
-    if let Ok(mut stream) = connection.open_uni().await {
-        let _ = stream.write_all(&bytes).await;
-        let _ = stream.finish();
+    if stream
+        .write_all(&spatiand_stream::CONTROL_MAGIC)
+        .await
+        .is_err()
+    {
+        return;
     }
+    while let Some(message) = outbox.recv().await {
+        let Ok(bytes) = spatiand_stream::to_bytes(&message) else {
+            continue;
+        };
+        let length = (bytes.len() as u32).to_le_bytes();
+        if stream.write_all(&length).await.is_err() || stream.write_all(&bytes).await.is_err() {
+            return;
+        }
+    }
+    let _ = stream.finish();
 }

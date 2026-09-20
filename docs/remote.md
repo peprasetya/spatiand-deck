@@ -721,3 +721,36 @@ controller plugged into the host and play with the wrong one.
 eight axes, in that order. What Firestorm then does with it is Firestorm's: it wants its
 joystick switched on in its own preferences, and `Pads::apply` logs the first report that is
 not at rest, which is the line that tells the two cases apart.
+
+## A key that would not come up — 2026-09-20
+
+A single click in Firestorm became a drag that never ended, and a single keystroke repeated
+without stopping. Both were the same bug, and it was in the protocol rather than in either
+end's input handling.
+
+Everything the session said went out on **a stream of its own**: `connection.open_uni()`, one
+message, finish. QUIC delivers each of those reliably — and, between streams, in whatever
+order it likes. A key's press and its release are two messages. Under load, with video
+datagrams filling the link, the release could arrive first; the host then applied the press
+last and the key stayed down for ever. XWayland repeats a key it has not been told about, so
+"down for ever" reads as "typing for ever". A mouse button that never came up is a drag.
+
+The module's own comment said "reliable and ordered, because a key that arrives twice or out
+of turn is worse than one that is late". It was reliable. It was never ordered.
+
+Now there is **one stream, and everything the session says goes down it in order**, marked by
+`CONTROL_MAGIC` and length-prefixed, written by one task from one queue — the mirror of the
+control stream the host has always had coming the other way. `say` no longer waits for the
+network, which also takes the write off the frame loop.
+
+Two belts to go with the braces, because an input path that can leave something held down
+should not depend on a single mechanism:
+
+- The session lets go of every key and button it is holding when focus leaves the window.
+  Wayland says no further key events arrive after a leave, so the release would never come.
+- The host lets go of everything when a session disconnects, rather than leaving an
+  application holding a button because someone walked out of range mid-click.
+
+**[verified]** against a sandboxed host with `probe-session`: hello, catalogue, launch and a
+mid-session resize all arrive over the one stream, and the host logs
+`window 1 resized: 1280x800 -> 900x620`.

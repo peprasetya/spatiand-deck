@@ -478,9 +478,11 @@ fn run_host(
                         if let Some(s) = &host.sounds {
                             s.set_attached(false);
                         }
-                        // Nobody is holding it any more, and a stick left pushed over walks
-                        // an avatar into a wall for as long as the link is down.
+                        // Nobody is holding any of it any more: a stick left pushed over
+                        // walks an avatar into a wall, and a button or a key left down is
+                        // worse, because an X11 client repeats a key nobody released.
                         pads.rest();
+                        input::release_everything(&mut host, 0);
                         admitted = false;
                         // A session that leaves mid-pairing takes the question with it.
                         if let Some(p) = pairing.as_mut() {

@@ -120,6 +120,9 @@ pub struct Host {
     pub xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
     /// The X server's display number, for `DISPLAY`.
     pub x11_display: Option<u32>,
+    /// Pointer buttons a session has pressed and not released, so they can be let go of if
+    /// it leaves while one is down. See `input::release_everything`.
+    pub held_buttons: Vec<u32>,
     /// Windows that have appeared or gone since the last time anyone looked.
     pub arrived: Vec<WindowId>,
     pub departed: Vec<WindowId>,
@@ -202,6 +205,7 @@ impl Host {
             xwm: None,
             xwayland_shell_state,
             x11_display: None,
+            held_buttons: Vec::new(),
             arrived: Vec::new(),
             departed: Vec::new(),
         }

@@ -70,6 +70,13 @@ pub struct Client {
     pointer_on: Option<u32>,
     /// Which window has the keys.
     keyboard_on: Option<u32>,
+    /// What is being held down, so it can be let go of when focus leaves.
+    ///
+    /// A belt to the ordered stream's braces. Wayland says a client may hear no more key
+    /// events after a leave, and a key whose release never happens is a key the application
+    /// at the other end holds for ever — which for an X11 one means it repeats for ever too.
+    held_keys: Vec<(u32, u32)>,
+    held_buttons: Vec<(u32, u32)>,
     /// Surfaces by window id, for turning an event's surface back into a window.
     ids: HashMap<wl_surface::WlSurface, u32>,
     /// Format and modifier pairs the compositor says it can import.
@@ -120,6 +127,8 @@ impl Client {
             input: Vec::new(),
             pointer_on: None,
             keyboard_on: None,
+            held_keys: Vec::new(),
+            held_buttons: Vec::new(),
             ids: HashMap::new(),
             importable: std::collections::HashSet::new(),
         };
@@ -168,7 +177,38 @@ impl Client {
         }
     }
 
+    /// Let go of every key that is down. Called when focus leaves, because after that the
+    /// release will never arrive and the application would hold the key for ever.
+    fn let_go_of_keys(&mut self) {
+        for (id, code) in std::mem::take(&mut self.held_keys) {
+            self.input.push((
+                id,
+                Input::Key {
+                    code,
+                    pressed: false,
+                },
+            ));
+        }
+    }
+
+    /// The same for the mouse: an unreleased button is a drag that never ends.
+    fn let_go_of_buttons(&mut self) {
+        for (id, button) in std::mem::take(&mut self.held_buttons) {
+            self.input.push((
+                id,
+                Input::Button {
+                    button,
+                    pressed: false,
+                },
+            ));
+        }
+    }
+
     pub fn close(&mut self, id: u32) {
+        // Nothing needs releasing on a window that has gone, but its entries must not be
+        // left behind to be released against whatever wears that id next.
+        self.held_keys.retain(|(window, _)| *window != id);
+        self.held_buttons.retain(|(window, _)| *window != id);
         if let Some(window) = self.windows.remove(&id) {
             self.ids.remove(&window.surface);
             window.toplevel.destroy();
@@ -619,6 +659,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Client {
                 }
             }
             wl_pointer::Event::Leave { .. } => {
+                state.let_go_of_buttons();
                 if let Some(id) = state.pointer_on.take() {
                     state.input.push((id, Input::Leave));
                 }
@@ -640,16 +681,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Client {
             }
             wl_pointer::Event::Button { button, state: pressed, .. } => {
                 if let Some(id) = state.pointer_on {
-                    state.input.push((
-                        id,
-                        Input::Button {
-                            button,
-                            pressed: matches!(
-                                pressed,
-                                wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed)
-                            ),
-                        },
-                    ));
+                    let pressed = matches!(
+                        pressed,
+                        wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed)
+                    );
+                    state.held_buttons.retain(|held| *held != (id, button));
+                    if pressed {
+                        state.held_buttons.push((id, button));
+                    }
+                    state.input.push((id, Input::Button { button, pressed }));
                 }
             }
             wl_pointer::Event::Axis { axis, value, .. } => {
@@ -688,20 +728,26 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Client {
                 state.keyboard_on = state.ids.get(&surface).copied();
             }
             wl_keyboard::Event::Leave { .. } => {
+                state.let_go_of_keys();
                 state.keyboard_on = None;
             }
             wl_keyboard::Event::Key { key, state: pressed, .. } => {
                 if let Some(id) = state.keyboard_on {
+                    let pressed = matches!(
+                        pressed,
+                        wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed)
+                    );
+                    state.held_keys.retain(|held| *held != (id, key));
+                    if pressed {
+                        state.held_keys.push((id, key));
+                    }
                     state.input.push((
                         id,
                         Input::Key {
                             // `wl_keyboard.key` is already an evdev code, which is what the
                             // wire carries.
                             code: key,
-                            pressed: matches!(
-                                pressed,
-                                wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed)
-                            ),
+                            pressed,
                         },
                     ));
                 }

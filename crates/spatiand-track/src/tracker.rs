@@ -108,6 +108,35 @@ pub struct TrackerConfig {
     /// per degree of error per second. The integral half of the anchor: see
     /// `update_magnetic_anchor`.
     pub mag_bias_gain: f64,
+    /// The most that integral may ever add, in deg/s, and the most it may be wrong by.
+    ///
+    /// **The bound that was missing.** The integral was slew-limited and otherwise free, so a
+    /// heading error that persisted — a reference measured against a field that has since
+    /// changed, a hard-iron offset that is not quite right — moved the bias as far as it
+    /// liked, a degree per second in a minute, and left it there when the anchor gave up. The
+    /// recorded symptom is a session whose yaw bias wandered between +0.15 and −1.36 deg/s
+    /// while the anchor reported itself "holding" 36 degrees off: the world sliding away,
+    /// sometimes left, sometimes right, at up to a degree a second.
+    ///
+    /// What the integral is *for* is a bias estimate that is a little stale — a few tenths of
+    /// a deg/s. Anything beyond that is not bias, so this is where honesty about its job
+    /// turns into a number.
+    pub mag_trim_limit: f64,
+    /// Above this heading error, in degrees, the integral stops learning.
+    ///
+    /// A large error is a statement about the *reference*, not about the gyro. The
+    /// proportional half still pulls the heading back; only the part that teaches the bias
+    /// holds off, because what it would learn is the reference's mistake.
+    pub mag_trim_within: f64,
+    /// Above this heading error, in degrees, held for [`mag_relearn_after`](Self::mag_relearn_after)
+    /// seconds, the anchor stops believing its own reference and measures a new one.
+    pub mag_relearn_beyond: f64,
+    pub mag_relearn_after: f64,
+    /// How long the trim takes to fade once the anchor is no longer accepted, in seconds.
+    ///
+    /// A paused anchor gives back what it took. Leaving it in place is what turned "the
+    /// magnetometer has stopped helping" into "the magnetometer has broken the gyro".
+    pub mag_trim_decay_s: f64,
     pub magnetic_anchor_enabled: bool,
 }
 
@@ -131,6 +160,11 @@ impl Default for TrackerConfig {
             mag_fast_rate: 2.0,
             mag_gain: 0.1,
             mag_bias_gain: 0.02,
+            mag_trim_limit: 0.25,
+            mag_trim_within: 10.0,
+            mag_relearn_beyond: 25.0,
+            mag_relearn_after: 20.0,
+            mag_trim_decay_s: 120.0,
             magnetic_anchor_enabled: true,
         }
     }
@@ -190,6 +224,16 @@ pub struct HeadTracker {
     mag_accepted: bool,
     mag_error: f64,
     mag_failures: u32,
+    /// What the anchor's integral has added to the bias, kept apart from the bias itself.
+    ///
+    /// Separate because the two are learned from different things and one of them is allowed
+    /// to be wrong: the bias comes from holding still and is worth remembering between
+    /// sessions, while this comes from a magnetic reference that may turn out to be a
+    /// fiction. Bounded by `mag_trim_limit`, faded out when the anchor is not being believed,
+    /// and never saved.
+    mag_trim: DVec3,
+    /// How long the heading error has been beyond `mag_relearn_beyond`, in seconds.
+    mag_lost_for: f64,
 
     /// Seconds of continuous near-stillness. The glasses have no wear sensor, so this stands
     /// in for "taken off and put down".
@@ -233,6 +277,8 @@ impl HeadTracker {
             mag_samples: 0,
             mag_accepted: false,
             mag_error: 0.0,
+            mag_trim: DVec3::ZERO,
+            mag_lost_for: 0.0,
             mag_failures: 0,
             idle_accumulator: 0.0,
             yaw_offset: 0.0,
@@ -278,7 +324,7 @@ impl HeadTracker {
             self.seeded = true;
         }
 
-        let corrected = gyro - self.gyro_bias; // deg/s
+        let corrected = gyro - self.bias(); // deg/s
         self.stillness_rate = self.stillness_rate.lerp(corrected, 0.01);
         self.seconds_since_bias_update += dt;
 
@@ -477,19 +523,23 @@ impl HeadTracker {
     /// required of it is to be the same field a minute later.
     fn update_magnetic_anchor(&mut self, mag: DVec3, dt: f64) {
         if !self.config.magnetic_anchor_enabled || !self.seeded {
+            self.fade_trim(dt);
             return;
         }
         // Not without the glasses' own field taken out. Uncorrected it is bigger than Earth's,
         // and the anchor steers toward a heading tens of degrees wrong: see `hard_iron.rs`.
         let Some(hard_iron) = self.hard_iron else {
+            self.fade_trim(dt);
             return;
         };
         if mag.length() >= crate::hard_iron::PLAUSIBLE_GAUSS {
+            self.fade_trim(dt);
             return;
         }
         let mag = hard_iron.apply(mag);
         let strength = mag.length();
         if strength <= 1e-9 {
+            self.fade_trim(dt);
             return;
         }
 
@@ -499,6 +549,7 @@ impl HeadTracker {
         // encodes yaw, and dividing by one this small amplifies noise without bound.
         if horizontal <= 0.15 {
             self.mag_accepted = false;
+            self.fade_trim(dt);
             return;
         }
         let inclination = (-world.z).atan2(horizontal);
@@ -507,6 +558,7 @@ impl HeadTracker {
             // Wait for a trustworthy attitude before deciding what "the field" is — anchoring
             // to a pose the filter has not settled into bakes in that error.
             if !self.calibrated {
+                self.fade_trim(dt);
                 return;
             }
             self.mag_accumulator += world;
@@ -535,6 +587,7 @@ impl HeadTracker {
             self.mag_accumulator = DVec3::ZERO;
             self.mag_strength_accumulator = 0.0;
             self.mag_inclination_accumulator = 0.0;
+            self.fade_trim(dt);
             return;
         };
 
@@ -549,6 +602,7 @@ impl HeadTracker {
             || inclination_off >= self.config.mag_inclination_tolerance
         {
             self.mag_accepted = false;
+            self.fade_trim(dt);
             return;
         }
         self.mag_accepted = true;
@@ -562,6 +616,35 @@ impl HeadTracker {
         }
         self.mag_error = error * 180.0 / std::f64::consts::PI;
 
+        // **A reference can be wrong, and saying so is part of the job.** An error of tens of
+        // degrees that does not go away is not a gyro that has drifted — the proportional
+        // half would have pulled that back long ago — it is a reference measured against a
+        // field that has since changed, or a hard-iron offset that was never right. Holding
+        // on to it and calling that "holding" is how the anchor came to report itself in
+        // charge while it was 36 degrees out. So it is dropped, the trim it taught is given
+        // back, and a new reference is measured from where we are now.
+        if self.mag_error.abs() >= self.config.mag_relearn_beyond {
+            self.mag_lost_for += dt;
+            if self.mag_lost_for >= self.config.mag_relearn_after {
+                log::info!(
+                    "the magnetic reference was {:.0} deg out for {:.0} s; measuring a new one",
+                    self.mag_error,
+                    self.mag_lost_for
+                );
+                self.mag_reference = None;
+                self.mag_samples = 0;
+                self.mag_accumulator = DVec3::ZERO;
+                self.mag_strength_accumulator = 0.0;
+                self.mag_inclination_accumulator = 0.0;
+                self.mag_accepted = false;
+                self.mag_lost_for = 0.0;
+                self.mag_failures += 1;
+            }
+            self.fade_trim(dt);
+            return;
+        }
+        self.mag_lost_for = 0.0;
+
         // The anchor corrects the BIAS, not only the heading.
         //
         // Nudging the heading alone cannot keep up with a bias that is off: the nudge is
@@ -571,12 +654,19 @@ impl HeadTracker {
         // little of it into the bias removes the cause. The integral half of a PI controller;
         // the nudge below is the proportional half. Slew-limited, so a field that is subtly
         // wrong in some directions cannot teach it something wrong quickly.
-        if self.config.mag_bias_gain > 0.0 {
+        if self.config.mag_bias_gain > 0.0 && self.mag_error.abs() <= self.config.mag_trim_within
+        {
             let vertical = self.q.inverse() * DVec3::Z;
             const MAX_SLEW: f64 = 0.02; // deg/s of bias per second
             let adjust =
                 (self.config.mag_bias_gain * self.mag_error).clamp(-MAX_SLEW, MAX_SLEW) * dt;
-            self.gyro_bias -= vertical * adjust;
+            self.mag_trim -= vertical * adjust;
+            // The bound. Without it the slew limit only decides how *long* it takes to go
+            // wrong by any amount at all.
+            let limit = self.config.mag_trim_limit;
+            if self.mag_trim.length() > limit {
+                self.mag_trim = self.mag_trim.normalize() * limit;
+            }
         }
 
         if self.mag_error.abs() <= self.config.mag_deadzone {
@@ -596,6 +686,22 @@ impl HeadTracker {
         // Pre-multiplied: this is a rotation about the WORLD's vertical, not the head's.
         // Post-multiplying would tilt the horizon whenever you were not upright.
         self.q = (DQuat::from_axis_angle(DVec3::Z, step) * self.q).normalize();
+    }
+
+    /// Give back what the anchor taught, while it is not being believed.
+    ///
+    /// Exponential, over `mag_trim_decay_s`, so a moment's disturbance costs nothing and a
+    /// magnetometer that has genuinely stopped working leaves the tracker where it found it
+    /// rather than poisoned.
+    fn fade_trim(&mut self, dt: f64) {
+        if self.mag_trim == DVec3::ZERO {
+            return;
+        }
+        let keep = (-dt / self.config.mag_trim_decay_s.max(1e-6)).exp();
+        self.mag_trim *= keep;
+        if self.mag_trim.length() < 1e-6 {
+            self.mag_trim = DVec3::ZERO;
+        }
     }
 
     // --- output ---
@@ -635,6 +741,17 @@ impl HeadTracker {
 
     pub fn gyro_bias(&self) -> DVec3 {
         self.gyro_bias
+    }
+
+    /// What the filter subtracts: the bias learned from holding still, plus whatever the
+    /// magnetic anchor has trimmed it by. Only the first half is ever remembered.
+    pub fn bias(&self) -> DVec3 {
+        self.gyro_bias + self.mag_trim
+    }
+
+    /// What the anchor's integral is currently adding, for the log.
+    pub fn mag_trim(&self) -> DVec3 {
+        self.mag_trim
     }
 
     /// Seconds the glasses have been essentially motionless.
@@ -1141,6 +1258,93 @@ mod drift_tests {
         let (worst, tracker) = run(remembered_but_wrong(), 12.0, then_reading);
         assert!(tracker.magnetic_status().locked);
         assert!(worst < 2.0, "yaw crept {worst:.1} deg while reading");
+    }
+
+    /// The fault that was reported: a magnetic anchor that broke the gyro.
+    ///
+    /// Given a hard-iron offset that is wrong — which is what an undecided fit adopted, and
+    /// what a field that has changed amounts to — the anchor sees a heading error that never
+    /// goes away and its integral used to move the gyro bias as far as it liked to chase it.
+    /// A recorded session wandered between +0.15 and −1.36 deg/s of yaw bias while reporting
+    /// itself "holding" 36 degrees off.
+    #[test]
+    fn a_wrong_magnetic_reference_cannot_break_the_gyro() {
+        let mut t = remembered_but_wrong();
+        // Not the offset the field in `run` is actually built with: a plausible-looking
+        // measurement of the wrong thing.
+        t.set_hard_iron(Some(HardIron {
+            axes: [(0, 1.0), (1, 1.0), (2, 1.0)],
+            offset: DVec3::new(-0.20, 0.30, -0.05),
+        }));
+        let preset = t.gyro_bias();
+        let (_, t) = run(t, 12.0, looking_around);
+        let learned = t.gyro_bias();
+        let used = t.bias();
+        // The bias learned from holding still is the tracker's own; the anchor does not get
+        // to write into it at all.
+        assert!(
+            (learned - preset).length() < 0.05,
+            "the anchor moved the learned bias by {:.2} deg/s",
+            (learned - preset).length()
+        );
+        // And what it adds on top is bounded, whatever it thinks it is seeing.
+        let trim = (used - learned).length();
+        if std::env::var_os("DRIFT_LOG").is_some() {
+            eprintln!("wrong reference: learned moved {:.3}, trim {trim:.3} deg/s",
+                (learned - preset).length());
+        }
+        assert!(
+            trim <= TrackerConfig::default().mag_trim_limit + 1e-6,
+            "the trim reached {trim:.2} deg/s"
+        );
+    }
+
+    /// And when it gives up, it gives back.
+    #[test]
+    fn a_paused_anchor_returns_what_it_taught() {
+        let mut t = remembered_but_wrong();
+        t.config.mag_trim_decay_s = 5.0;
+        t.set_hard_iron(Some(HardIron {
+            axes: [(0, 1.0), (1, 1.0), (2, 1.0)],
+            offset: DVec3::new(-0.20, 0.30, -0.05),
+        }));
+        let (_, mut t) = run(t, 6.0, looking_around);
+        // The magnetometer stops making sense — a magnet nearby, a field that changed.
+        let steps = (30.0 / DT) as usize;
+        for i in 0..steps {
+            t.integrate(&ImuSample {
+                timestamp_ns: (i as u64 + 1) * 1_000_000 + 10_000_000_000,
+                gyro: TRUE_BIAS,
+                accel: DVec3::Z,
+                mag: DVec3::splat(9.0),
+                temperature_c: None,
+            });
+        }
+        assert!(
+            (t.bias() - t.gyro_bias()).length() < 0.01,
+            "the trim was still {:.3} deg/s after the anchor stopped",
+            (t.bias() - t.gyro_bias()).length()
+        );
+    }
+
+    /// The other half of the same question: what the deadband is *worth* when the bias is
+    /// wrong, which is the ordinary case on a head.
+    #[test]
+    fn measure_the_deadband_against_a_wrong_bias() {
+        let wrong = |until: f64| {
+            let mut t = remembered_but_wrong();
+            t.config.magnetic_anchor_enabled = false;
+            t.config.deadband_until = until;
+            t
+        };
+        for (name, motion) in [
+            ("looking around", looking_around as fn(f64) -> DQuat),
+            ("reading", then_reading as fn(f64) -> DQuat),
+        ] {
+            let (always, _) = run(wrong(1e9), 12.0, motion);
+            let (faded, _) = run(wrong(TrackerConfig::default().deadband_until), 12.0, motion);
+            eprintln!("{name}: always on {always:.1} deg, faded {faded:.1} deg");
+        }
     }
 
     /// The deadband's own drift, with nothing else to blame.

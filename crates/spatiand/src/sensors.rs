@@ -153,8 +153,20 @@ fn describe(tracker: &HeadTracker) -> String {
     } else {
         "paused: the field here differs from where it was learned".to_string()
     };
+    // The anchor's trim is said separately from the bias it sits on top of, because they are
+    // learned from different things and only one of them is ever remembered. A trim that has
+    // pinned itself at its limit is the anchor fighting a reference it should not believe.
+    let trim = tracker.mag_trim();
+    let trim = if trim.length() < 1e-4 {
+        String::new()
+    } else {
+        format!(
+            " (+{:+.3} {:+.3} {:+.3} from the anchor)",
+            trim.x, trim.y, trim.z
+        )
+    };
     format!(
-        "tracker: bias {:+.3} {:+.3} {:+.3} deg/s; magnetometer {fit}; yaw anchor {anchor}",
+        "tracker: bias {:+.3} {:+.3} {:+.3} deg/s{trim}; magnetometer {fit}; yaw anchor {anchor}",
         bias.x, bias.y, bias.z
     )
 }
