@@ -1298,7 +1298,7 @@ fn made_up_hosts() -> (Vec<spatiand_shell::HostRow>, Vec<spatiand_shell::HostTab
     use spatiand_shell::{HostRow, HostStatus, HostTab, RemoteEntry};
     let rows = vec![
         HostRow {
-            label: "deepMagpie".into(),
+            label: "workshop".into(),
             address: "workshop".into(),
             status: HostStatus::Online,
         },
@@ -1315,7 +1315,7 @@ fn made_up_hosts() -> (Vec<spatiand_shell::HostRow>, Vec<spatiand_shell::HostTab
     };
     let tabs = vec![
         HostTab {
-            label: "deepMagpie".into(),
+            label: "workshop".into(),
             address: "workshop".into(),
             online: true,
             apps: vec![

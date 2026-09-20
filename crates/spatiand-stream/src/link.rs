@@ -256,13 +256,13 @@ mod tests {
     fn pairing_shows_the_code_first_and_learns_the_hosts_name_when_it_says_yes() {
         let session = Identity::new().unwrap();
         runtime().block_on(async {
-            let (address, host, _gate) = host_that_answers(Some("deepMagpie")).await;
+            let (address, host, _gate) = host_that_answers(Some("workshop")).await;
             let mut seen = Vec::new();
             let paired = pair(&session, &address.to_string(), |p| seen.push(p))
                 .await
                 .expect("pairs");
             assert_eq!(paired.fingerprint, host);
-            assert_eq!(paired.name, "deepMagpie");
+            assert_eq!(paired.name, "workshop");
             assert_eq!(
                 seen,
                 vec![Pairing::Compare {

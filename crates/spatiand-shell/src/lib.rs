@@ -898,7 +898,7 @@ mod tests {
         s.set_hosts(
             vec![],
             vec![HostTab {
-                label: "deepMagpie".into(),
+                label: "workshop".into(),
                 address: "workshop".into(),
                 online: true,
                 apps: vec![RemoteEntry {
