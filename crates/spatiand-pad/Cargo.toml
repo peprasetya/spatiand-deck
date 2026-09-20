@@ -1,0 +1,14 @@
+[package]
+name = "spatiand-pad"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The one gamepad an application sees, and nothing else. Its own crate because both ends need
+# it and they have nothing else in common: the session builds the report from whatever the
+# wearer is holding, and `spatiand-host` — which knows nothing about headsets, trackers or
+# controllers — creates the same device on another machine and applies what arrives.
+[dependencies]
+log.workspace = true
+libc = "0.2"

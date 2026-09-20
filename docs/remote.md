@@ -665,3 +665,37 @@ decided by `audio::Source::rank`, and since 2026-09-20 by the window's **own pix
 than by how big it looks — pulling a window smaller or pushing it away is something the wearer
 does to see it better, and it must not hand the sound to a caption bubble standing next to it.
 The log says which window each sink is aimed from whenever the answer changes.
+
+## A controller for an application on another machine — 2026-09-20
+
+Firestorm saw no joystick, because there was none: the wearer's controller is on the Deck and
+nothing on the host could see it. The host now creates a gamepad of its own — a uinput device
+wearing Steam's virtual gamepad identity, the same device `spatiand-pad` makes for local games
+— and the session sends it the very report its local pad is given. So a remote application is
+played exactly as a local one is: its own controller layout, the thumbsticks, and the head on
+the four spare axes.
+
+`virtual_pad` moved out of `spatiand-input` into a crate of its own for this. Both ends need
+it and they have nothing else in common; the host is not going to depend on a crate full of
+hidraw helpers for headsets.
+
+Three things that had to be right:
+
+- **The pad is created when the host starts**, not when the first report arrives. A program
+  reads the list of joysticks once — Firestorm's `libndofdev` among them — and a device that
+  appears afterwards is invisible to it.
+- **The report goes only to the host whose window is in front**, and a host that loses focus is
+  told the pad is at rest. A stick left pushed over walks an avatar into a wall.
+- **Rumble is collected every turn of the loop**, whether or not a session is attached: the
+  kernel blocks a game's force-feedback upload until it is answered, so a host that ignored
+  them would hang the first game that rumbled. What comes back goes to the session, which owns
+  the only motors here.
+
+Launched applications get `SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=1` — without it SDL
+skips that identity — and `..._IGNORE_DEVICES_EXCEPT`, so an application here can never find a
+controller plugged into the host and play with the wrong one.
+
+**[verified]** the device appears on the host as `Steam Virtual Gamepad`, `/dev/input/js1`.
+What Firestorm then does with it is Firestorm's: it wants its joystick switched on in its own
+preferences, and `Pads::apply` logs the first report that is not at rest, which is the line
+that tells the two cases apart.

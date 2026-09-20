@@ -42,7 +42,7 @@ pub mod transport;
 pub mod video;
 
 pub use catalog::{App, AppKind, AudioMode, Catalog, Detach, Eyes, PadProfile};
-pub use control::{Bandwidth, ClientMessage, HostMessage, Input, WindowId, WindowInfo};
+pub use control::{Bandwidth, ClientMessage, HostMessage, Input, Pad, WindowId, WindowInfo};
 pub use transport::{pairing_code, Fingerprint, Gate, Identity, Trust};
 pub use video::{Codec, Packet, Reassembler};
 

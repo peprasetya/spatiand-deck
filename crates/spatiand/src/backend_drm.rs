@@ -108,6 +108,23 @@ const SIDECAR_FAILURE_LIMIT: u32 = 30;
 /// somebody is still looking at it.
 const SIDECAR_REBUILD_INTERVAL: Duration = Duration::from_secs(60);
 
+/// The pad as the wire carries it. See `spatiand_stream::Pad`.
+fn pad_state(report: &spatiand_input::virtual_pad::Report) -> spatiand_stream::Pad {
+    use spatiand_stream::Pad;
+    let bit = |on: bool, mask: u8| if on { mask } else { 0 };
+    Pad {
+        buttons: report.buttons,
+        dpad: bit(report.dpad_up, Pad::UP)
+            | bit(report.dpad_down, Pad::DOWN)
+            | bit(report.dpad_left, Pad::LEFT)
+            | bit(report.dpad_right, Pad::RIGHT),
+        left: report.left,
+        right: report.right,
+        triggers: (report.left_trigger, report.right_trigger),
+        extra: report.extra,
+    }
+}
+
 pub fn run(
     event_loop: &mut EventLoop<'static, Runtime>,
     display: &mut Display<Spatiand>,
@@ -1118,7 +1135,16 @@ pub fn run(
             // never be left holding a button that was pressed to work a menu.
             let layout_resting = shell.menu_is_open() || missing.is_some() || calibration.is_some();
             let delivery = controls.step(&snapshot, layout_resting);
-            if let Some((strong, weak)) = controls.rumble() {
+            // The same report the local device was given goes to whichever host owns the
+            // window in front. A remote game is played exactly as a local one is.
+            let focused_app_id = runtime
+                .state
+                .space
+                .elements()
+                .find(|w| runtime.state.layout.is_focused(w))
+                .and_then(|w| runtime.state.app_id_of(w));
+            remotes.pad(focused_app_id.as_deref(), pad_state(&controls.report()));
+            if let Some((strong, weak)) = controls.rumble().or_else(|| remotes.rumble()) {
                 if let Some(c) = controller.as_ref() {
                     c.rumble(strong, weak);
                 }

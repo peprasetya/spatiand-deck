@@ -30,6 +30,7 @@ mod input;
 mod microphone;
 mod net;
 mod pace;
+mod pad;
 mod pair;
 mod route;
 mod state;
@@ -388,6 +389,8 @@ fn run_host(
     // Watches the audio graph: it puts an application's sound in the right sink even when the
     // application picked its own device, and notices when one of them wants a microphone.
     let router = route::Router::start();
+    // Created before any application is, because a program reads the list of joysticks once.
+    let mut pads = pad::Pads::start();
     let mut wiring = route::Wiring::default();
     let mut recording = false;
     // When the paired list was last read. `--trust` and `--forget` edit the file from another
@@ -475,6 +478,9 @@ fn run_host(
                         if let Some(s) = &host.sounds {
                             s.set_attached(false);
                         }
+                        // Nobody is holding it any more, and a stick left pushed over walks
+                        // an avatar into a wall for as long as the link is down.
+                        pads.rest();
                         admitted = false;
                         // A session that leaves mid-pairing takes the question with it.
                         if let Some(p) = pairing.as_mut() {
@@ -489,7 +495,7 @@ fn run_host(
                     }
                     FromSession::Said(message) => {
                         if admitted {
-                            said(&mut host, &library.served, message, &mut streams);
+                            said(&mut host, &library.served, message, &mut streams, &mut pads);
                         }
                     }
                 }
@@ -519,6 +525,15 @@ fn run_host(
             }
             if let Some(app) = host.app_of_pid.remove(&pid) {
                 log::info!("{app} (pid {pid}) exited");
+            }
+        }
+
+        // **Every turn, listening or not.** The kernel blocks a game's force-feedback upload
+        // until it is answered, so a host that stopped collecting these would hang the first
+        // game that rumbled.
+        if let Some((strong, weak)) = pads.rumble() {
+            if let (Some(net), true) = (&net, attached) {
+                net.send(ToSession::Control(HostMessage::Rumble { strong, weak }));
             }
         }
 
@@ -1018,6 +1033,7 @@ fn said(
     catalog: &Catalog,
     message: spatiand_stream::ClientMessage,
     streams: &mut HashMap<u32, Stream>,
+    pads: &mut pad::Pads,
 ) {
     use spatiand_stream::ClientMessage as Says;
     match message {
@@ -1038,6 +1054,7 @@ fn said(
                 .unwrap_or(0);
             input::apply(host, window, input, time);
         }
+        Says::Pad(state) => pads.apply(&state),
         Says::WantKeyframe { window } => {
             if let Some(stream) = streams.get_mut(&window.0) {
                 // And a frame to put it in: asking for a keyframe when the window is still

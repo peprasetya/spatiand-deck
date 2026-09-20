@@ -78,6 +78,14 @@ pub fn environment(
     // answer. These make GTK 3 and GTK 4 draw their own.
     env.insert("GTK_USE_PORTAL".into(), "0".into());
     env.insert("GDK_DEBUG".into(), "no-portals".into());
+    // **One controller, and it is the host's.** SDL refuses Steam's virtual gamepad identity
+    // unless told otherwise, and that identity is what the pad here wears — see `spatiand_pad`
+    // for the measurement that chose it. The same pair hides any controller plugged into this
+    // machine from the applications the host starts, so one of them can never find two pads
+    // and play with the wrong one; it hides nothing from anybody else's programs.
+    for (key, value) in spatiand_pad::hide_other_controllers() {
+        env.insert(key, value);
+    }
     // Says which host and which application, for anything that wants to know it is remote.
     env.insert("SPATIAND_REMOTE_APP".into(), app.id.clone());
     for (key, value) in &app.env {

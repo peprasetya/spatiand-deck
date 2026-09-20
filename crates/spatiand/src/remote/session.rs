@@ -359,6 +359,14 @@ async fn serve(
                                         Err(e) => log::error!("remote: window {}: {e}", window.0),
                                     }
                                 }
+                                HostMessage::Rumble { strong, weak } => {
+                                    // The motors are the compositor's; it takes this on its
+                                    // next frame. Only the newest matters -- a rumble that
+                                    // was overtaken was never felt.
+                                    if let Ok(mut v) = view.lock() {
+                                        v.rumble = Some((strong, weak));
+                                    }
+                                }
                                 HostMessage::Microphone { wanted } => {
                                     if wanted && !config.microphone {
                                         log::info!(
@@ -492,6 +500,9 @@ async fn serve(
                         Some(Command::ForceQuit(app)) => {
                             log::warn!("remote: asking {} to kill {app}", config.host);
                             say(connection, ClientMessage::ForceQuit { app }).await;
+                        }
+                        Some(Command::Pad(state)) => {
+                            say(connection, ClientMessage::Pad(state)).await;
                         }
                         None => {}
                     }

@@ -12,6 +12,8 @@ license.workspace = true
 spatiand-stream = { path = "../spatiand-stream" }
 spatiand-host-catalog = { path = "../spatiand-host-catalog" }
 spatiand-platform = { path = "../spatiand-platform" }
+# The gamepad applications here are played with: the same device the session makes locally.
+spatiand-pad = { path = "../spatiand-pad" }
 serde.workspace = true
 # Only to read what `pw-dump` prints; see `route`. Pure Rust, so it costs the machine
 # this runs on nothing and the tarball a few kilobytes.

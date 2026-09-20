@@ -10,6 +10,7 @@ license.workspace = true
 # timeout) and already proven against two different devices, so sharing them beats a second
 # copy. If a third consumer appears they should move to their own crate.
 spatiand-hmd = { path = "../spatiand-hmd" }
+spatiand-pad = { path = "../spatiand-pad" }
 log.workspace = true
 libc = "0.2"
 

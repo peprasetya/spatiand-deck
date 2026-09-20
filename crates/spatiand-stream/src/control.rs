@@ -68,6 +68,8 @@ pub enum ClientMessage {
     WantKeyframe { window: WindowId },
     /// Something the wearer did to a window. See [`Input`].
     Input { window: WindowId, input: Input },
+    /// The whole state of the gamepad, for whatever is being played there. See [`Pad`].
+    Pad(Pad),
     /// The wearer's head, as an absolute view rather than a nudge.
     ///
     /// Sent unreliably in the real thing; it is here because it is part of the same
@@ -127,6 +129,9 @@ pub enum HostMessage {
     Microphone { wanted: bool },
     /// The application exited by itself.
     Exited { app: String, status: Option<i32> },
+    /// A game asked the pad to rumble. Two motor strengths, as a force-feedback effect gives
+    /// them; the headset end decides what its own hardware does with them.
+    Rumble { strong: u16, weak: u16 },
 }
 
 /// A window the host has.
@@ -165,6 +170,43 @@ pub enum Input {
     /// The layout stays on the host, which is the only end that knows what the application
     /// expects. Sending characters instead would break every game that reads scancodes.
     Key { code: u32, pressed: bool },
+}
+
+/// The gamepad, whole, as a snapshot rather than as changes.
+///
+/// A snapshot because that is what a pad *is*: a game reads a state, not a history, and a
+/// state that arrives late is still the truth while a missed change is a stick left pushed
+/// over for ever. It is sent whenever it differs from the last one sent, and once more, at
+/// rest, when the wearer stops playing — so nothing is ever left held down.
+///
+/// The shape is `spatiand_pad::Report`'s, which is the device the host creates: an Xbox pad's
+/// buttons and axes, plus four spare axes a head can be put on. This crate deliberately does
+/// not depend on that one — the wire is the wire — so the two are converted at each end.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct Pad {
+    /// Bit `i` is `spatiand_pad::BUTTON_CODES[i]`.
+    pub buttons: u16,
+    /// Bits 0..3: up, down, left, right.
+    pub dpad: u8,
+    /// Sticks, -1..1, +y up.
+    pub left: (f32, f32),
+    pub right: (f32, f32),
+    /// Triggers, 0..1.
+    pub triggers: (f32, f32),
+    /// The four spare axes, -1..1.
+    pub extra: [f32; 4],
+}
+
+impl Pad {
+    pub const UP: u8 = 1;
+    pub const DOWN: u8 = 2;
+    pub const LEFT: u8 = 4;
+    pub const RIGHT: u8 = 8;
+
+    /// Nothing held and every stick centred.
+    pub fn at_rest(&self) -> bool {
+        *self == Pad::default()
+    }
 }
 
 /// One window, as the wearer sees it.

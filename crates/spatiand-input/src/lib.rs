@@ -35,7 +35,9 @@ mod scroll_trace;
 pub mod takeover;
 pub mod touch;
 pub mod trigger;
-pub mod virtual_pad;
+/// The one gamepad an application sees. It lives in `spatiand-pad`, because the remote host
+/// creates the same device and has nothing else in this crate to do with.
+pub use spatiand_pad as virtual_pad;
 
 pub use gesture::{GestureDelta, TwoPadGesture};
 pub use haptics::{Feel, Pad as HapticPad};

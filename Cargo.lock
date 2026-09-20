@@ -3995,6 +3995,7 @@ dependencies = [
  "libc",
  "log",
  "spatiand-hmd",
+ "spatiand-pad",
 ]
 
 [[package]]
@@ -4004,6 +4005,14 @@ dependencies = [
  "log",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "spatiand-pad"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
 ]
 
 [[package]]

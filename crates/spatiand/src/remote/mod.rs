@@ -49,6 +49,9 @@ pub struct HostView {
     pub link: Link,
     /// What it offers, as of the last time it said.
     pub apps: Vec<RemoteApp>,
+    /// A game there asked the pad to rumble, and nothing has played it yet. Taken by the
+    /// compositor, which owns the only motors.
+    pub rumble: Option<(u16, u16)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -124,6 +127,8 @@ pub enum Command {
     Launch(String),
     /// Kill an application on the host, by catalogue id.
     ForceQuit(String),
+    /// The whole state of the gamepad, for whatever is being played there.
+    Pad(spatiand_stream::Pad),
 }
 
 /// A host being shown in this session.
@@ -195,6 +200,20 @@ impl Remote {
     pub fn force_quit(&self, app: &str) {
         let _ = self.commands.send(Command::ForceQuit(app.to_string()));
     }
+
+    fn pad(&self, state: spatiand_stream::Pad) {
+        let _ = self.commands.send(Command::Pad(state));
+    }
+
+    /// Whether an application id belongs to this host.
+    fn owns(&self, app_id: &str) -> bool {
+        app_id.starts_with(&app_id_prefix(&self.host))
+    }
+
+    /// A game there asked for rumble, if one has since the last look.
+    fn take_rumble(&self) -> Option<(u16, u16)> {
+        self.view.lock().ok()?.rumble.take()
+    }
 }
 
 fn config_for(entry: &crate::prefs::RemoteHost, microphone: bool) -> Result<Config, String> {
@@ -217,6 +236,9 @@ fn config_for(entry: &crate::prefs::RemoteHost, microphone: bool) -> Result<Conf
 #[derive(Default)]
 pub struct Remotes {
     hosts: Vec<Remote>,
+    /// Which host was last given the pad, and what it was given, so an unchanged pad costs
+    /// nothing and a host that loses focus is told to let go exactly once.
+    padded: Option<(String, spatiand_stream::Pad)>,
     /// Whether this session sends its microphone to a host that asks. From the preferences,
     /// once, at startup.
     microphone: bool,
@@ -314,6 +336,44 @@ impl Remotes {
         prefs.remotes.retain(|r| r.host != address);
         prefs.save();
         log::info!("forgot {address}");
+    }
+
+    /// Hand the gamepad to whichever host owns the window in front of the wearer.
+    ///
+    /// Called every frame with the focused application's id, or `None` for a local one.
+    /// Whatever the mapper made of the wearer's controller — thumbsticks, the head on the
+    /// spare axes, a Bluetooth pad — is the same report a local game would be given, so a
+    /// remote application is played exactly as a local one is, including its own layout.
+    ///
+    /// Sent only when it differs from the last one, and a host losing focus is told the pad
+    /// is at rest: a stick left pushed over walks an avatar into a wall.
+    pub fn pad(&mut self, focused: Option<&str>, state: spatiand_stream::Pad) {
+        let now = focused
+            .filter(|app_id| self.hosts.iter().any(|h| h.owns(app_id)))
+            .map(|app_id| app_id.to_string());
+        let was = self.padded.as_ref().map(|(host, _)| host.clone());
+        if was != now {
+            // Whoever had it, let go.
+            if let Some(app_id) = was {
+                if let Some(host) = self.hosts.iter().find(|h| h.owns(&app_id)) {
+                    host.pad(spatiand_stream::Pad::default());
+                }
+            }
+            self.padded = now.clone().map(|app_id| (app_id, spatiand_stream::Pad::default()));
+        }
+        let Some(app_id) = now else { return };
+        if self.padded.as_ref().map(|(_, last)| *last) == Some(state) {
+            return;
+        }
+        if let Some(host) = self.hosts.iter().find(|h| h.owns(&app_id)) {
+            host.pad(state);
+        }
+        self.padded = Some((app_id, state));
+    }
+
+    /// What a game on any host has asked the motors to do since the last look.
+    pub fn rumble(&self) -> Option<(u16, u16)> {
+        self.hosts.iter().find_map(|host| host.take_rumble())
     }
 
     /// Once a frame: finish a pairing that both ends agreed to, and tell the shell anything

@@ -65,6 +65,9 @@ pub struct Controls {
     pad_complained: bool,
     /// The buttons the pad was last told about, so a change in them is said once.
     pad_buttons: (u16, bool, bool, bool, bool),
+    /// The last report built, whether or not there was a device here to take it. A remote
+    /// application is played with this same report, sent to its host — see `remote::Remotes`.
+    report: Report,
 }
 
 impl Controls {
@@ -97,6 +100,7 @@ impl Controls {
             reset_to_default: false,
             pad_complained: false,
             pad_buttons: (0, false, false, false, false),
+            report: Report::default(),
         }
     }
 
@@ -179,8 +183,9 @@ impl Controls {
         };
         self.suspended = suspended;
 
-        if let Some(pad) = self.pad.as_mut() {
-            let report = report_of(&frame);
+        self.report = report_of(&frame);
+        {
+            let report = self.report;
             // Say, every time the buttons change, what the pad was told. This is the line that
             // settles "the game does not see my controller": if it is in the log while the
             // game does nothing, everything on this side worked and the question is what the
@@ -207,17 +212,18 @@ impl Controls {
                     );
                 }
             }
-            match pad.send(&report) {
-                Ok(()) => self.pad_complained = false,
+            match self.pad.as_mut().map(|pad| pad.send(&report)) {
+                None => {}
+                Some(Ok(())) => self.pad_complained = false,
                 // Once, not every frame: this runs at the frame rate, and a pad that has
                 // stopped taking reports will fail on every one of them. It was `debug` and so
                 // said nothing at all in a session's log -- which is the wrong way round for
                 // the one thing standing between a layout and the game it is mapped for.
-                Err(e) if !self.pad_complained => {
+                Some(Err(e)) if !self.pad_complained => {
                     log::warn!("the virtual gamepad stopped taking reports: {e}");
                     self.pad_complained = true;
                 }
-                Err(_) => {}
+                Some(Err(_)) => {}
             }
         }
 
@@ -253,6 +259,14 @@ impl Controls {
         delivery.guide = self.guide_now && !self.guide_was;
         self.guide_was = self.guide_now;
         delivery
+    }
+
+    /// The pad as the layout last made it.
+    ///
+    /// The same report the local device was given, so an application on another machine is
+    /// played exactly as one here is: its own layout, the head on the spare axes, everything.
+    pub fn report(&self) -> Report {
+        self.report
     }
 
     /// Motor strengths a game asked for, when they changed.
