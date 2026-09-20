@@ -679,7 +679,28 @@ the four spare axes.
 it and they have nothing else in common; the host is not going to depend on a crate full of
 hidraw helpers for headsets.
 
-Three things that had to be right:
+**Eight axes, and the D-pad as buttons.** Second Life's joystick library, `libndofdev`, copies
+SDL's axes into a fixed `axes[8]` and does not check the bound. A full pad has ten axes and a
+hat — twelve values — so four of them are written past the end of that array, over the buttons
+that follow it; the button loop then overwrites them, which is why nothing looked wrong and the
+D-pad was simply invisible. The host's pad publishes exactly eight, which is also exactly the
+order such a viewer expects to bind:
+
+| axis | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| | left X | left Y | left trigger | right X | right Y | right trigger | rudder | wheel |
+
+Rudder and wheel are `Report::extra[0]` and `[1]`, which is where an absolute head yaw and
+pitch go — the two axes Firestorm's flycam layout wants. The other two spares have nowhere to
+be on this shape and are not sent. The D-pad becomes four ordinary buttons after the eleven a
+gamepad has, which makes it usable in a viewer for the first time.
+
+**It is called "Spatiand Gamepad."** The name is what an application shows in its joystick
+list, so it should say what the thing is. It keeps Steam's virtual-gamepad *identity* — the
+vendor and product numbers, not the name — because those are what decide whether a runtime
+hands the device to the application or keeps it for itself.
+
+Three more things that had to be right:
 
 - **The pad is created when the host starts**, not when the first report arrives. A program
   reads the list of joysticks once — Firestorm's `libndofdev` among them — and a device that
@@ -695,7 +716,8 @@ Launched applications get `SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD=1` —
 skips that identity — and `..._IGNORE_DEVICES_EXCEPT`, so an application here can never find a
 controller plugged into the host and play with the wrong one.
 
-**[verified]** the device appears on the host as `Steam Virtual Gamepad`, `/dev/input/js1`.
-What Firestorm then does with it is Firestorm's: it wants its joystick switched on in its own
-preferences, and `Pads::apply` logs the first report that is not at rest, which is the line
-that tells the two cases apart.
+**[verified]** the device appears on the host as `Spatiand Gamepad`, `/dev/input/js1`, and
+`/proc/bus/input/devices` says it publishes X, Y, Z, RX, RY, RZ, RUDDER, WHEEL and no hat —
+eight axes, in that order. What Firestorm then does with it is Firestorm's: it wants its
+joystick switched on in its own preferences, and `Pads::apply` logs the first report that is
+not at rest, which is the line that tells the two cases apart.

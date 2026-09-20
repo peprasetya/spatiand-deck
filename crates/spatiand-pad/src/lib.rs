@@ -95,6 +95,9 @@ const ABS_TILT_Y: u16 = 0x1B;
 /// The spare axes, in the order [`Report::extra`] carries them.
 pub const EXTRA_AXES: [u16; 4] = [ABS_RUDDER, ABS_WHEEL, ABS_TILT_X, ABS_TILT_Y];
 
+/// The D-pad as four buttons, for [`Shape::EightAxis`]: up, down, left, right.
+const DPAD_CODES: [u16; 4] = [0x220, 0x221, 0x222, 0x223];
+
 const UI_SET_EVBIT: u64 = 0x4004_5564;
 const UI_SET_KEYBIT: u64 = 0x4004_5565;
 const UI_SET_ABSBIT: u64 = 0x4004_5567;
@@ -164,6 +167,35 @@ pub const BUTTON_CODES: [u16; 11] = [
     0x13C, // guide
 ];
 
+/// How many axes the device publishes, and what carries the D-pad.
+///
+/// The shape of a uinput device is fixed when it is created and a program reads it once, so
+/// this is chosen before anything is launched and never changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shape {
+    /// Everything: ten axes and a hat. What a game expects, and what a game gets.
+    #[default]
+    Full,
+    /// Exactly eight axes, no hat, and the D-pad as four buttons.
+    ///
+    /// **For viewers built on `libndofdev`** — Second Life's and Firestorm's joystick library.
+    /// It copies SDL's axes into a fixed `axes[8]` and does not check the bound: the ten axes
+    /// of a [`Full`](Shape::Full) pad plus a hat's two values are twelve, and the last four
+    /// are written past the end of that array, over the buttons that follow it. They are then
+    /// overwritten by its button loop, so nothing is visibly wrong and the D-pad is simply
+    /// invisible — but it is somebody else's memory being written, and which four axes
+    /// survive depends on a struct layout nobody here controls.
+    ///
+    /// Eight axes fit exactly. In evdev's own order they are what such a viewer expects to
+    /// bind: **0 left X, 1 left Y, 2 left trigger, 3 right X, 4 right Y, 5 right trigger,
+    /// 6 rudder, 7 wheel** — the last two being [`Report::extra`]`[0]` and `[1]`, which is
+    /// where a head goes. `extra[2]` and `extra[3]` have nowhere to be and are not sent.
+    ///
+    /// The D-pad becomes four ordinary buttons, after the eleven in [`BUTTON_CODES`], which
+    /// also makes it usable in a viewer for the first time.
+    EightAxis,
+}
+
 /// The pad's whole state.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Report {
@@ -204,11 +236,39 @@ struct Effect {
 
 pub struct VirtualPad {
     fd: OwnedFd,
+    shape: Shape,
     /// Every axis and button as last written, so only changes are sent.
     written: HashMap<(u16, u16), i32>,
     effects: HashMap<i16, Effect>,
     playing: HashMap<i16, Instant>,
     rumble: (u16, u16),
+}
+
+/// Every absolute axis the device publishes, with its range.
+///
+/// A program reads these in ascending code order, whatever order they were declared in, so
+/// what an application sees as "axis 3" is decided here and nowhere else. See [`Shape`].
+fn axes_of(shape: Shape) -> Vec<(u16, i32, i32, i32, i32)> {
+    let stick = |code: u16| (code, -32768, 32767, 16, 128);
+    let mut axes = vec![
+        stick(ABS_X),
+        stick(ABS_Y),
+        stick(ABS_RX),
+        stick(ABS_RY),
+        (ABS_Z, 0, 255, 0, 0),
+        (ABS_RZ, 0, 255, 0, 0),
+        stick(EXTRA_AXES[0]),
+        stick(EXTRA_AXES[1]),
+    ];
+    if shape == Shape::Full {
+        axes.extend([
+            (ABS_HAT0X, -1, 1, 0, 0),
+            (ABS_HAT0Y, -1, 1, 0, 0),
+            stick(EXTRA_AXES[2]),
+            stick(EXTRA_AXES[3]),
+        ]);
+    }
+    axes
 }
 
 fn ioctl_ptr(fd: i32, request: u64, arg: *mut libc::c_void) -> io::Result<()> {
@@ -232,6 +292,10 @@ impl VirtualPad {
         Self::create_as(&Identity::default())
     }
 
+    pub fn create_as(identity: &Identity) -> io::Result<Self> {
+        Self::create_with(identity, Shape::default())
+    }
+
     /// Create the pad under a different name and identity.
     ///
     /// Exists because which identity a game's runtime accepts is not something that can be
@@ -239,7 +303,8 @@ impl VirtualPad {
     /// handle, Proton reads the same list, and a device is either on the right side of it or
     /// invisible. Finding out which side takes a device, a game, and a `/proc` listing — see
     /// `examples/virtual-pad.rs`, which is how that experiment is run.
-    pub fn create_as(identity: &Identity) -> io::Result<Self> {
+    /// ...and in a chosen [`Shape`]. See it for why a pad might want fewer axes.
+    pub fn create_with(identity: &Identity, shape: Shape) -> io::Result<Self> {
         let path = std::ffi::CString::new("/dev/uinput").unwrap();
         let raw = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC) };
         if raw < 0 {
@@ -254,23 +319,14 @@ impl VirtualPad {
         for code in BUTTON_CODES {
             ioctl_int(f, UI_SET_KEYBIT, code as _)?;
         }
+        if shape == Shape::EightAxis {
+            for code in DPAD_CODES {
+                ioctl_int(f, UI_SET_KEYBIT, code as _)?;
+            }
+        }
         ioctl_int(f, UI_SET_FFBIT, FF_RUMBLE as _)?;
         ioctl_int(f, UI_SET_FFBIT, FF_GAIN as _)?;
-        let axes: [(u16, i32, i32, i32, i32); 12] = [
-            (ABS_X, -32768, 32767, 16, 128),
-            (ABS_Y, -32768, 32767, 16, 128),
-            (ABS_RX, -32768, 32767, 16, 128),
-            (ABS_RY, -32768, 32767, 16, 128),
-            (ABS_Z, 0, 255, 0, 0),
-            (ABS_RZ, 0, 255, 0, 0),
-            (ABS_HAT0X, -1, 1, 0, 0),
-            (ABS_HAT0Y, -1, 1, 0, 0),
-            (EXTRA_AXES[0], -32768, 32767, 16, 128),
-            (EXTRA_AXES[1], -32768, 32767, 16, 128),
-            (EXTRA_AXES[2], -32768, 32767, 16, 128),
-            (EXTRA_AXES[3], -32768, 32767, 16, 128),
-        ];
-        for (code, min, max, fuzz, flat) in axes {
+        for (code, min, max, fuzz, flat) in axes_of(shape) {
             ioctl_int(f, UI_SET_ABSBIT, code as _)?;
             // struct uinput_abs_setup { u16 code; (pad) struct input_absinfo { s32 value, min,
             // max, fuzz, flat, resolution } }
@@ -297,14 +353,19 @@ impl VirtualPad {
         ioctl_ptr(f, UI_DEV_SETUP, setup.as_mut_ptr().cast())?;
         ioctl_int(f, UI_DEV_CREATE, 0)?;
         log::info!(
-            "virtual gamepad created: {} ({:04x}:{:04x})",
+            "virtual gamepad created: {} ({:04x}:{:04x}), {}",
             identity.name,
             identity.vendor,
-            identity.product
+            identity.product,
+            match shape {
+                Shape::Full => "ten axes and a hat",
+                Shape::EightAxis => "eight axes, D-pad as buttons",
+            }
         );
 
         Ok(Self {
             fd,
+            shape,
             written: HashMap::new(),
             effects: HashMap::new(),
             playing: HashMap::new(),
@@ -330,13 +391,29 @@ impl VirtualPad {
             (EV_ABS, ABS_RY, -stick(report.right.1)),
             (EV_ABS, ABS_Z, trigger(report.left_trigger)),
             (EV_ABS, ABS_RZ, trigger(report.right_trigger)),
-            (EV_ABS, ABS_HAT0X, hat(report.dpad_left, report.dpad_right)),
-            (EV_ABS, ABS_HAT0Y, hat(report.dpad_up, report.dpad_down)),
             (EV_ABS, EXTRA_AXES[0], stick(report.extra[0])),
             (EV_ABS, EXTRA_AXES[1], stick(report.extra[1])),
-            (EV_ABS, EXTRA_AXES[2], stick(report.extra[2])),
-            (EV_ABS, EXTRA_AXES[3], stick(report.extra[3])),
         ]);
+        let dpad = [
+            report.dpad_up,
+            report.dpad_down,
+            report.dpad_left,
+            report.dpad_right,
+        ];
+        match self.shape {
+            Shape::Full => wanted.extend([
+                (EV_ABS, ABS_HAT0X, hat(report.dpad_left, report.dpad_right)),
+                (EV_ABS, ABS_HAT0Y, hat(report.dpad_up, report.dpad_down)),
+                (EV_ABS, EXTRA_AXES[2], stick(report.extra[2])),
+                (EV_ABS, EXTRA_AXES[3], stick(report.extra[3])),
+            ]),
+            Shape::EightAxis => wanted.extend(
+                DPAD_CODES
+                    .iter()
+                    .zip(dpad)
+                    .map(|(code, on)| (EV_KEY, *code, on as i32)),
+            ),
+        }
         let mut bytes = Vec::new();
         for (kind, code, value) in wanted {
             if self.written.get(&(kind, code)) != Some(&value) {
@@ -599,5 +676,56 @@ mod tests {
         assert_eq!(&e[16..18], &3u16.to_le_bytes());
         assert_eq!(&e[18..20], &4u16.to_le_bytes());
         assert_eq!(&e[20..24], &(-5i32).to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    /// What an application reads is the axes in ascending code order.
+    fn as_seen(shape: Shape) -> Vec<u16> {
+        let mut codes: Vec<u16> = axes_of(shape)
+            .into_iter()
+            .map(|(code, ..)| code)
+            .filter(|code| !matches!(*code, ABS_HAT0X | ABS_HAT0Y))
+            .collect();
+        codes.sort_unstable();
+        codes
+    }
+
+    #[test]
+    fn eight_axes_means_eight_and_in_the_order_a_viewer_binds() {
+        // 0 left X, 1 left Y, 2 left trigger, 3 right X, 4 right Y, 5 right trigger,
+        // 6 rudder, 7 wheel — and no hat, so nothing is written past `axes[8]`.
+        assert_eq!(
+            as_seen(Shape::EightAxis),
+            vec![ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ, ABS_RUDDER, ABS_WHEEL]
+        );
+        assert!(!axes_of(Shape::EightAxis)
+            .iter()
+            .any(|(code, ..)| matches!(*code, ABS_HAT0X | ABS_HAT0Y)));
+    }
+
+    #[test]
+    fn the_head_is_on_the_last_two_of_them() {
+        // `extra[0]` and `extra[1]` are axes 6 and 7, which is where an absolute head yaw and
+        // pitch go. The other two spares have nowhere to be on this shape.
+        let seen = as_seen(Shape::EightAxis);
+        assert_eq!(seen[6], EXTRA_AXES[0]);
+        assert_eq!(seen[7], EXTRA_AXES[1]);
+    }
+
+    #[test]
+    fn a_full_pad_still_has_everything() {
+        assert_eq!(as_seen(Shape::Full).len(), 10);
+        assert_eq!(axes_of(Shape::Full).len(), 12);
+    }
+
+    #[test]
+    fn the_dpad_buttons_follow_the_others() {
+        // libndofdev numbers buttons in code order, so these are 11..14 — after the eleven a
+        // gamepad has.
+        assert!(DPAD_CODES.iter().all(|d| BUTTON_CODES.iter().all(|b| b < d)));
     }
 }

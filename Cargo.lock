@@ -3955,6 +3955,7 @@ dependencies = [
  "serde_json",
  "smithay",
  "spatiand-host-catalog",
+ "spatiand-pad",
  "spatiand-platform",
  "spatiand-stream",
  "tokio",

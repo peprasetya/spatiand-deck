@@ -16,11 +16,24 @@
 //! [`Pads::rumble`] is polled every time round the host's loop. What it returns goes back to
 //! the session, which owns the only motors in this arrangement.
 //!
+//! **Eight axes, and the D-pad as buttons.** The applications this host is for include Second
+//! Life viewers, whose joystick library copies the axes into a fixed `axes[8]` without
+//! checking the bound — so a pad with ten axes and a hat writes four values over whatever
+//! follows that array. [`Shape::EightAxis`] fits exactly, and in the order such a viewer
+//! expects to bind: left stick, left trigger, right stick, right trigger, then the two spare
+//! axes a head goes on. Nothing is lost that a remote application could have used, and the
+//! D-pad becomes usable in a viewer for the first time.
+//!
+//! **It is called "Spatiand Gamepad"**, because that is what it is and it is what shows up in
+//! an application's joystick list. It keeps Steam's virtual-gamepad *identity* — the numbers,
+//! not the name — because that is what decides whether a runtime hands the device to the
+//! application or keeps it for itself; see `spatiand_pad::NAME` for the measurement.
+//!
 //! Without `/dev/uinput` — a container, a machine whose `uinput` module is not loaded, a user
 //! without permission — this says so once and everything else carries on. The applications
 //! run; they simply see no controller.
 
-use spatiand_pad::{Report, VirtualPad};
+use spatiand_pad::{Identity, Report, Shape, VirtualPad};
 use spatiand_stream::Pad;
 
 pub struct Pads {
@@ -36,9 +49,15 @@ pub struct Pads {
 impl Pads {
     /// Create the pad, or say why there is none.
     pub fn start() -> Pads {
-        let pad = match VirtualPad::create() {
+        let identity = Identity {
+            name: "Spatiand Gamepad".into(),
+            ..Identity::default()
+        };
+        let pad = match VirtualPad::create_with(&identity, Shape::EightAxis) {
             Ok(pad) => {
-                log::info!("gamepad: applications here will see one controller");
+                log::info!(
+                    "gamepad: applications here will see one controller, with eight axes"
+                );
                 Some(pad)
             }
             Err(e) => {
@@ -55,10 +74,6 @@ impl Pads {
             complained: false,
             played: false,
         }
-    }
-
-    pub fn exists(&self) -> bool {
-        self.pad.is_some()
     }
 
     /// What the session says the wearer is holding.
@@ -171,6 +186,5 @@ mod tests {
         });
         pads.rest();
         assert_eq!(pads.rumble(), None);
-        assert!(!pads.exists());
     }
 }
