@@ -835,3 +835,45 @@ should not depend on a single mechanism:
 **[verified]** against a sandboxed host with `probe-session`: hello, catalogue, launch and a
 mid-session resize all arrive over the one stream, and the host logs
 `window 1 resized: 1280x800 -> 900x620`.
+
+## Reading the link: what the cadence line says — 2026-09-21
+
+Every two seconds the session writes one line per host to
+`~/.local/share/spatiand-session.log`. It used to describe only the pictures. It now describes
+the link as well, because a window that stops updating looks identical whether the network gave
+up or the far end simply had nothing to send, and telling those two apart by hand cost an
+evening:
+
+```text
+remote <host>: 100 shown in 2.0s, 2.3 ms decoding, 1 overtaken, 0 lost whole,
+  10 skipped for a keyframe, rtt 11.1 ms, 12.4 Mbit/s down 0.03 up,
+  0/9021 packets lost, 0 congestion, buffers held [3:1 2:2], 0 waiting to decode
+```
+
+`rtt`, throughput, packets lost and congestion events come from QUIC itself and are per
+interval, not since the session began. **A stall with the round trip and loss unchanged is not
+a network fault** — it is the host, or the application, having nothing to send.
+
+### What seventy-six minutes of Firestorm actually measured
+
+The first long session read with this in mind, and it is worth writing down because almost
+none of it was where it was expected to be.
+
+- **No disconnects at all.** Not one in seventy-six minutes, where the day before there had
+  been eighteen. Fifteen seconds of tolerance was the whole of that fix.
+- **The link is very good.** 159,349 frames shown, **12 lost whole**. Round trip `p50` 11.2 ms,
+  `p90` 18.5 ms.
+- **But it is not always good.** `p99` was 671 ms and the worst 2204 ms — 2.1% of samples over
+  100 ms. Twelve of the thirty stalls line up with exactly those spikes. That is real, it is
+  ours, and it is the thing still to fix: at a ceiling of 25 Mbit/s the link is being driven
+  into a queue somewhere and the round trip goes with it.
+- **The other eighteen stalls were not the link at all, and not this program either.** Every
+  one sampled lines up with Firestorm's own trouble reaching Second Life — `Timeout was
+  reached` from its HTTP layer, region crossings, teleports. Sixteen such timeouts during one
+  cluster of them. Its own statistics for the session: 238 ms ping to the simulator and 5,262
+  dropped packets. The viewer stops drawing, so there is nothing to encode, so the window
+  freezes and the sound stops with it, and every number on our side stays perfect.
+
+The lesson worth keeping is the third one. **A remote window freezing is not evidence about
+the remote link.** Three separate networks are in play — the headset to the host, the host to
+the internet, and the application to whatever it talks to — and only the first is ours.

@@ -249,7 +249,22 @@ impl Graph {
     }
 }
 
+/// Read the graph, allowing for the one failure that is not a failure.
+///
+/// `pw-dump` is a child process, and waiting for a child can come back "No child processes"
+/// when something else in this program has already reaped it — the host launches applications
+/// and collects them, and the two races occasionally. It happened twice in one evening and
+/// meant nothing either time: the sound was in the right place before and after. So a failed
+/// read is tried once more before it is believed, which turns a race into a delay of a few
+/// milliseconds instead of a warning about sound that is playing perfectly well.
 fn dump() -> Result<Graph, String> {
+    match once() {
+        Ok(graph) => Ok(graph),
+        Err(_) => once(),
+    }
+}
+
+fn once() -> Result<Graph, String> {
     let out = Command::new("pw-dump")
         .output()
         .map_err(|e| format!("pw-dump: {e}"))?;

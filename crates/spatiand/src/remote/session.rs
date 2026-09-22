@@ -268,6 +268,9 @@ async fn serve(
     let (out, outbox) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
     let writer = tokio::spawn(talk(connection.clone(), outbox));
     let mut said = Instant::now();
+    // What the link had carried by the last report, so each one can say what happened since
+    // rather than since the session began. See the cadence line below.
+    let mut carried = connection.stats();
     let mut worked = Instant::now();
     let mut frames = 0u64;
     let mut decode_ms: Vec<f32> = Vec::new();
@@ -720,10 +723,26 @@ async fn serve(
                     .map(|id| format!("{id}:{}", client.in_flight(*id)))
                     .collect();
                 let pending: usize = streams.values().map(|s| s.queue.len()).sum();
+                // How the link itself behaved, which the rest of this line cannot show: a
+                // picture that stops arriving looks the same whether the network gave up or
+                // the far end simply had nothing to send, and telling those apart by hand has
+                // cost a whole evening. Throughput and loss say which.
+                let now = connection.stats();
+                let since = |after: u64, before: u64| after.saturating_sub(before);
+                let down = since(now.udp_rx.bytes, carried.udp_rx.bytes) as f32 * 8e-6 / secs;
+                let up = since(now.udp_tx.bytes, carried.udp_tx.bytes) as f32 * 8e-6 / secs;
+                let sent = since(now.path.sent_packets, carried.path.sent_packets);
+                let lost = since(now.path.lost_packets, carried.path.lost_packets);
+                let squeezed = since(
+                    now.path.congestion_events,
+                    carried.path.congestion_events,
+                );
+                carried = now;
                 log::info!(
                     "remote {}: {frames} shown in {secs:.1}s, {mean:.1} ms decoding, {dropped} \
-                     overtaken, {gaps} lost whole, {skipped} skipped for a keyframe, rtt {:.1} ms, buffers held \
-                     [{}], {pending} waiting to decode",
+                     overtaken, {gaps} lost whole, {skipped} skipped for a keyframe, rtt {:.1} ms, \
+                     {down:.1} Mbit/s down {up:.2} up, {lost}/{sent} packets lost, {squeezed} \
+                     congestion, buffers held [{}], {pending} waiting to decode",
                     config.host,
                     connection.rtt().as_secs_f32() * 1000.0,
                     waiting.join(" ")
