@@ -110,12 +110,158 @@ pub fn parse_memory(text: &str) -> Option<f32> {
     Some(((total - available) / total) as f32)
 }
 
+/// Two rates that belong together, in bytes a second, with a short history.
+///
+/// A pair rather than two [`Series`], because they share one graph and one scale: download and
+/// upload drawn against different ceilings would make a trickle of one look as big as a flood
+/// of the other. And bytes rather than a fraction, because a link or a disk has no natural
+/// "100%" to divide by -- the graph scales to what the history has actually seen.
+#[derive(Debug, Clone)]
+pub struct Rates {
+    pub label: &'static str,
+    /// What each half is called in the reading, in the order they are pushed.
+    pub names: [&'static str; 2],
+    samples: VecDeque<[f32; 2]>,
+}
+
+/// The least a rate graph is scaled to, in bytes a second.
+///
+/// Without a floor an idle link scales its own background chatter to full height, and a panel
+/// that shows a few hundred bytes of mDNS as a wall of bars says "busy" when nothing is.
+pub const RATE_FLOOR: f32 = 256.0 * 1024.0;
+
+impl Rates {
+    pub fn new(label: &'static str, names: [&'static str; 2]) -> Self {
+        Self {
+            label,
+            names,
+            samples: VecDeque::with_capacity(HISTORY),
+        }
+    }
+
+    pub fn push(&mut self, value: [f32; 2]) {
+        if self.samples.len() == HISTORY {
+            self.samples.pop_front();
+        }
+        let clean = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+        self.samples.push_back([clean(value[0]), clean(value[1])]);
+    }
+
+    pub fn latest(&self) -> [f32; 2] {
+        self.samples.back().copied().unwrap_or([0.0, 0.0])
+    }
+
+    pub fn samples(&self) -> impl Iterator<Item = [f32; 2]> + '_ {
+        self.samples.iter().copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// The top of the graph: the most either half has reached in the history shown.
+    pub fn scale(&self) -> f32 {
+        self.samples
+            .iter()
+            .flat_map(|pair| pair.iter().copied())
+            .fold(RATE_FLOOR, f32::max)
+    }
+}
+
+/// A rate as a person reads it: `740 KB/s`, `12 MB/s`, `1.4 MB/s`.
+///
+/// Binary units, as every file manager and `iftop` show them. Two significant figures below
+/// ten and none above, so the reading does not flicker in its last digit once a second.
+pub fn format_rate(bytes_per_second: f32) -> String {
+    let b = bytes_per_second.max(0.0);
+    const K: f32 = 1024.0;
+    let scaled = |v: f32, unit: &str| {
+        if v < 9.95 {
+            format!("{v:.1} {unit}")
+        } else {
+            format!("{v:.0} {unit}")
+        }
+    };
+    if b < K {
+        format!("{b:.0} B/s")
+    } else if b < K * K {
+        format!("{:.0} KB/s", b / K)
+    } else if b < K * K * K {
+        scaled(b / (K * K), "MB/s")
+    } else {
+        scaled(b / (K * K * K), "GB/s")
+    }
+}
+
+/// Bytes received and sent, summed over the interfaces `counts` accepts, from `/proc/net/dev`.
+///
+/// Which interfaces count is the caller's business. Summing all of them double-counts: a
+/// packet sent over Tailscale appears once on `tailscale0` and again, wrapped, on `wlan0`,
+/// and loopback carries nothing that ever left the machine.
+pub fn parse_net(text: &str, counts: impl Fn(&str) -> bool) -> Option<[u64; 2]> {
+    let mut total = [0u64; 2];
+    let mut any = false;
+    // The first two lines are column headings. Each interface is `name: rx... tx...`, where
+    // a large counter can run straight into the colon, so split there rather than on space.
+    for line in text.lines().skip(2) {
+        let Some((name, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if !counts(name) {
+            continue;
+        }
+        let fields: Vec<u64> = rest
+            .split_whitespace()
+            .filter_map(|v| v.parse().ok())
+            .collect();
+        // Receive bytes first, transmit bytes ninth: eight receive columns, then transmit.
+        if fields.len() < 9 {
+            continue;
+        }
+        total[0] += fields[0];
+        total[1] += fields[8];
+        any = true;
+    }
+    any.then_some(total)
+}
+
+/// Bytes read and written, summed over the disks `counts` accepts, from `/proc/diskstats`.
+///
+/// The kernel counts in 512-byte sectors here whatever the device's real sector size is.
+/// Partitions have to be left out by the caller, or every byte is counted once for the disk
+/// and again for the partition it landed on.
+pub fn parse_disk(text: &str, counts: impl Fn(&str) -> bool) -> Option<[u64; 2]> {
+    let mut total = [0u64; 2];
+    let mut any = false;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // major minor name, reads merged sectors-read ms, writes merged sectors-written ...
+        if fields.len() < 10 || !counts(fields[2]) {
+            continue;
+        }
+        let (Ok(read), Ok(written)) = (fields[5].parse::<u64>(), fields[9].parse::<u64>()) else {
+            continue;
+        };
+        total[0] += read * 512;
+        total[1] += written * 512;
+        any = true;
+    }
+    any.then_some(total)
+}
+
 /// Everything the sidecar shows, sampled on a timer.
 pub struct Monitors {
     pub cpu: Series,
     pub gpu: Series,
     pub memory: Series,
+    /// Received and sent, over the machine's real network hardware.
+    pub network: Rates,
+    /// Read and written, over its real disks.
+    pub disk: Rates,
     previous_cpu: CpuTotals,
+    previous_net: Option<[u64; 2]>,
+    previous_disk: Option<[u64; 2]>,
     last_sample: std::time::Instant,
 }
 
@@ -131,17 +277,39 @@ impl Monitors {
             cpu: Series::new("CPU"),
             gpu: Series::new("GPU"),
             memory: Series::new("MEM"),
+            network: Rates::new("NET", ["\u{2193}", "\u{2191}"]),
+            disk: Rates::new("DISK", ["R", "W"]),
             previous_cpu: read_cpu().unwrap_or_default(),
+            previous_net: read_net(),
+            previous_disk: read_disk(),
             last_sample: std::time::Instant::now(),
         }
     }
 
     /// Take a reading if enough time has passed. Returns whether anything changed.
     pub fn tick(&mut self) -> bool {
-        if self.last_sample.elapsed() < std::time::Duration::from_secs(1) {
+        let elapsed = self.last_sample.elapsed();
+        if elapsed < std::time::Duration::from_secs(1) {
             return false;
         }
         self.last_sample = std::time::Instant::now();
+
+        // Per second of the interval actually measured, not per tick. The loop that calls this
+        // can stall for a moment, and dividing a 1.4 s interval's bytes by one second would
+        // show a spike that never happened.
+        let seconds = elapsed.as_secs_f32();
+        let rate = |now: Option<[u64; 2]>, before: &mut Option<[u64; 2]>| -> [f32; 2] {
+            let rates = match (now, *before) {
+                // Saturating, because a counter goes backwards when an interface is replaced
+                // or a disk removed, and that is not a negative rate.
+                (Some(n), Some(b)) => [0, 1].map(|i| n[i].saturating_sub(b[i]) as f32 / seconds),
+                _ => [0.0, 0.0],
+            };
+            *before = now;
+            rates
+        };
+        self.network.push(rate(read_net(), &mut self.previous_net));
+        self.disk.push(rate(read_disk(), &mut self.previous_disk));
 
         if let Some(now) = read_cpu() {
             let busy = now.busy.saturating_sub(self.previous_cpu.busy) as f32;
@@ -163,6 +331,29 @@ fn read_cpu() -> Option<CpuTotals> {
 
 fn read_memory() -> Option<f32> {
     parse_memory(&std::fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+/// Only interfaces backed by hardware, which is what `device` under sysfs means. That leaves
+/// out loopback, Tailscale, bridges and VPNs, all of which carry traffic that is also counted
+/// on the real interface underneath.
+fn read_net() -> Option<[u64; 2]> {
+    parse_net(&std::fs::read_to_string("/proc/net/dev").ok()?, |name| {
+        std::path::Path::new("/sys/class/net")
+            .join(name)
+            .join("device")
+            .exists()
+    })
+}
+
+/// Only whole physical disks: those under `/sys/block` with a device behind them. Partitions
+/// are not listed there, and loop, zram and device-mapper nodes have no `device`.
+fn read_disk() -> Option<[u64; 2]> {
+    parse_disk(&std::fs::read_to_string("/proc/diskstats").ok()?, |name| {
+        std::path::Path::new("/sys/block")
+            .join(name)
+            .join("device")
+            .exists()
+    })
 }
 
 /// GPU utilisation, if the driver publishes it. amdgpu does; many do not.
@@ -318,6 +509,58 @@ mod tests {
         assert_eq!(parse_volume("Volume: 0.45\n"), Some(0.45));
         assert_eq!(parse_volume("Volume: 0.45 [MUTED]\n"), Some(0.45));
         assert_eq!(parse_volume("nonsense"), None);
+    }
+
+    /// `/proc/net/dev` as a Deck on Wi-Fi with Tailscale up prints it, including a receive
+    /// counter large enough to run into its colon.
+    const NET_DEV: &str = "\
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo:  901234     100    0    0    0     0          0         0   901234     100    0    0    0     0       0          0
+ wlan0:12345678901 9000    0    0    0     0          0         0  5550000    4000    0    0    0     0       0          0
+tailscale0: 3000000   2000    0    0    0     0          0         0  1000000    1000    0    0    0     0       0          0
+";
+
+    #[test]
+    fn network_traffic_is_counted_once_on_the_real_interface() {
+        let only_wlan = parse_net(NET_DEV, |name| name == "wlan0");
+        assert_eq!(only_wlan, Some([12_345_678_901, 5_550_000]));
+    }
+
+    #[test]
+    fn no_real_interface_is_no_reading_rather_than_zero() {
+        assert_eq!(parse_net(NET_DEV, |_| false), None);
+    }
+
+    const DISKSTATS: &str = "\
+ 259       0 nvme0n1 5000 10 400000 900 3000 20 200000 800 0 1000 1700 0 0 0 0 0 0
+ 259       1 nvme0n1p1 100 0 8000 10 50 0 4000 5 0 20 15 0 0 0 0 0 0
+   7       0 loop0 20 0 160 1 0 0 0 0 0 1 1 0 0 0 0 0 0
+";
+
+    #[test]
+    fn a_disk_is_counted_in_bytes_and_its_partitions_are_not_counted_again() {
+        let whole = parse_disk(DISKSTATS, |name| name == "nvme0n1");
+        assert_eq!(whole, Some([400_000 * 512, 200_000 * 512]));
+    }
+
+    #[test]
+    fn a_rate_reads_the_way_a_person_says_it() {
+        assert_eq!(format_rate(0.0), "0 B/s");
+        assert_eq!(format_rate(740.0 * 1024.0), "740 KB/s");
+        assert_eq!(format_rate(1.44 * 1024.0 * 1024.0), "1.4 MB/s");
+        assert_eq!(format_rate(12.3 * 1024.0 * 1024.0), "12 MB/s");
+    }
+
+    #[test]
+    fn an_idle_link_is_not_drawn_as_a_busy_one() {
+        let mut rates = Rates::new("NET", ["d", "u"]);
+        rates.push([300.0, 40.0]);
+        assert_eq!(rates.scale(), RATE_FLOOR, "background chatter must not fill the graph");
+        rates.push([4.0e6, 1.0e5]);
+        assert_eq!(rates.scale(), 4.0e6);
+        rates.push([f32::NAN, -5.0]);
+        assert_eq!(rates.latest(), [0.0, 0.0]);
     }
 
     #[test]

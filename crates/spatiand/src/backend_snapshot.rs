@@ -22,7 +22,8 @@
 //!
 //! `sidecar` draws the Deck's own panel instead of the glasses, at its real 800x1280, and
 //! takes `SPATIAND_VIEW_PAGE=keyboard` for its second page and `SPATIAND_VIEW_EXIT=0..1` to
-//! catch the exit button part-way through its hold.
+//! catch the exit button part-way through its hold. `SPATIAND_VIEW_MENU=output|input` draws
+//! that sound picker with its list open.
 //!
 //! `SPATIAND_VIEW_CLICK=off` draws either keyboard with its sound turned off, which is the
 //! only way to look at the muted speaker without a headset and a finger.
@@ -995,9 +996,42 @@ fn draw_sidecar(
         glasses: Some(0.40),
         volume: Some(0.75),
     };
-    let audio = crate::sidecar::Audio::default();
+    // Made-up devices and traffic, so the pickers and the rate graphs have something to show.
+    // `SPATIAND_VIEW_MENU=output` or `=input` draws that picker's list open.
+    let device = |id: u32, name: &str, is_default: bool| crate::system::AudioDevice {
+        id,
+        name: name.into(),
+        is_default,
+    };
+    let audio = crate::sidecar::Audio {
+        outputs: vec![
+            device(62, "Steam Deck Headphones", false),
+            device(66, "Steam Deck Speakers", false),
+            device(81, "XREAL Air 2 Pro Analog Stereo With A Very Long Driver Name", true),
+            device(90, "Headset (Spatiand)", false),
+        ],
+        inputs: vec![
+            device(50, "Glasses Microphone", true),
+            device(72, "Steam Deck Microphone", false),
+        ],
+    };
+    match std::env::var("SPATIAND_VIEW_MENU").as_deref() {
+        Ok("output") => ui.open_picker(crate::system::Direction::Output),
+        Ok("input") => ui.open_picker(crate::system::Direction::Input),
+        _ => {}
+    }
     let mut monitors = crate::system::Monitors::new();
     monitors.tick();
+    for i in 0..crate::system::HISTORY {
+        let t = i as f32 / 7.0;
+        monitors
+            .network
+            .push([1.6e6 * (1.0 + t.sin()), 9.0e4 * (1.0 + (t * 0.7).cos())]);
+        monitors.disk.push([
+            if i % 23 < 3 { 4.0e7 } else { 2.0e5 },
+            if i % 11 == 0 { 1.2e7 } else { 0.0 },
+        ]);
+    }
 
     // The startup screen is drawn instead of the running one, not as a page of it: none of
     // what the sidecar normally shows exists while a session is still coming up.

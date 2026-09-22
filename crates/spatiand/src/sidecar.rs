@@ -36,6 +36,13 @@ const TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.13];
 const ACCENT: [f32; 4] = [0.42, 0.68, 1.0, 1.0];
 /// The graph fill, and the same colour again at a fraction of its alpha for the area under it.
 const GRAPH_INK: [f32; 4] = [0.42, 0.68, 1.0, 0.85];
+/// The second half of a rate graph -- upload, or disk writes -- and its reading. Warm against
+/// the accent's cool, so the two halves are told apart by colour alone and the reading needs no
+/// legend beyond its own arrow.
+const SECOND_INK: [f32; 4] = [1.0, 0.72, 0.38, 0.85];
+/// An open drop-down's list. Opaque, unlike a card, because it lies over the graphs and
+/// anything showing through it would be read as part of the list.
+const MENU: [f32; 4] = [0.105, 0.12, 0.155, 1.0];
 
 /// Corner radii. Cards are gently rounded; anything that takes a touch is a full capsule,
 /// which is the difference the eye reads as "this one is a control".
@@ -71,6 +78,12 @@ const DEVICE_TEXT: f32 = 22.0;
 /// How tall one device row is. A finger has to land on it, so this is the same order as a
 /// slider card rather than the size the text needs.
 const DEVICE_ROW: f32 = 54.0;
+/// The chosen device's name on a closed picker. Larger than a list entry, because this is the
+/// one that is glanced at to check where the sound is going.
+const PICKER_TEXT: f32 = 28.0;
+/// A rate reading. Smaller than a card's usual reading because a traffic card carries two of
+/// them side by side.
+const RATE_TEXT: f32 = 25.0;
 /// The page-swap button in the header.
 const PAGE_BUTTON_HEIGHT: f32 = 64.0;
 /// The header buttons carry a symbol rather than a word, so they are sized for the finger
@@ -141,6 +154,13 @@ pub struct Rect {
 impl Rect {
     fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+
+    fn overlaps(&self, other: &Rect) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
     }
 
     /// Where `x` sits across the rectangle, 0..1.
@@ -294,15 +314,23 @@ pub enum Action {
 /// walked the same `y += …` sequence separately. Three copies of a layout is three chances for
 /// a touch to land on the row above the one under the finger — the kind of bug that reads as a
 /// broken digitiser rather than as arithmetic.
+///
+/// Three columns under the header. On the left, what the machine is working at; in the
+/// middle, what it is moving -- network and disk -- with the two sound pickers at its foot; on
+/// the right, the three things a finger drags.
 pub struct Rows {
     pub header: Rect,
     /// The left column, one card per measurement.
     pub graphs: [Rect; 3],
-    /// The middle column, one card per knob, indexed by [`Knob::ALL`]. `None` where the machine
+    /// The middle column's upper two cards: network, then disk.
+    pub traffic: [Rect; 2],
+    /// The right column, one card per knob, indexed by [`Knob::ALL`]. `None` where the machine
     /// has no reading to show — a slider that moves nothing is worse than an absent one.
     pub sliders: [Option<Rect>; 3],
-    /// The right column, one card per direction, indexed by [`Direction::ALL`].
-    pub devices: [Rect; 2],
+    /// The two drop-downs at the foot of the middle column, indexed by [`Direction::ALL`].
+    pub pickers: [Rect; 2],
+    /// How high a picker's list may reach: the top of the column it opens over.
+    menu_ceiling: f32,
 }
 
 impl Rows {
@@ -321,48 +349,52 @@ impl Rows {
         }
     }
 
-    /// Where each entry in a device card is drawn, top to bottom.
-    ///
-    /// Only as many as fit. A list that overflowed its card would draw over the one below and
-    /// take touches meant for it, so the overflow is dropped rather than clipped — and
-    /// [`Rows::device_capacity`] is what the caller uses to say so out loud.
-    pub fn device_rows(card: Rect, count: usize) -> impl Iterator<Item = Rect> {
-        let top = card.y + CARD_PAD + LABEL_TEXT + CARD_PAD * 0.6;
-        let shown = count.min(Self::device_capacity(card));
-        (0..shown).map(move |i| Rect {
-            x: card.x + CARD_PAD * 0.5,
-            y: top + DEVICE_ROW * i as f32,
-            w: (card.w - CARD_PAD).max(1.0),
-            h: DEVICE_ROW,
-        })
-    }
-
-    /// How many entries a device card has room for.
-    pub fn device_capacity(card: Rect) -> usize {
-        let top = card.y + CARD_PAD + LABEL_TEXT + CARD_PAD * 0.6;
-        let room = (card.y + card.h - CARD_PAD * 0.5) - top;
-        (room / DEVICE_ROW).floor().max(0.0) as usize
-    }
-
-    pub fn device_card(&self, direction: Direction) -> Rect {
+    pub fn picker(&self, direction: Direction) -> Rect {
         match direction {
-            Direction::Output => self.devices[0],
-            Direction::Input => self.devices[1],
+            Direction::Output => self.pickers[0],
+            Direction::Input => self.pickers[1],
         }
     }
 
-    /// Which device entry is under a point.
-    pub fn device_at(&self, x: f32, y: f32, audio: &Audio) -> Option<(Direction, usize)> {
-        for direction in Direction::ALL {
-            let card = self.device_card(direction);
-            let count = audio.list(direction).len();
-            for (index, row) in Self::device_rows(card, count).enumerate() {
-                if row.contains(x, y) {
-                    return Some((direction, index));
-                }
-            }
-        }
-        None
+    /// Which drop-down is under a point.
+    pub fn picker_at(&self, x: f32, y: f32) -> Option<Direction> {
+        Direction::ALL
+            .into_iter()
+            .find(|d| self.picker(*d).contains(x, y))
+    }
+
+    /// The list a picker opens, and where each of its entries sits, top to bottom.
+    ///
+    /// It opens *upward*, over the traffic graphs, because the pickers are at the foot of the
+    /// panel and there is nothing below them to open into. Both lists hang from above the
+    /// upper picker, so neither ever covers the other picker -- the one that is open stays in
+    /// sight, lit, which is what says which list this is.
+    ///
+    /// Only as many entries as fit under the header. Overflow is dropped rather than drawn off
+    /// the top of the panel, where it could not be seen and would take the header's touches.
+    pub fn menu(&self, count: usize) -> (Rect, Vec<Rect>) {
+        let anchor = self.pickers[0];
+        let bottom = anchor.y - CARD_GAP * 0.5;
+        let room = (bottom - self.menu_ceiling - CARD_PAD).max(0.0);
+        let capacity = (room / DEVICE_ROW).floor() as usize;
+        // An empty list still opens, one row tall, so it can say that it is empty.
+        let shown = count.min(capacity).max(1);
+        let h = shown as f32 * DEVICE_ROW + CARD_PAD;
+        let card = Rect {
+            x: anchor.x,
+            y: bottom - h,
+            w: anchor.w,
+            h,
+        };
+        let rows = (0..count.min(capacity))
+            .map(|i| Rect {
+                x: card.x + CARD_PAD * 0.5,
+                y: card.y + CARD_PAD * 0.5 + DEVICE_ROW * i as f32,
+                w: (card.w - CARD_PAD).max(1.0),
+                h: DEVICE_ROW,
+            })
+            .collect();
+        (card, rows)
     }
 
     pub fn slider(&self, knob: Knob) -> Option<Rect> {
@@ -441,6 +473,8 @@ pub struct Sidecar {
     /// Which finger is holding the exit button, and since when. Cleared the moment it lifts or
     /// slides off, so backing out is simply a matter of moving away before it fills.
     exit_hold: Option<(usize, std::time::Instant)>,
+    /// Which sound picker has its list open, if either.
+    open: Option<Direction>,
 }
 
 impl Sidecar {
@@ -463,6 +497,7 @@ impl Sidecar {
             page: Page::default(),
             pressed: Vec::new(),
             exit_hold: None,
+            open: None,
         }
     }
 
@@ -472,6 +507,18 @@ impl Sidecar {
 
     pub fn show(&mut self, page: Page) {
         self.page = page;
+        self.open = None;
+    }
+
+    /// Open a picker's list as if it had been tapped. For the snapshot backend, which has no
+    /// finger to tap it with.
+    pub fn open_picker(&mut self, direction: Direction) {
+        self.open = Some(direction);
+    }
+
+    /// Which picker's list is open.
+    pub fn open(&self) -> Option<Direction> {
+        self.open
     }
 
     /// The button that swaps pages, at the right-hand end of the header.
@@ -603,13 +650,12 @@ impl Sidecar {
 
     /// Where every row sits. See [`Rows`].
     ///
-    /// Two columns of three cards, measurements on the left and controls on the right, under
-    /// a full-width header. The wearer's objection to the previous arrangement was that
-    /// everything ran the whole way across, and that is not only a matter of taste: a slider
-    /// 1200 px wide gives roughly twelve pixels per percent, so a thumb cannot place it to
-    /// better than a percent or two and the extra width buys nothing but the appearance of
-    /// technical seriousness. Half the width is still far finer than the ear or the eye can
-    /// tell apart, and it leaves room for the graphs to sit beside rather than below.
+    /// Three columns of three cards under a full-width header. The wearer's objection to an
+    /// earlier arrangement was that everything ran the whole way across, and that is not only a
+    /// matter of taste: a slider 1200 px wide gives roughly twelve pixels per percent, so a
+    /// thumb cannot place it to better than a percent or two and the extra width buys nothing
+    /// but the appearance of technical seriousness. A third of the width is still far finer
+    /// than the ear or the eye can tell apart.
     pub fn rows(&self, levels: Levels) -> Rows {
         let (width, height) = self.size;
         let full = width - MARGIN * 2.0;
@@ -622,12 +668,10 @@ impl Sidecar {
         };
         let top = MARGIN + HEADER_HEIGHT + HEADER_GAP;
 
-        // Three columns: what the machine is doing, what the wearer can change, and where the
-        // sound goes.
         let column = (full - COLUMN_GAP * 2.0) / 3.0;
         let middle = MARGIN + column + COLUMN_GAP;
         let right = middle + column + COLUMN_GAP;
-        // Both columns take the same three rows, so the two line up across the gutter. A grid
+        // Every column takes the same three rows, so they line up across the gutters. A grid
         // that agrees with itself is most of what separates this from the version that looked
         // like a readout.
         let available = (height - MARGIN - top).max(1.0);
@@ -638,24 +682,26 @@ impl Sidecar {
             w: column,
             h: card,
         };
-        // The device lists get the same column split two ways instead of three, because a list
-        // needs height and there are only two of them.
-        let tall = ((available - CARD_GAP) / 2.0).max(1.0);
-        let devices = std::array::from_fn(|i| Rect {
-            x: right,
-            y: top + (tall + CARD_GAP) * i as f32,
-            w: column,
-            h: tall,
-        });
 
         let graphs = std::array::from_fn(|i| slot(MARGIN, i));
+        let traffic = std::array::from_fn(|i| slot(middle, i));
+
+        // The pickers share the middle column's last row between them, so its foot lines up
+        // with the other two columns' last cards.
+        let foot = slot(middle, 2);
+        let half = ((foot.h - CARD_GAP) / 2.0).max(1.0);
+        let pickers = std::array::from_fn(|i| Rect {
+            y: foot.y + (half + CARD_GAP) * i as f32,
+            h: half,
+            ..foot
+        });
 
         // Absent readings close up rather than leaving their slot empty: a gap in the middle
         // of a column of three reads as something having failed to draw.
         let mut next = 0usize;
         let sliders = Knob::ALL.map(|knob| {
             levels.get(knob).map(|_| {
-                let r = slot(middle, next);
+                let r = slot(right, next);
                 next += 1;
                 r
             })
@@ -664,8 +710,10 @@ impl Sidecar {
         Rows {
             header,
             graphs,
+            traffic,
             sliders,
-            devices,
+            pickers,
+            menu_ceiling: top,
         }
     }
 
@@ -750,7 +798,7 @@ impl Sidecar {
                     // there is always a way back. A control that only exists on one of two
                     // pages is a way to get stranded on the other.
                     if self.page_button().contains(x, y) {
-                        self.page = self.page.other();
+                        self.show(self.page.other());
                         continue;
                     }
 
@@ -776,19 +824,39 @@ impl Sidecar {
                         continue;
                     }
 
+                    // A picker opens its list, or shuts it if it was already open, or swaps
+                    // to its own list if the other one was.
+                    if let Some(direction) = rows.picker_at(x, y) {
+                        self.open = (self.open != Some(direction)).then_some(direction);
+                        continue;
+                    }
+
+                    // While a list is open, the next touch belongs to it wherever it lands.
+                    // On an entry it chooses; anywhere else it only closes the list. Letting
+                    // that touch fall through to whatever lies beneath would mean dismissing a
+                    // list over the volume slider also set the volume.
+                    if let Some(direction) = self.open.take() {
+                        let devices = audio.list(direction);
+                        let (_, entries) = rows.menu(devices.len());
+                        // Chosen on the way down rather than on release. A list is a set of
+                        // buttons, not a slider, so there is nothing to drag and waiting for
+                        // the lift only adds a delay before the sound moves.
+                        if let Some(device) = entries
+                            .iter()
+                            .position(|r| r.contains(x, y))
+                            .and_then(|i| devices.get(i))
+                        {
+                            changed.push(Action::ChooseDevice(direction, device.id));
+                        }
+                        continue;
+                    }
+
                     // First finger down on a knob owns it. A second one arriving on the same
                     // bar must not steal it, or resting a palm mid-drag jumps the value.
                     if self.held.is_none() {
                         if let Some((knob, _)) = rows.knob_at(x, y) {
                             self.held = Some((c.slot, knob));
                             changed.push(Action::Moved(knob));
-                        } else if let Some((direction, index)) = rows.device_at(x, y, audio) {
-                            // Chosen on the way down rather than on release. A device list is
-                            // a set of buttons, not a slider, so there is nothing to drag and
-                            // waiting for the lift only adds a delay before the sound moves.
-                            if let Some(device) = audio.list(direction).get(index) {
-                                changed.push(Action::ChooseDevice(direction, device.id));
-                            }
                         }
                     }
                 }
@@ -1116,6 +1184,20 @@ impl Sidecar {
             self.draw_series(gl, quads, &projection, &layout, series, plot);
         }
 
+        for (rates, card) in [&monitors.network, &monitors.disk]
+            .into_iter()
+            .zip(rows.traffic)
+        {
+            round(card, CARD, CARD_RADIUS);
+            let plot = Rect {
+                x: card.x + CARD_PAD,
+                y: card.y + card.h * 0.42,
+                w: card.w - CARD_PAD * 2.0,
+                h: card.h * 0.58 - CARD_PAD,
+            };
+            self.draw_rates(gl, quads, &projection, &layout, rates, plot);
+        }
+
         for (knob, card) in Knob::ALL.into_iter().zip(rows.sliders) {
             let (Some(card), Some(value)) = (card, levels.get(knob)) else {
                 continue;
@@ -1150,17 +1232,33 @@ impl Sidecar {
             );
         }
 
+        // The pickers. Lit while their list is open, so it is plain which list is showing.
         for direction in Direction::ALL {
-            let card = rows.device_card(direction);
-            round(card, CARD, CARD_RADIUS);
+            let card = rows.picker(direction);
+            let lit = self.open == Some(direction);
+            round(
+                card,
+                if lit {
+                    [ACCENT[0], ACCENT[1], ACCENT[2], 0.22]
+                } else {
+                    CARD
+                },
+                CARD_RADIUS,
+            );
+        }
+
+        // The open list, last of the cards so it lies over the graphs it opens across.
+        if let Some(direction) = self.open {
             let devices = audio.list(direction);
-            for (device, row) in devices.iter().zip(Rows::device_rows(card, devices.len())) {
+            let (card, entries) = rows.menu(devices.len());
+            round(card, MENU, CARD_RADIUS);
+            for (device, row) in devices.iter().zip(entries) {
                 if !device.is_default {
                     continue;
                 }
                 // Only the chosen one is drawn. An unselected row is its text and nothing
-                // else, so the eye finds the current device by looking for the one thing on
-                // the card that is lit rather than by comparing five similar rows.
+                // else, so the eye finds the current device by looking for the one thing in
+                // the list that is lit rather than by comparing five similar rows.
                 round(row, [ACCENT[0], ACCENT[1], ACCENT[2], 0.22], row.h * 0.5);
                 let dot = DEVICE_TEXT * 0.5;
                 round(
@@ -1324,6 +1422,78 @@ impl Sidecar {
         }
     }
 
+    /// Two rates on one graph, sharing a scale.
+    ///
+    /// Each column draws its larger half first and the smaller over it, so neither is ever
+    /// hidden behind the other: where upload is the bigger, its warm bar stands behind a
+    /// shorter cool one rather than covering it.
+    unsafe fn draw_rates(
+        &self,
+        gl: &ffi::Gles2,
+        quads: &QuadPipeline,
+        projection: &Mat4,
+        layout: &Layout,
+        rates: &crate::system::Rates,
+        plot: Rect,
+    ) {
+        let count = crate::system::HISTORY as f32;
+        let column = plot.w / count;
+        let width = (column - 1.0).max(column * 0.6);
+        let scale = rates.scale();
+        for (i, pair) in rates.samples().enumerate() {
+            let offset = count - rates.len() as f32 + i as f32;
+            let mut bars = [(pair[0], GRAPH_INK), (pair[1], SECOND_INK)];
+            bars.sort_by(|a, b| b.0.total_cmp(&a.0));
+            for (value, colour) in bars {
+                let bar = ((value / scale).clamp(0.0, 1.0) * plot.h).max(1.5);
+                quads.draw(
+                    gl,
+                    self.white,
+                    &(*projection
+                        * layout.rect(plot.x + offset * column, plot.y + plot.h - bar, width, bar)),
+                    colour,
+                    (0.0, 1.0),
+                );
+            }
+        }
+    }
+
+    /// `text`, shortened with an ellipsis until it fits `max_width` at `size`.
+    ///
+    /// Device names are whatever the driver calls them, and some run to forty characters. Set
+    /// at full length they run off their card and over the next one; set smaller to fit they
+    /// stop being readable at a glance. The end of a long name is the part least worth keeping.
+    fn fitted(
+        &mut self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        text_renderer: &mut spatiand_render::TextRenderer,
+        text: &str,
+        size: f32,
+        max_width: f32,
+    ) -> String {
+        let mut candidate = text.to_string();
+        let mut keep = text.chars().count();
+        for _ in 0..6 {
+            let Some((_, aspect, _)) = self.label(renderer, text_renderer, &candidate, size * 1.35)
+            else {
+                return candidate;
+            };
+            let width = size * aspect;
+            if width <= max_width || keep <= 1 {
+                return candidate;
+            }
+            // Proportionally, then one more for the ellipsis. Characters are not all one
+            // width, which is why this measures again rather than trusting the first guess.
+            keep = ((keep as f32 * max_width / width) as usize)
+                .saturating_sub(1)
+                .min(keep - 1)
+                .max(1);
+            let head: String = text.chars().take(keep).collect();
+            candidate = format!("{}\u{2026}", head.trim_end());
+        }
+        candidate
+    }
+
     /// Work out the text to draw and make sure every label exists.
     ///
     /// Split from [`Sidecar::draw`] because building a texture needs `&mut renderer` while
@@ -1442,20 +1612,22 @@ impl Sidecar {
                         colour: [f32; 4]| {
             // `s` is consumed here as the texture cache's key; nothing downstream needs the
             // characters again, only the pixels they were rasterised into.
-            if let Some((id, aspect, _)) = this.label(renderer, text, &s, h * 1.35) {
-                let x = if from_right {
-                    x - h * aspect.max(0.01)
-                } else {
-                    x
-                };
-                out.push(Label {
-                    texture: (id, aspect),
-                    x,
-                    y,
-                    height: h,
-                    colour,
-                });
-            }
+            // Returns where the text begins, so a second piece can be set to the left of a
+            // right-aligned first one.
+            let (id, aspect, _) = this.label(renderer, text, &s, h * 1.35)?;
+            let x = if from_right {
+                x - h * aspect.max(0.01)
+            } else {
+                x
+            };
+            out.push(Label {
+                texture: (id, aspect),
+                x,
+                y,
+                height: h,
+                colour,
+            });
+            Some(x)
         };
 
         // The clock, large, on the ground rather than on a plate.
@@ -1543,45 +1715,158 @@ impl Sidecar {
             );
         }
 
-        for direction in Direction::ALL {
-            let card = rows.device_card(direction);
+        // Whatever the open list lies over has its text left out, because text is drawn last
+        // and would otherwise show through the list on top of it.
+        let covered = self.open.map(|d| rows.menu(audio.list(d).len()).0);
+        // Only the heading strip is asked about, not the whole card: a list that covers the
+        // foot of a graph leaves its name and readings in plain sight above it.
+        let hidden = |card: Rect| {
+            let heading = Rect {
+                h: CARD_PAD * 1.25 + RATE_TEXT,
+                ..card
+            };
+            covered.is_some_and(|menu| menu.overlaps(&heading))
+        };
+
+        // Network and disk: the name on the left and both readings on the right, each in the
+        // colour of its half of the graph, which is the whole of the legend.
+        for (rates, card) in [&monitors.network, &monitors.disk]
+            .into_iter()
+            .zip(rows.traffic)
+        {
+            if hidden(card) {
+                continue;
+            }
             push(
                 self,
                 renderer,
                 text,
-                direction.label().to_string(),
+                rates.label.to_string(),
                 card.x + CARD_PAD,
                 card.y + CARD_PAD,
                 LABEL_TEXT,
                 false,
                 DIM,
             );
+            let [first, second] = rates.latest();
+            let y = card.y + CARD_PAD - (RATE_TEXT - LABEL_TEXT) * 0.5;
+            let right = card.x + card.w - CARD_PAD;
+            let second_x = push(
+                self,
+                renderer,
+                text,
+                format!("{} {}", rates.names[1], crate::system::format_rate(second)),
+                right,
+                y,
+                RATE_TEXT,
+                true,
+                [SECOND_INK[0], SECOND_INK[1], SECOND_INK[2], 1.0],
+            )
+            .unwrap_or(right);
+            push(
+                self,
+                renderer,
+                text,
+                format!("{} {}", rates.names[0], crate::system::format_rate(first)),
+                second_x - RATE_TEXT * 0.8,
+                y,
+                RATE_TEXT,
+                true,
+                ACCENT,
+            );
+        }
+
+        // The pickers: which way the sound goes, small, above what it goes to, large, with a
+        // caret at the right that says this opens.
+        for direction in Direction::ALL {
+            let card = rows.picker(direction);
+            let pad = CARD_PAD * 0.75;
+            push(
+                self,
+                renderer,
+                text,
+                direction.label().to_string(),
+                card.x + CARD_PAD,
+                card.y + pad,
+                LABEL_TEXT,
+                false,
+                DIM,
+            );
+            // U+25BE / U+25B4, small down and up triangles: which way the list will go is the
+            // wrong question, so the caret says only whether it is open.
+            let caret = if self.open == Some(direction) {
+                "\u{25B4}"
+            } else {
+                "\u{25BE}"
+            };
+            let caret_size = PICKER_TEXT;
+            let caret_ink = self
+                .label(renderer, text, caret, caret_size * 1.35)
+                .map_or(0.5, |(_, _, ink)| ink);
+            let caret_right = card.x + card.w - CARD_PAD;
+            let caret_width = push(
+                self,
+                renderer,
+                text,
+                caret.to_string(),
+                caret_right,
+                Self::ink_centred_y(card, caret_size, caret_ink),
+                caret_size,
+                true,
+                DIM,
+            )
+            .map_or(caret_size, |x| caret_right - x);
             let devices = audio.list(direction);
+            let (name, colour) = match devices.iter().find(|d| d.is_default) {
+                Some(device) => (device.name.as_str(), INK),
+                // Say so rather than leaving a blank, which reads as something still loading.
+                None if devices.is_empty() => ("None found", DIM),
+                None => ("None chosen", DIM),
+            };
+            let room = card.w - CARD_PAD * 2.0 - caret_width - CARD_PAD * 0.5;
+            let name = self.fitted(renderer, text, name, PICKER_TEXT, room);
+            push(
+                self,
+                renderer,
+                text,
+                name,
+                card.x + CARD_PAD,
+                card.y + card.h - pad - PICKER_TEXT,
+                PICKER_TEXT,
+                false,
+                colour,
+            );
+        }
+
+        // The open list's entries.
+        if let Some(direction) = self.open {
+            let devices = audio.list(direction);
+            let (card, entries) = rows.menu(devices.len());
             if devices.is_empty() {
-                // Say so rather than leaving an empty card, which reads as something still
-                // loading.
                 push(
                     self,
                     renderer,
                     text,
                     "None found".to_string(),
                     card.x + CARD_PAD,
-                    card.y + CARD_PAD * 2.0 + LABEL_TEXT,
+                    card.y + (card.h - DEVICE_TEXT) * 0.5,
                     DEVICE_TEXT,
                     false,
                     DIM,
                 );
-                continue;
             }
-            for (device, row) in devices.iter().zip(Rows::device_rows(card, devices.len())) {
+            for (device, row) in devices.iter().zip(entries) {
+                // Clear of the dot that marks the current one, and by the same amount whether
+                // or not this row has one, so the list does not step sideways.
+                let x = row.x + CARD_PAD * 0.5 + DEVICE_TEXT + CARD_PAD * 0.5;
+                let room = row.x + row.w - CARD_PAD * 0.5 - x;
+                let name = self.fitted(renderer, text, &device.name, DEVICE_TEXT, room);
                 push(
                     self,
                     renderer,
                     text,
-                    device.name.clone(),
-                    // Clear of the dot that marks the current one, and by the same amount
-                    // whether or not this row has one, so the list does not step sideways.
-                    row.x + CARD_PAD * 0.5 + DEVICE_TEXT + CARD_PAD * 0.5,
+                    name,
+                    x,
                     row.y + (row.h - DEVICE_TEXT) * 0.5,
                     DEVICE_TEXT,
                     false,
@@ -2100,8 +2385,9 @@ mod tests {
         for card in rows
             .graphs
             .into_iter()
+            .chain(rows.traffic)
             .chain(rows.sliders.into_iter().flatten())
-            .chain(rows.devices)
+            .chain(rows.pickers)
         {
             assert!(
                 card.w < full * 0.4,
@@ -2117,19 +2403,22 @@ mod tests {
 
     #[test]
     fn the_two_columns_line_up() {
-        // Graphs on the left, controls on the right, sharing three rows. A grid that agrees
-        // with itself across the gutter is most of the difference between this and the
-        // version that looked assembled out of whatever fitted.
+        // Three columns sharing three rows. A grid that agrees with itself across the gutter
+        // is most of the difference between this and the version that looked assembled out of
+        // whatever fitted.
         let s = sidecar((800, 1280));
         let rows = s.rows(all());
-        for (graph, slider) in rows
+        for ((graph, traffic), slider) in rows
             .graphs
             .into_iter()
+            .zip(rows.traffic)
             .zip(rows.sliders.into_iter().flatten())
         {
             assert_eq!(graph.y, slider.y, "rows should share a baseline");
+            assert_eq!(graph.y, traffic.y, "rows should share a baseline");
             assert_eq!(graph.h, slider.h);
-            assert!(graph.x + graph.w < slider.x, "the columns should not touch");
+            assert!(graph.x + graph.w < traffic.x, "the columns should not touch");
+            assert!(traffic.x + traffic.w < slider.x, "the columns should not touch");
         }
     }
 
@@ -2171,89 +2460,134 @@ mod tests {
         }
     }
 
+    /// Tap the middle of a rectangle, and return what the sidecar asked for.
+    fn tap(s: &mut Sidecar, r: Rect, audio: &Audio) -> Vec<Action> {
+        let (x, y) = centre(r);
+        let event = press(s, 0, x, y);
+        let actions = s.touch(&[event], all(), audio);
+        s.touch(&[up(0)], all(), audio);
+        actions
+    }
+
     #[test]
-    fn tapping_a_device_chooses_it() {
+    fn the_sliders_are_on_the_right_and_the_pickers_at_the_foot_of_the_middle() {
+        // The arrangement the wearer asked for, as positions rather than as a picture.
+        let s = sidecar((800, 1280));
+        let rows = s.rows(all());
+        let middle = rows.traffic[0].x;
+        for slider in rows.sliders.into_iter().flatten() {
+            assert!(slider.x > middle + rows.traffic[0].w, "{slider:?} is not in the right column");
+        }
+        for picker in rows.pickers {
+            assert_eq!(picker.x, middle, "a picker left the middle column");
+            assert!(picker.y > rows.traffic[1].y + rows.traffic[1].h, "a picker is above the graphs");
+        }
+        let lowest = rows.pickers[1];
+        let last_graph = rows.graphs[2];
+        assert!(
+            (lowest.y + lowest.h - (last_graph.y + last_graph.h)).abs() < 0.5,
+            "the pickers' foot should line up with the other columns'"
+        );
+    }
+
+    #[test]
+    fn tapping_a_picker_opens_its_list_and_an_entry_chooses_it() {
         let mut s = sidecar((800, 1280));
         let audio = some_audio();
         let rows = s.rows(all());
-        let card = rows.device_card(Direction::Output);
+        assert!(tap(&mut s, rows.picker(Direction::Output), &audio).is_empty());
+        assert_eq!(s.open(), Some(Direction::Output));
         // The second entry: Deck Speaker, id 66.
-        let row = Rows::device_rows(card, audio.outputs.len())
-            .nth(1)
-            .expect("a second row");
-        let event = press(&s, 0, row.x + row.w * 0.5, row.y + row.h * 0.5);
+        let (_, entries) = rows.menu(audio.outputs.len());
         assert_eq!(
-            s.touch(&[event], all(), &audio),
+            tap(&mut s, entries[1], &audio),
             vec![Action::ChooseDevice(Direction::Output, 66)]
         );
+        assert_eq!(s.open(), None, "choosing should close the list");
     }
 
     #[test]
-    fn the_two_device_lists_do_not_take_each_others_taps() {
-        // Output and Input sit in one column, one above the other, and their ids overlap with
-        // nothing to distinguish them but position. A row bleeding into the card below would
-        // silently change the microphone when the wearer asked for a speaker.
-        let s = sidecar((800, 1280));
+    fn the_input_picker_offers_inputs() {
+        // Both lists open in the same place, so the only thing telling them apart is which
+        // picker opened it. Getting that wrong would change the microphone when the wearer
+        // asked for a speaker.
+        let mut s = sidecar((800, 1280));
         let audio = some_audio();
         let rows = s.rows(all());
-        for direction in Direction::ALL {
-            let card = rows.device_card(direction);
-            for row in Rows::device_rows(card, audio.list(direction).len()) {
-                assert!(
-                    row.y >= card.y && row.y + row.h <= card.y + card.h,
-                    "a {direction:?} row escapes its card"
-                );
-                let found = rows.device_at(row.x + 5.0, row.y + row.h * 0.5, &audio);
-                assert_eq!(found.map(|(d, _)| d), Some(direction));
-            }
-        }
-    }
-
-    #[test]
-    fn a_device_list_never_draws_past_its_card() {
-        // A machine with a dock, a headset and two Bluetooth speakers can offer more than
-        // there is room for. Overflow has to be dropped rather than drawn over the card
-        // below, which would also steal its touches.
-        let s = sidecar((800, 1280));
-        let card = s.rows(all()).device_card(Direction::Output);
-        let capacity = Rows::device_capacity(card);
-        assert!(capacity >= 3, "only room for {capacity} devices");
-        assert_eq!(Rows::device_rows(card, 99).count(), capacity);
-        for row in Rows::device_rows(card, 99) {
-            assert!(row.y + row.h <= card.y + card.h + 0.5);
-        }
-    }
-
-    #[test]
-    fn a_slider_and_a_device_are_never_both_under_one_finger() {
-        // The two live in adjacent columns and are hit-tested by different methods, so an
-        // overlap would fire both and set a volume while switching a speaker.
-        let s = sidecar((800, 1280));
-        let audio = some_audio();
-        let rows = s.rows(all());
-        for direction in Direction::ALL {
-            let card = rows.device_card(direction);
-            for row in Rows::device_rows(card, audio.list(direction).len()) {
-                let point = (row.x + row.w * 0.5, row.y + row.h * 0.5);
-                assert!(
-                    rows.knob_at(point.0, point.1).is_none(),
-                    "a device row at {point:?} also reads as a slider"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn an_empty_list_is_not_a_panic() {
-        // No sound server, or a poll that happened before wireplumber was up.
-        let s = sidecar((800, 1280));
-        let rows = s.rows(all());
-        let empty = Audio::default();
-        assert!(rows.device_at(400.0, 400.0, &empty).is_none());
+        tap(&mut s, rows.picker(Direction::Input), &audio);
+        let (_, entries) = rows.menu(audio.inputs.len());
         assert_eq!(
-            Rows::device_rows(rows.device_card(Direction::Input), 0).count(),
-            0
+            tap(&mut s, entries[1], &audio),
+            vec![Action::ChooseDevice(Direction::Input, 72)]
         );
+    }
+
+    #[test]
+    fn a_tap_that_closes_the_list_does_nothing_else() {
+        // Dismissing a list over the volume slider must not also set the volume.
+        let mut s = sidecar((800, 1280));
+        let audio = some_audio();
+        let rows = s.rows(all());
+        tap(&mut s, rows.picker(Direction::Output), &audio);
+        let volume = rows.slider(Knob::Volume).expect("volume");
+        assert!(tap(&mut s, volume, &audio).is_empty());
+        assert_eq!(s.open(), None);
+        // And with the list gone, the same tap is a slider again.
+        assert_eq!(tap(&mut s, volume, &audio), vec![Action::Moved(Knob::Volume)]);
+    }
+
+    #[test]
+    fn a_picker_tapped_again_closes_and_the_other_one_swaps() {
+        let mut s = sidecar((800, 1280));
+        let audio = some_audio();
+        let rows = s.rows(all());
+        tap(&mut s, rows.picker(Direction::Output), &audio);
+        tap(&mut s, rows.picker(Direction::Input), &audio);
+        assert_eq!(s.open(), Some(Direction::Input));
+        tap(&mut s, rows.picker(Direction::Input), &audio);
+        assert_eq!(s.open(), None);
+    }
+
+    #[test]
+    fn a_list_stays_under_the_header_and_clear_of_both_pickers() {
+        // A machine with a dock, a headset and two Bluetooth speakers can offer more than
+        // there is room for. Overflow is dropped rather than drawn off the top of the panel.
+        let s = sidecar((800, 1280));
+        let rows = s.rows(all());
+        let (card, entries) = rows.menu(99);
+        assert!(entries.len() >= 5, "only room for {} devices", entries.len());
+        assert!(card.y >= rows.header.y + rows.header.h, "the list reaches the header");
+        for entry in &entries {
+            assert!(entry.y >= card.y && entry.y + entry.h <= card.y + card.h + 0.5);
+        }
+        for picker in rows.pickers {
+            assert!(!card.overlaps(&picker), "the list covers a picker");
+        }
+    }
+
+    #[test]
+    fn an_empty_list_opens_and_chooses_nothing() {
+        // No sound server, or a poll that happened before wireplumber was up.
+        let mut s = sidecar((800, 1280));
+        let empty = Audio::default();
+        let rows = s.rows(all());
+        tap(&mut s, rows.picker(Direction::Input), &empty);
+        let (card, entries) = rows.menu(0);
+        assert!(entries.is_empty());
+        assert!(card.h > 0.0, "an empty list still opens, to say it is empty");
+        assert!(tap(&mut s, card, &empty).is_empty());
+    }
+
+    #[test]
+    fn changing_page_closes_the_list() {
+        let mut s = sidecar((800, 1280));
+        let audio = some_audio();
+        let rows = s.rows(all());
+        tap(&mut s, rows.picker(Direction::Output), &audio);
+        let button = s.page_button();
+        tap(&mut s, button, &audio);
+        tap(&mut s, button, &audio);
+        assert_eq!(s.open(), None);
     }
 
     #[test]
@@ -2272,8 +2606,9 @@ mod tests {
         for card in rows
             .graphs
             .into_iter()
+            .chain(rows.traffic)
             .chain(rows.sliders.into_iter().flatten())
-            .chain(rows.devices)
+            .chain(rows.pickers)
         {
             assert!(
                 card.y + card.h <= s.size.1 - MARGIN + 0.5,
@@ -2297,8 +2632,9 @@ mod tests {
         let cards: Vec<Rect> = rows
             .graphs
             .into_iter()
+            .chain(rows.traffic)
             .chain(rows.sliders.into_iter().flatten())
-            .chain(rows.devices)
+            .chain(rows.pickers)
             .collect();
         for (i, a) in cards.iter().enumerate() {
             for b in &cards[i + 1..] {
