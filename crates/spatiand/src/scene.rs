@@ -30,8 +30,8 @@ use spatiand_shell::{Mode, Shell};
 use smithay::backend::renderer::gles::ffi;
 
 use crate::gl::{
-    upload_raw, upload_rgba, BubbleParams, BubblePipeline, QuadPipeline, RoundedPipeline,
-    SkyPipeline,
+    upload_raw, upload_rgba, BubbleParams, BubblePipeline, ProjectionPipeline, QuadPipeline,
+    RoundedPipeline, SkyPipeline,
 };
 
 /// Angular size of the pointer reticle, degrees. Constant in *angle*, not in metres, so it
@@ -323,12 +323,16 @@ pub struct Scene {
     quads: QuadPipeline,
     rounded: RoundedPipeline,
     sky_pipeline: SkyPipeline,
+    projection_pipeline: ProjectionPipeline,
     bubbles: BubblePipeline,
 
     sky: u32,
     sky_source: SkySource,
     /// A client's surface standing in for the environment this frame. See `set_sky_override`.
     sky_override: Option<SkyOverride>,
+    /// An application's own eye views standing in for the environment this frame. Drawn in
+    /// the sky's place, and wins over it. See `set_projection`.
+    projection: Option<ProjectionOverride>,
     white: u32,
     reticle: u32,
     /// A double-headed arrow, turned in the plane to suit whichever edge is under the pointer.
@@ -466,6 +470,7 @@ impl Scene {
     ) -> Result<Self, String> {
         let quads = QuadPipeline::new(renderer)?;
         let sky_pipeline = SkyPipeline::new(renderer, &quads)?;
+        let projection_pipeline = ProjectionPipeline::new(renderer, &quads)?;
         let bubbles = BubblePipeline::new(renderer, &quads)?;
         let rounded = RoundedPipeline::new(renderer, &quads)?;
 
@@ -524,10 +529,12 @@ impl Scene {
             quads,
             rounded,
             sky_pipeline,
+            projection_pipeline,
             bubbles,
             sky,
             sky_source: sky_image.source,
             sky_override: None,
+            projection: None,
             white,
             reticle,
             reticle_left,
@@ -744,6 +751,14 @@ impl Scene {
         self.sky_override = over;
     }
 
+    /// Hand the room to an application's own eye views for this frame, or take it back.
+    ///
+    /// Set every frame, for the same reason the sky override is: an application that crashes,
+    /// stops drawing or gives the room up must not leave the wearer inside its last picture.
+    pub fn set_projection(&mut self, projection: Option<ProjectionOverride>) {
+        self.projection = projection;
+    }
+
     /// Draw the environment behind everything else.
     ///
     /// # Safety
@@ -755,6 +770,23 @@ impl Scene {
         let mut view = eye.view;
         view.w_axis = Vec4::new(0.0, 0.0, 0.0, 1.0);
         let inv = (eye.projection * view).inverse();
+        if let Some(projection) = self.projection {
+            // The camera the picture was drawn with. Today that is taken to be the head as it
+            // is now, which fills the view with the picture exactly; once pictures say which
+            // head they were drawn for, this is where the older one goes instead.
+            let to_frame = Mat3::from_quat(eye.orientation.inverse().as_quat());
+            let i = usize::from(eye.side != EyeSide::Left);
+            let fov = projection.fov[i];
+            self.projection_pipeline.draw(
+                gl,
+                projection.texture,
+                &inv,
+                &to_frame,
+                [fov[0].tan(), fov[1].tan(), fov[3].tan(), fov[2].tan()],
+                projection.rects[i],
+            );
+            return;
+        }
         let (texture, source) = self.sky_now();
         self.sky_pipeline.draw(
             gl,
@@ -3028,13 +3060,10 @@ pub fn collect_windows(
             }
             continue;
         };
-        // A surface that has become the environment is not also a panel in it.
-        if !crate::xr::state_of(&surface).is_window()
-            && matches!(
-                crate::xr::state_of(&surface).layer,
-                crate::xr::Layer::Equirect180 | crate::xr::Layer::Equirect360
-            )
-        {
+        // A surface that has become the environment is not also a panel in it. Asked through
+        // `is_environment` rather than by listing layers: the list here once said "the two
+        // panoramas", and the day a third kind of room arrived it would have been drawn twice.
+        if crate::xr::state_of(&surface).is_environment() {
             continue;
         }
         let Some(placement) = state.layout.get(&window) else {
@@ -3247,6 +3276,81 @@ fn has_no_alpha(texture: &smithay::backend::renderer::gles::GlesTexture) -> bool
                 | Fourcc::Rgb565
         )
     )
+}
+
+/// An application's own eye views standing in for the environment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectionOverride {
+    pub texture: u32,
+    /// Each eye's part of the buffer as `(u0, v0, u1, v1)`, left first.
+    pub rects: [(f32, f32, f32, f32); 2],
+    /// Each eye's field of view as `XrFovf`: angleLeft, angleRight, angleUp, angleDown.
+    pub fov: [[f32; 4]; 2],
+}
+
+/// The surface that has become the room by drawing its own eye views, if one has and has drawn.
+///
+/// Looked for every frame, like [`sky_surface`], and for the same reason: an application that
+/// crashes, stops drawing or gives the room up simply stops being found.
+///
+/// `fov` is the field of view each eye's picture was drawn with. It is the session's own, the
+/// numbers every pose it hands out carries, because that is what an application drawing from
+/// those poses is told to draw with -- see `crate::pose::eye_fov`.
+pub fn projection_surface(
+    renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    state: &crate::state::Spatiand,
+    fov: [[f32; 4]; 2],
+) -> Option<ProjectionOverride> {
+    use smithay::backend::renderer::utils::{import_surface_tree, with_renderer_surface_state};
+    use smithay::backend::renderer::Renderer;
+    use smithay::wayland::seat::WaylandFocus;
+    for window in state.space.elements() {
+        let Some(surface) = window.wl_surface().map(|s| s.into_owned()) else {
+            continue;
+        };
+        let xr = crate::xr::state_of(&surface);
+        if !xr.is_projection() {
+            continue;
+        }
+        if import_surface_tree(renderer, &surface).is_err() {
+            continue;
+        }
+        let context = renderer.context_id();
+        // Nothing drawn yet is not a reason to give up the room: the wearer's own environment
+        // stays until the application actually has a picture.
+        let Some((texture, crop)) = with_renderer_surface_state(&surface, |st| {
+            let texture = st
+                .texture::<smithay::backend::renderer::gles::GlesTexture>(context)?
+                .tex_id();
+            let (_, crop) = shape_of(st)?;
+            Some((texture, crop))
+        })
+        .flatten() else {
+            continue;
+        };
+        // Client textures arrive with GL's default sampler, which is incomplete without
+        // mipmaps and samples as black; see `sky_surface`. Clamped rather than wrapped: an eye
+        // view has edges, and wrapping would bleed one eye's picture into the other's.
+        let _ = renderer.with_context(|gl| unsafe {
+            gl.BindTexture(ffi::TEXTURE_2D, texture);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_T, ffi::CLAMP_TO_EDGE as i32);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+        });
+        // `eye_rect_within` speaks (u0, u1, v0, v1); the pipeline speaks (u0, v0, u1, v1).
+        let rect = |left: bool| {
+            let r = xr.eye_rect_within(crop, left);
+            (r[0], r[2], r[1], r[3])
+        };
+        return Some(ProjectionOverride {
+            texture,
+            rects: [rect(true), rect(false)],
+            fov,
+        });
+    }
+    None
 }
 
 /// A client's surface standing in for the environment.

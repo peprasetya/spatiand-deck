@@ -131,6 +131,20 @@ pub enum Eyes {
     TopBottom,
 }
 
+/// What a remote window is in the room.
+///
+/// The two of `spatiand_xr_v1`'s layers a remote application can have today, spelled the same
+/// way. A window is one thing among others. A projection is the room itself: the application's
+/// own two eye views, filling the view behind every window, which is what a viewer that tracks
+/// the head and draws the world becomes once it has something to show.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layer {
+    #[default]
+    Window,
+    Projection,
+}
+
 impl Eyes {
     /// The name as the catalogue file spells it, which is also what a launched application is
     /// told in `SPATIAND_EYES`. An application that renders its own two eyes has to be given

@@ -115,6 +115,18 @@ pub struct Host {
     pub app_of_pid: HashMap<i32, String>,
     /// Each launched application's own sink, when there is a network to send sound to.
     pub sounds: Option<crate::audio::Sounds>,
+    /// A read-only descriptor onto the head-pose ring, handed to each application that takes
+    /// the view. The ring itself lives on the network thread, which writes it. See `pose`.
+    pub pose_fd: Option<std::os::fd::OwnedFd>,
+    /// What each application that takes the view has said it is: its eye layout and layer, by
+    /// catalogue id. See `appcontrol`.
+    pub presentation: HashMap<String, (spatiand_stream::Eyes, spatiand_stream::Layer)>,
+    /// Applications whose presentation changed since the main loop last looked, so it can
+    /// re-announce their streams and tell the session.
+    pub presentation_changed: Vec<String>,
+    /// Our end of each view-taking application's control socket, for saying things to it, and
+    /// the render size it was last told. See `appcontrol`.
+    pub app_controls: HashMap<String, (std::os::fd::OwnedFd, Option<(u32, u32)>)>,
     /// The X11 window manager, once XWayland is ready. See `xwayland`.
     pub xwm: Option<smithay::xwayland::X11Wm>,
     pub xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
@@ -209,6 +221,10 @@ impl Host {
             next_window_id: 1,
             app_of_pid: HashMap::new(),
             sounds: None,
+            pose_fd: None,
+            presentation: HashMap::new(),
+            presentation_changed: Vec::new(),
+            app_controls: HashMap::new(),
             xwm: None,
             xwayland_shell_state,
             x11_display: None,

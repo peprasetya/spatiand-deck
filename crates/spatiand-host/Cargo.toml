@@ -10,6 +10,8 @@ license.workspace = true
 # headset is.
 [dependencies]
 spatiand-stream = { path = "../spatiand-stream" }
+# The pose ring's layout and its writer, shared with the session. See `pose`.
+spatiand-proto = { path = "../spatiand-proto" }
 spatiand-host-catalog = { path = "../spatiand-host-catalog" }
 spatiand-platform = { path = "../spatiand-platform" }
 # The gamepad applications here are played with: the same device the session makes locally.

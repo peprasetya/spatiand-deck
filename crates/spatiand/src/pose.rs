@@ -19,106 +19,40 @@
 //! memcpy rather than a translation layer. The conversion is [`to_openxr`] and it happens
 //! exactly once, here, at the boundary.
 
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::sync::atomic::{fence, Ordering};
+use std::os::fd::BorrowedFd;
 
 use glam::{DQuat, DVec3};
 
-use spatiand_proto::pose::{channel_size, Eye as WireEye, Header, Slot, SLOTS, VERSION};
+use spatiand_proto::pose::{Eye as WireEye, Ring, Slot, SLOTS};
 use spatiand_render::{EyeSide, StereoConfig};
 
 /// A mapped ring the compositor writes and clients read.
+///
+/// The memory and the seqlock are `spatiand_proto::pose::Ring`'s, shared with a host that
+/// fills its own ring from what this session sends it. What is here is only what a *session*
+/// knows and a host does not: the glasses' own frame, and where the eyes sit.
 pub struct Channel {
-    memory: *mut u8,
-    fd: OwnedFd,
-    written: u64,
+    ring: Ring,
 }
 
-// The pointer is to a private mapping this type owns exclusively; nothing else in the
-// compositor touches it, and it never leaves the render loop's thread.
-unsafe impl Send for Channel {}
-
 impl Channel {
-    /// Create the shared memory and map it.
-    ///
-    /// Sealed against growing and against being written by anyone who receives it: a client
-    /// that could shrink this file could make the compositor fault on its own mapping, which
-    /// would be a client crashing the session by return of post.
     pub fn new() -> Result<Self, String> {
-        let size = channel_size();
-        let name = c"spatiand-poses";
-        // SAFETY: a libc call with a valid C string and no borrowed state.
-        let raw = unsafe {
-            libc::memfd_create(name.as_ptr(), (libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) as u32)
-        };
-        if raw < 0 {
-            return Err(format!("memfd_create: {}", std::io::Error::last_os_error()));
-        }
-        // SAFETY: memfd_create returned a fresh descriptor we now own.
-        let fd = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) };
-        // SAFETY: the descriptor is ours and the length is the size we are about to map.
-        if unsafe { libc::ftruncate(raw, size as libc::off_t) } < 0 {
-            return Err(format!("ftruncate: {}", std::io::Error::last_os_error()));
-        }
-        // Shrinking is the dangerous one -- a mapping over a truncated file faults on access.
-        // SAFETY: a libc call on a descriptor we own.
-        unsafe {
-            libc::fcntl(
-                raw,
-                libc::F_ADD_SEALS,
-                libc::F_SEAL_SHRINK | libc::F_SEAL_GROW,
-            );
-        }
-        // SAFETY: mapping a descriptor we own, at a length it has been sized to.
-        let memory = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                raw,
-                0,
-            )
-        };
-        if memory == libc::MAP_FAILED {
-            return Err(format!("mmap: {}", std::io::Error::last_os_error()));
-        }
-        let memory = memory as *mut u8;
-
-        let header = Header {
-            version: VERSION,
-            slot_count: SLOTS as u32,
-            slot_stride: std::mem::size_of::<Slot>() as u32,
-            slots_offset: std::mem::size_of::<Header>() as u32,
-            write_index: 0,
-            reserved: 0,
-        };
-        // SAFETY: `memory` is a fresh mapping of at least `channel_size()` bytes, and Header
-        // is `repr(C)` with no padding requirements beyond its own alignment.
-        unsafe { std::ptr::write(memory as *mut Header, header) };
-        log::info!("pose channel: {} bytes, {SLOTS} slots", size);
-        Ok(Self {
-            memory,
-            fd,
-            written: 0,
-        })
+        let ring = Ring::new(c"spatiand-poses")?;
+        log::info!("pose channel: {} bytes, {SLOTS} slots", ring.size());
+        Ok(Self { ring })
     }
 
     /// The descriptor to hand a client. Read-only on their side.
     pub fn fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
+        self.ring.fd()
     }
 
     pub fn size(&self) -> u32 {
-        channel_size() as u32
+        self.ring.size()
     }
 
     /// Write one sample.
-    ///
-    /// An ordinary seqlock: the sequence number is made odd, the body written, the sequence
-    /// made even again, and only then is the ring's write index advanced. A reader that
-    /// catches a slot mid-write sees an odd sequence, or two different ones either side of
-    /// its read, and tries again. Nothing blocks and nothing locks.
+    #[cfg(test)]
     pub fn write(
         &mut self,
         orientation: DQuat,
@@ -127,54 +61,71 @@ impl Channel {
         sample_ns: i64,
         predicted_ns: i64,
     ) {
-        let index = (self.written as usize) & (SLOTS - 1);
-        // SAFETY: `index` is masked into the ring, and the mapping holds SLOTS of them after
-        // the header.
-        let slot = unsafe {
-            (self.memory.add(std::mem::size_of::<Header>()) as *mut Slot).add(index)
-        };
+        self.write_slot(wire_slot(orientation, head_position, stereo, sample_ns, predicted_ns));
+    }
 
-        let seq = self.written * 2 + 1;
-        // SAFETY: `slot` points into our own mapping; only this thread writes it.
-        unsafe { std::ptr::addr_of_mut!((*slot).seq).write_volatile(seq) };
-        // The odd sequence must be visible before the body it protects is disturbed.
-        fence(Ordering::Release);
-
-        let (head_q, head_p) = to_openxr(orientation, head_position);
-        let body = Slot {
-            seq,
-            sample_ns,
-            predicted_ns,
-            reserved: 0,
-            head_orientation: head_q,
-            head_position: head_p,
-            _pad: 0.0,
-            eye: [
-                wire_eye(EyeSide::Left, orientation, head_position, stereo),
-                wire_eye(EyeSide::Right, orientation, head_position, stereo),
-            ],
-        };
-        // SAFETY: as above. `seq` is overwritten below, so writing the whole struct is fine.
-        unsafe {
-            std::ptr::write(slot, body);
-            fence(Ordering::Release);
-            std::ptr::addr_of_mut!((*slot).seq).write_volatile(seq + 1);
-        }
-
-        self.written += 1;
-        fence(Ordering::Release);
-        // SAFETY: the header is at offset zero of our mapping.
-        unsafe {
-            std::ptr::addr_of_mut!((*(self.memory as *mut Header)).write_index)
-                .write_volatile(self.written)
-        };
+    /// Write one sample already built by [`wire_slot`].
+    pub fn write_slot(&mut self, slot: Slot) {
+        self.ring.write(slot);
     }
 }
 
-impl Drop for Channel {
-    fn drop(&mut self) {
-        // SAFETY: unmapping exactly what this type mapped.
-        unsafe { libc::munmap(self.memory as *mut libc::c_void, channel_size()) };
+/// One sample, in the wire's frame and field order.
+///
+/// Both the local channel and the viewport sent to a host are built from this, so an
+/// application reading poses here and one reading them on a host thirty metres away are
+/// handed the same numbers — same eyes, same neck, same field of view.
+pub fn wire_slot(
+    orientation: DQuat,
+    head_position: DVec3,
+    stereo: &StereoConfig,
+    sample_ns: i64,
+    predicted_ns: i64,
+) -> Slot {
+    let (head_q, head_p) = to_openxr(orientation, head_position);
+    Slot {
+        seq: 0,
+        sample_ns,
+        predicted_ns,
+        reserved: 0,
+        head_orientation: head_q,
+        head_position: head_p,
+        _pad: 0.0,
+        eye: [
+            wire_eye(EyeSide::Left, orientation, head_position, stereo),
+            wire_eye(EyeSide::Right, orientation, head_position, stereo),
+        ],
+    }
+}
+
+/// Each eye's field of view as `XrFovf`, left first.
+///
+/// The numbers every pose this session hands out carries, and so what an application drawing
+/// from those poses has been told to draw with. The room is drawn back through exactly these,
+/// so an application that honoured them fills the view edge to edge and one pixel of its picture
+/// is one pixel's worth of the world.
+pub fn eye_fovs(stereo: &StereoConfig) -> [[f32; 4]; 2] {
+    [
+        wire_eye(EyeSide::Left, DQuat::IDENTITY, DVec3::ZERO, stereo).fov,
+        wire_eye(EyeSide::Right, DQuat::IDENTITY, DVec3::ZERO, stereo).fov,
+    ]
+}
+
+/// The same sample as the viewport a host is sent.
+///
+/// `seq` counts viewports so a picture can say which one it was drawn for. `render_size` is
+/// what the host should draw into, overscan included.
+pub fn viewport(slot: &Slot, seq: u32, render_size: (u32, u32)) -> spatiand_stream::Viewport {
+    spatiand_stream::Viewport {
+        seq,
+        // The session's own clock. A host cannot compare it with its own, and is not meant
+        // to; it comes back with each picture so this end can measure how old that picture is.
+        time_us: (slot.sample_ns / 1000).max(0) as u64,
+        orientation: slot.head_orientation,
+        position: slot.head_position,
+        eye_position: [slot.eye[0].position, slot.eye[1].position],
+        fov: [slot.eye[0].fov, slot.eye[1].fov],
+        render_size,
     }
 }
 
@@ -304,37 +255,28 @@ mod tests {
     }
 
     #[test]
-    fn a_written_slot_can_be_read_back_the_way_a_client_would() {
-        // The seqlock as a client sees it: even sequence, and the same one either side of
-        // the body.
+    fn a_written_sample_reaches_the_ring() {
         let mut channel = Channel::new().expect("channel");
         channel.write(DQuat::IDENTITY, DVec3::ZERO, &cfg(), 111, 222);
-        // SAFETY: reading our own mapping, exactly as a client reads theirs.
-        unsafe {
-            let header = &*(channel.memory as *const Header);
-            assert_eq!(header.version, VERSION);
-            assert_eq!(header.write_index, 1);
-            let slots = channel.memory.add(header.slots_offset as usize) as *const Slot;
-            let newest = &*slots.add(((header.write_index - 1) as usize) & (SLOTS - 1));
-            assert_eq!(newest.seq % 2, 0, "a reader would see a torn slot");
-            assert_eq!(newest.sample_ns, 111);
-            assert_eq!(newest.predicted_ns, 222);
-            assert_eq!(newest.head_orientation, [0.0, 0.0, 0.0, 1.0]);
-        }
+        let newest = channel.ring.newest().expect("written");
+        assert_eq!(newest.sample_ns, 111);
+        assert_eq!(newest.predicted_ns, 222);
+        assert_eq!(newest.head_orientation, [0.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]
-    fn the_ring_wraps_without_losing_the_newest() {
-        let mut channel = Channel::new().expect("channel");
-        for i in 0..(SLOTS as i64 * 3) {
-            channel.write(DQuat::IDENTITY, DVec3::ZERO, &cfg(), i, i);
-        }
-        // SAFETY: as above.
-        unsafe {
-            let header = &*(channel.memory as *const Header);
-            let slots = channel.memory.add(header.slots_offset as usize) as *const Slot;
-            let newest = &*slots.add(((header.write_index - 1) as usize) & (SLOTS - 1));
-            assert_eq!(newest.sample_ns, SLOTS as i64 * 3 - 1);
-        }
+    fn a_host_is_sent_exactly_what_a_local_client_reads() {
+        // The whole reason the viewport is built from the slot rather than beside it: two
+        // applications, one here and one on a host, must not be handed eyes a few
+        // millimetres apart.
+        let turned = DQuat::from_rotation_z(0.4) * DQuat::from_rotation_y(-0.2);
+        let slot = wire_slot(turned, DVec3::new(0.0, 0.0, 1.6), &cfg(), 5_000, 9_000);
+        let v = viewport(&slot, 42, (2304, 1296));
+        assert_eq!(v.seq, 42);
+        assert_eq!(v.orientation, slot.head_orientation);
+        assert_eq!(v.position, slot.head_position);
+        assert_eq!(v.eye_position, [slot.eye[0].position, slot.eye[1].position]);
+        assert_eq!(v.fov, [slot.eye[0].fov, slot.eye[1].fov]);
+        assert_eq!(v.render_size, (2304, 1296));
     }
 }

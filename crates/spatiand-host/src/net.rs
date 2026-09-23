@@ -65,7 +65,14 @@ pub struct Net {
 
 impl Net {
     /// Start listening. The returned handle is the only thing the compositor touches.
-    pub fn start(bind: SocketAddr, identity: Identity, trust: Trust) -> Result<Net, String> {
+    /// `poses` is written on the network thread from the viewports the session sends; see
+    /// `crate::pose` for why there and not in the compositor's loop.
+    pub fn start(
+        bind: SocketAddr,
+        identity: Identity,
+        trust: Trust,
+        poses: Option<crate::pose::Poses>,
+    ) -> Result<Net, String> {
         let (out, outbox) = unbounded_channel();
         let (inbox_tx, inbox) = std::sync::mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -90,7 +97,7 @@ impl Net {
         std::thread::Builder::new()
             .name("spatiand-host-net".into())
             .spawn(move || {
-                runtime.block_on(serve(endpoint, outbox, inbox_tx));
+                runtime.block_on(serve(endpoint, outbox, inbox_tx, poses));
             })
             .map_err(|e| format!("could not start the network thread: {e}"))?;
         Ok(Net { out, inbox })
@@ -117,6 +124,7 @@ async fn serve(
     endpoint: quinn::Endpoint,
     mut outbox: UnboundedReceiver<ToSession>,
     inbox: Sender<FromSession>,
+    mut poses: Option<crate::pose::Poses>,
 ) {
     while let Some(incoming) = endpoint.accept().await {
         let connection = match incoming.await {
@@ -134,9 +142,12 @@ async fn serve(
         let address = connection.remote_address();
         log::info!("session {} joined from {address}", who.short());
         let _ = inbox.send(FromSession::Joined { who, address });
+        if let Some(poses) = poses.as_mut() {
+            poses.reset();
+        }
 
         // One at a time: this returns when the session goes, and the next is accepted then.
-        session(&connection, &mut outbox, &inbox).await;
+        session(&connection, &mut outbox, &inbox, poses.as_mut()).await;
         log::info!("session {} left", who.short());
         let _ = inbox.send(FromSession::Left);
     }
@@ -146,6 +157,7 @@ async fn session(
     connection: &Connection,
     outbox: &mut UnboundedReceiver<ToSession>,
     inbox: &Sender<FromSession>,
+    mut poses: Option<&mut crate::pose::Poses>,
 ) {
     let mut control = match connection.open_uni().await {
         Ok(stream) => stream,
@@ -256,6 +268,22 @@ async fn session(
                             }
                         }
                     }
+                }
+            }
+            // **The head.** The only thing the session sends as a datagram: a viewport is only
+            // worth having while it is the newest, so it is sent unreliably and written into the
+            // ring the moment it lands. Always read, even with no ring to write, so unwanted
+            // datagrams are drained rather than left to fill the receive buffer.
+            datagram = connection.read_datagram() => {
+                let Ok(datagram) = datagram else { break };
+                match spatiand_stream::from_bytes::<ClientMessage>(&datagram) {
+                    Ok(ClientMessage::Viewport(viewport)) => {
+                        if let Some(poses) = poses.as_deref_mut() {
+                            poses.heard(&viewport, crate::pose::now_ns());
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::debug!("a datagram from the session did not decode: {e}"),
                 }
             }
             _ = connection.closed() => break,

@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 /// it is the whole meaning of a press and a release.
 pub const CONTROL_MAGIC: [u8; 4] = *b"SPct";
 
-use crate::catalog::{App, Eyes};
+use crate::catalog::{App, Eyes, Layer};
 use crate::video::Codec;
 
 /// A window on the host, named by the host.
@@ -142,6 +142,17 @@ pub enum HostMessage {
     /// A game asked the pad to rumble. Two motor strengths, as a force-feedback effect gives
     /// them; the headset end decides what its own hardware does with them.
     Rumble { strong: u16, weak: u16 },
+    /// What a window has become in the room, whenever that changes.
+    ///
+    /// Not a property of the catalogue entry, because the application decides it, and at a
+    /// moment of its own choosing: a viewer that logs in on an ordinary window and only then
+    /// becomes the world. Its eye layout travels separately, in [`HostMessage::Stream`] — an
+    /// application that starts drawing two eyes changes the shape of its picture at the same
+    /// moment, so the stream is re-announced then anyway.
+    ///
+    /// Last in this enum, and must stay so: a session built before it reports it as unknown
+    /// rather than mistaking it for something else. See `crate::VERSION`.
+    Layer { window: WindowId, layer: Layer },
 }
 
 /// A window the host has.
@@ -281,7 +292,17 @@ pub struct Viewport {
     pub time_us: u64,
     pub orientation: [f32; 4],
     pub position: [f32; 3],
-    /// Left, right, up, down tangents of the half-angles, per eye, as OpenXR gives them.
+    /// Where each eye is, index 0 the left, in the same frame as `position`.
+    ///
+    /// Sent rather than worked out at the other end, because an eye is not simply half an IPD
+    /// either side of the head: the session puts the eyes on the end of a neck lever, so they
+    /// move as the head turns. A host that rebuilt them from the head would draw from somewhere
+    /// slightly different from where the session draws the room, and the two would disagree by
+    /// a few millimetres that nobody could explain. Both eyes share the head's orientation.
+    pub eye_position: [[f32; 3]; 2],
+    /// Per eye: angleLeft, angleRight, angleUp, angleDown, in radians, signed — `XrFovf`
+    /// exactly, the same four numbers the pose channel carries, so a host can copy them across
+    /// without converting.
     pub fov: [[f32; 4]; 2],
     /// What the host should render, in pixels, including the overscan the session wants for
     /// correcting rotation.
@@ -345,6 +366,7 @@ mod tests {
                 time_us: 1_234_567,
                 orientation: [0.0, 0.0, 0.0, 1.0],
                 position: [0.0, 1.6, 0.0],
+                eye_position: [[-0.032, 1.6, 0.0], [0.032, 1.6, 0.0]],
                 fov: [[-1.0, 1.0, 1.0, -1.0]; 2],
                 render_size: (2304, 1296),
             }),
@@ -400,6 +422,17 @@ mod tests {
                 app: "firestorm".into(),
                 status: Some(0),
             },
+            HostMessage::Stream {
+                window: WindowId(1),
+                codec: Codec::H265,
+                width: 3840,
+                height: 1080,
+                eyes: Eyes::SideBySide,
+            },
+            HostMessage::Layer {
+                window: WindowId(1),
+                layer: Layer::Projection,
+            },
         ];
         for message in host {
             let bytes = crate::to_bytes(&message).expect("encodes");
@@ -422,6 +455,7 @@ mod tests {
             time_us: u64::MAX,
             orientation: [0.5; 4],
             position: [1.5; 3],
+            eye_position: [[1.5; 3]; 2],
             fov: [[1.0; 4]; 2],
             render_size: (4096, 4096),
         });

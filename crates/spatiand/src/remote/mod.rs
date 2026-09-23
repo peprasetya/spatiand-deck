@@ -136,6 +136,8 @@ pub enum Command {
     /// Something about the clipboard: what has been copied, a paste asking for bytes, or the
     /// bytes themselves. See `crate::clipboard`.
     Clipboard(spatiand_stream::control::Clipboard),
+    /// Where the head is now. Sent as a datagram, never down the ordered stream.
+    Viewport(spatiand_stream::Viewport),
 }
 
 /// A host being shown in this session.
@@ -212,6 +214,10 @@ impl Remote {
         let _ = self.commands.send(Command::Pad(state));
     }
 
+    fn viewport(&self, viewport: spatiand_stream::Viewport) {
+        let _ = self.commands.send(Command::Viewport(viewport));
+    }
+
     /// Tell this host something about the clipboard.
     fn clipboard(&self, what: spatiand_stream::control::Clipboard) {
         let _ = self.commands.send(Command::Clipboard(what));
@@ -266,6 +272,8 @@ pub struct Remotes {
     /// What the shell was last given, so it is only given something when it changed.
     shown: Option<(Vec<HostRow>, Vec<HostTab>)>,
     shown_pairing: Option<PairingView>,
+    /// Counts viewports sent, so a picture can say which one it was drawn for.
+    viewport_seq: u32,
 }
 
 struct PairingInProgress {
@@ -389,6 +397,24 @@ impl Remotes {
             host.pad(state);
         }
         self.padded = Some((app_id, state));
+    }
+
+    /// Tell every host where the head is. Called once a frame, while a head is being tracked.
+    ///
+    /// Every host, not only the focused one: an application that takes the view has to keep
+    /// following the head while the wearer is typing into something else, or the world would
+    /// freeze the moment a window in front of it got focus. It is a hundred-odd bytes a frame,
+    /// unreliable, and a host with nothing that asked for poses simply writes it into a ring
+    /// nobody is reading.
+    pub fn viewport(&mut self, slot: &spatiand_proto::pose::Slot, render_size: (u32, u32)) {
+        if self.hosts.is_empty() {
+            return;
+        }
+        self.viewport_seq = self.viewport_seq.wrapping_add(1);
+        let viewport = crate::pose::viewport(slot, self.viewport_seq, render_size);
+        for host in &self.hosts {
+            host.viewport(viewport);
+        }
     }
 
     /// What a game on any host has asked the motors to do since the last look.

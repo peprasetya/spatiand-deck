@@ -1834,11 +1834,19 @@ pub fn run(
                 }
                 runtime.state.pose_channels_to_open = false;
             }
+            // The pose that is about to be drawn with, so a client reading now and the
+            // compositor drawing now agree about where the head is. Built once and used twice,
+            // so a local client and a host's application cannot be handed different numbers.
+            let sample = crate::pose::now_ns();
+            let slot =
+                crate::pose::wire_slot(orientation, DVec3::ZERO, &stereo, sample, sample + frame_ns);
             if let Some(channel) = pose_channel.as_mut() {
-                // The pose that is about to be drawn with, so a client reading now and the
-                // compositor drawing now agree about where the head is.
-                let sample = crate::pose::now_ns();
-                channel.write(orientation, DVec3::ZERO, &stereo, sample, sample + frame_ns);
+                channel.write_slot(slot);
+            }
+            if hmd.is_some() {
+                // What a host's application draws is two eyes side by side, each the size of
+                // one here.
+                remotes.viewport(&slot, (stereo.per_eye.0 * 2, stereo.per_eye.1));
             }
             let prompt_text = match calibration.as_ref() {
                 _ if missing.is_some() => {
@@ -1971,6 +1979,20 @@ pub fn run(
             // stops being found, and the wearer's own environment comes back by itself.
             let sky_from_client = crate::scene::sky_surface(&mut renderer, &runtime.state);
             scene.set_sky_override(sky_from_client);
+            // Or whether one has become the room by drawing the eye views itself. Asked the same
+            // way, every frame, so giving the room up gives the wearer theirs back by itself.
+            let projection = crate::scene::projection_surface(
+                &mut renderer,
+                &runtime.state,
+                crate::pose::eye_fovs(&stereo),
+            );
+            scene.set_projection(projection);
+            // And the pointer is told where it is, so a ray that meets no window lands in it.
+            pointers.set_room(crate::pointer::room(
+                &runtime.state,
+                orientation,
+                crate::pose::eye_fovs(&stereo)[0],
+            ));
             // Import client buffers before the draw closure takes the context.
             let mut windows = crate::scene::collect_windows(&mut renderer, &runtime.state);
             for quad in windows.iter_mut() {

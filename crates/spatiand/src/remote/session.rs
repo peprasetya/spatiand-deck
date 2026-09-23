@@ -256,6 +256,11 @@ async fn serve(
     let mut streams: HashMap<u32, Stream> = HashMap::new();
     let mut windows: HashMap<u32, Reassembler> = HashMap::new();
     let mut apps: HashMap<u32, String> = HashMap::new();
+    // How each window's pictures are packed and what it is in the room, as its host last said.
+    // Two messages carry the two halves -- the eyes with the stream, the layer on its own --
+    // and the compositor is only told when the pair changes.
+    let mut presented: HashMap<u32, (spatiand_stream::Eyes, spatiand_stream::Layer)> =
+        HashMap::new();
     // Resizes, held back a little. A drag configures the window on every frame, and the host
     // builds a new encoder for every size it is told — so the whole drag would be a stream of
     // rebuilt encoders and keyframes. One every `RESIZE_EVERY`, and the last one always.
@@ -336,7 +341,13 @@ async fn serve(
                                         client.retitle(window.0, &title);
                                     }
                                 }
-                                HostMessage::Stream { window, codec, width, height, .. } => {
+                                HostMessage::Stream { window, codec, width, height, eyes } => {
+                                    let before = presented.get(&window.0).copied().unwrap_or_default();
+                                    let after = (eyes, before.1);
+                                    if after != before {
+                                        presented.insert(window.0, after);
+                                        client.present(window.0, after.0, after.1);
+                                    }
                                     match Decoder::new(&config.render_node, codec) {
                                         Ok(decoder) => {
                                             log::info!(
@@ -398,6 +409,19 @@ async fn serve(
                                     client.close(window.0);
                                     streams.remove(&window.0);
                                     windows.remove(&window.0);
+                                    presented.remove(&window.0);
+                                }
+                                HostMessage::Layer { window, layer } => {
+                                    let before = presented.get(&window.0).copied().unwrap_or_default();
+                                    let after = (before.0, layer);
+                                    if after != before {
+                                        log::info!(
+                                            "remote: window {} on {} is now {layer:?}",
+                                            window.0, config.host
+                                        );
+                                        presented.insert(window.0, after);
+                                        client.present(window.0, after.0, after.1);
+                                    }
                                 }
                                 HostMessage::Catalog { apps } => {
                                     log::info!("remote: {} application(s) offered", apps.len());
@@ -530,6 +554,20 @@ async fn serve(
                         }
                         Some(Command::Clipboard(what)) => {
                             say(&out, ClientMessage::Clipboard(what));
+                        }
+                        Some(Command::Viewport(viewport)) => {
+                            // **A datagram, never the ordered stream.** A head pose is only
+                            // worth anything while it is the newest one; queued behind a
+                            // clipboard transfer or a lost packet's retransmission it would
+                            // arrive as a view of where the head *was*. Unreliable and
+                            // unordered is exactly right: a lost one is replaced a frame
+                            // later by a better one.
+                            match spatiand_stream::to_bytes(&ClientMessage::Viewport(viewport)) {
+                                Ok(bytes) => {
+                                    let _ = connection.send_datagram(bytes.into());
+                                }
+                                Err(e) => log::warn!("remote: could not encode a viewport: {e}"),
+                            }
                         }
                         None => {}
                     }

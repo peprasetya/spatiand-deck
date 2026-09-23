@@ -126,6 +126,53 @@ void main() {
 }
 "#;
 
+/// An application's own eye view, as the room.
+///
+/// The inverse of how the application drew it: each pixel's direction is turned into the
+/// camera the picture was drawn with, divided by its depth to give tangents, and those are
+/// mapped through that eye's field of view into its part of the buffer. When that camera is the
+/// head right now, this is the picture filling the view. When it is the head as it was a moment
+/// ago, the same arithmetic puts the picture back where it was drawn -- which is what holds the
+/// world still over a network that is always a little late.
+///
+/// Frames are spatiand's, like the sky's: +X forward, +Y left, +Z up; and v is 0 at the top of
+/// a client's buffer, as it is for the panorama.
+const PROJECTION_FRAG: &str = r#"
+in vec2 v_ndc;
+uniform sampler2D u_tex;
+// Inverse of projection * (view with translation removed): clip space back to a world ray.
+uniform mat4 u_inv_vp;
+// A world direction into the camera the picture was drawn with.
+uniform mat3 u_to_frame;
+// tan(angleLeft), tan(angleRight), tan(angleDown), tan(angleUp): signed, as XrFovf's are.
+uniform vec4 u_tan;
+// (u0, v0, u1, v1): this eye's part of the buffer.
+uniform vec4 u_rect;
+out vec4 f_color;
+
+void main() {
+    vec4 far = u_inv_vp * vec4(v_ndc, 1.0, 1.0);
+    vec3 dir = u_to_frame * normalize(far.xyz / far.w);
+    // Behind the camera, or so far to the side that the picture never covered it: there is
+    // nothing to show, and black says so honestly where clamping would smear the edge.
+    if (dir.x <= 1e-4) {
+        f_color = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    // Right is -Y and up is +Z in this frame.
+    float tx = -dir.y / dir.x;
+    float ty = dir.z / dir.x;
+    float u = (tx - u_tan.x) / (u_tan.y - u_tan.x);
+    float v = (u_tan.w - ty) / (u_tan.w - u_tan.z);
+    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
+        f_color = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    vec2 uv = vec2(mix(u_rect.x, u_rect.z, u), mix(u_rect.y, u_rect.w, v));
+    f_color = vec4(texture(u_tex, uv).rgb, 1.0);
+}
+"#;
+
 /// Glass bubbles.
 ///
 /// The quad carries an implicit hemisphere: the fragment's distance from the centre gives a
@@ -555,6 +602,77 @@ impl SkyPipeline {
         gl.Uniform1i(self.loc_hemisphere, i32::from(hemisphere));
         gl.Uniform1f(self.loc_brightness, brightness);
 
+        gl.DrawArrays(ffi::TRIANGLES, 0, 6);
+        gl.BindVertexArray(0);
+    }
+}
+
+/// An application's eye views, filling the view. See [`PROJECTION_FRAG`].
+pub struct ProjectionPipeline {
+    program: u32,
+    vao: u32,
+    loc_tex: i32,
+    loc_inv_vp: i32,
+    loc_to_frame: i32,
+    loc_tan: i32,
+    loc_rect: i32,
+}
+
+impl ProjectionPipeline {
+    pub fn new(renderer: &mut GlesRenderer, quads: &QuadPipeline) -> Result<Self, String> {
+        let vao = quads.quad.vao;
+        renderer
+            .with_context(|gl| unsafe {
+                let program = link(gl, SKY_VERT, PROJECTION_FRAG)?;
+                let name = |s: &str| std::ffi::CString::new(s).unwrap();
+                Ok(Self {
+                    program,
+                    vao,
+                    loc_tex: gl.GetUniformLocation(program, name("u_tex").as_ptr()),
+                    loc_inv_vp: gl.GetUniformLocation(program, name("u_inv_vp").as_ptr()),
+                    loc_to_frame: gl.GetUniformLocation(program, name("u_to_frame").as_ptr()),
+                    loc_tan: gl.GetUniformLocation(program, name("u_tan").as_ptr()),
+                    loc_rect: gl.GetUniformLocation(program, name("u_rect").as_ptr()),
+                })
+            })
+            .map_err(|e| format!("no GL context: {e}"))?
+    }
+
+    /// Fill the viewport with one eye's part of an application's picture.
+    ///
+    /// `inv_view_projection` is built as the sky's is, translation removed: the eye views are
+    /// already drawn from the eye, and letting the neck model through again would count it
+    /// twice. `to_frame` turns a world direction into the camera the picture was drawn with;
+    /// `tangents` are that eye's field of view as `(left, right, down, up)`; `rect` is
+    /// `(u0, v0, u1, v1)`.
+    ///
+    /// # Safety
+    /// Context must be current.
+    pub unsafe fn draw(
+        &self,
+        gl: &ffi::Gles2,
+        texture: u32,
+        inv_view_projection: &Mat4,
+        to_frame: &Mat3,
+        tangents: [f32; 4],
+        rect: UvRect,
+    ) {
+        gl.UseProgram(self.program);
+        gl.BindVertexArray(self.vao);
+        // Opaque and behind everything, as the sky is.
+        gl.Disable(ffi::BLEND);
+        gl.ActiveTexture(ffi::TEXTURE0);
+        gl.BindTexture(ffi::TEXTURE_2D, texture);
+        gl.Uniform1i(self.loc_tex, 0);
+        gl.UniformMatrix4fv(
+            self.loc_inv_vp,
+            1,
+            ffi::FALSE,
+            inv_view_projection.to_cols_array().as_ptr(),
+        );
+        gl.UniformMatrix3fv(self.loc_to_frame, 1, ffi::FALSE, to_frame.to_cols_array().as_ptr());
+        gl.Uniform4f(self.loc_tan, tangents[0], tangents[1], tangents[2], tangents[3]);
+        gl.Uniform4f(self.loc_rect, rect.0, rect.1, rect.2, rect.3);
         gl.DrawArrays(ffi::TRIANGLES, 0, 6);
         gl.BindVertexArray(0);
     }

@@ -131,6 +131,9 @@ impl XrState {
     /// backend reads this every frame; the distinction has to be about *placement* rather
     /// than drawing, because a window that follows the head must follow it for the pointer
     /// and for a drag as well as for the pixels.
+    // Only the tests ask this now: drawing asks `is_environment`, which is the question that
+    // matters there. Kept because "is this a panel the wearer placed" is still a real question.
+    #[allow(dead_code)]
     pub fn is_window(&self) -> bool {
         matches!(self.layer, Layer::Window)
     }
@@ -144,7 +147,13 @@ impl XrState {
     /// something has to stay the transport, so this is the ordinary case for immersive video
     /// rather than an odd one.
     pub fn is_environment(&self) -> bool {
-        matches!(self.layer, Layer::Equirect180 | Layer::Equirect360)
+        matches!(self.layer, Layer::Equirect180 | Layer::Equirect360 | Layer::Projection)
+    }
+
+    /// Whether this surface is the room drawn by an application that tracks the head itself:
+    /// its buffer is what each eye should see, rather than a panorama to be looked around in.
+    pub fn is_projection(&self) -> bool {
+        matches!(self.layer, Layer::Projection)
     }
 
     /// Where the image's centre goes, in radians of world yaw.
@@ -362,7 +371,9 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
                     // thing. Claimed here rather than on commit, because two clients asking
                     // in the same frame must get different answers and a commit is too late
                     // to be one of them.
-                    if matches!(wanted, Layer::Equirect180 | Layer::Equirect360) {
+                    // A projection is the room just as a panorama is -- the application's own
+                    // eye views instead of a picture wrapped round -- so it shares the one claim.
+                    if matches!(wanted, Layer::Equirect180 | Layer::Equirect360 | Layer::Projection) {
                         release_dead_sky(state);
                         match (&state.sky_owner, &surface) {
                             (Some(owner), Some(mine)) if owner != mine => {
@@ -562,11 +573,11 @@ fn layer_name(layer: Layer) -> &'static str {
 /// a window has no way to find that out.
 fn refusal(layer: Layer) -> Option<&'static str> {
     match layer {
-        Layer::Window | Layer::HeadLocked | Layer::Equirect180 | Layer::Equirect360 => None,
-        // The one layer still missing. A client that renders its own two eye views can have
-        // them shown as a window today -- what it cannot yet have is them presented filling
-        // the view, which is what this layer means.
-        Layer::Projection => Some("projection layers are not implemented yet"),
+        Layer::Window
+        | Layer::HeadLocked
+        | Layer::Equirect180
+        | Layer::Equirect360
+        | Layer::Projection => None,
     }
 }
 
@@ -667,18 +678,31 @@ mod tests {
     }
 
     #[test]
-    fn the_layers_that_are_not_built_say_so() {
-        // The rule this holds: a layer is either honoured or refused out loud. Silently
-        // drawing a client's sky as a window is the failure mode worth a test.
-        for built in [
+    fn every_layer_is_honoured() {
+        // The rule this used to hold was that a layer is either honoured or refused out loud;
+        // projection was the one refused. It is drawn now, so nothing is refused for being
+        // unbuilt -- only for being taken, which is exclusivity's business, not this function's.
+        for layer in [
             Layer::Window,
             Layer::HeadLocked,
             Layer::Equirect180,
             Layer::Equirect360,
+            Layer::Projection,
         ] {
-            assert!(refusal(built).is_none(), "{built:?} is refused");
+            assert!(refusal(layer).is_none(), "{layer:?} is refused");
         }
-        assert!(refusal(Layer::Projection).is_some());
+    }
+
+    #[test]
+    fn a_projection_is_the_room_and_not_a_window() {
+        // It has no frame, cannot be switched to and is not counted -- the same as a panorama.
+        let projection = XrState {
+            layer: Layer::Projection,
+            ..Default::default()
+        };
+        assert!(projection.is_environment());
+        assert!(projection.is_projection());
+        assert!(!projection.is_window());
     }
 
     #[test]

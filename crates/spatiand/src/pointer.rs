@@ -485,6 +485,85 @@ impl Drag {
     }
 }
 
+/// The room, for a pointer that passes every window by.
+///
+/// A surface that has become the room by drawing its own eye views has no quad to hit -- it is
+/// everywhere at once -- but it is still an application with menus and a world to click in. So
+/// a ray that meets no window lands on it: the ray's direction is taken back into the camera
+/// the picture was drawn with and through that eye's field of view, the same arithmetic the
+/// room is drawn with, so the pixel the wearer points at is the pixel that is clicked.
+#[derive(Debug, Clone)]
+pub struct Room {
+    pub surface: WlSurface,
+    /// The camera the picture was drawn with. Today, the head as it is now.
+    pub frame: glam::DQuat,
+    /// The left eye's field of view as `XrFovf`. The left eye's picture is the one a click is
+    /// put into, because that is the half an application's own UI is laid out in.
+    pub fov: [f32; 4],
+    /// The left eye's part of the surface, `(u0, u1, v0, v1)`.
+    pub rect: [f32; 4],
+    /// The surface's size in its own pixels.
+    pub size: (f64, f64),
+}
+
+impl Room {
+    /// Where on the room's surface a ray lands, if it lands on the picture at all.
+    pub fn point(&self, ray: &Ray) -> Option<Point<f64, Logical>> {
+        room_point(self.frame, self.fov, self.rect, self.size, ray.direction)
+            .map(|(x, y)| Point::from((x, y)))
+    }
+}
+
+/// [`Room::point`]'s arithmetic, apart from the surface it is about, so it can be tested.
+///
+/// The inverse of `PROJECTION_FRAG`: a direction into the picture's camera, then its tangents
+/// through the field of view, then into this eye's part of the surface.
+fn room_point(
+    frame: glam::DQuat,
+    fov: [f32; 4],
+    rect: [f32; 4],
+    size: (f64, f64),
+    direction: glam::DVec3,
+) -> Option<(f64, f64)> {
+    let dir = frame.inverse() * direction;
+    if dir.x <= 1e-4 {
+        return None;
+    }
+    let tan = |a: f32| (a as f64).tan();
+    let (left, right, up, down) = (tan(fov[0]), tan(fov[1]), tan(fov[2]), tan(fov[3]));
+    // Right is -Y and up is +Z in spatiand's frame.
+    let tx = -dir.y / dir.x;
+    let ty = dir.z / dir.x;
+    let u = (tx - left) / (right - left);
+    let v = (up - ty) / (up - down);
+    if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+        return None;
+    }
+    let mix = |a: f32, b: f32, t: f64| a as f64 + (b as f64 - a as f64) * t;
+    Some((mix(rect[0], rect[1], u) * size.0, mix(rect[2], rect[3], v) * size.1))
+}
+
+/// The room as the pointer should see it this frame, if a surface is drawing it.
+pub fn room(state: &Spatiand, head: glam::DQuat, fov: [f32; 4]) -> Option<Room> {
+    use smithay::backend::renderer::utils::with_renderer_surface_state;
+    use smithay::wayland::seat::WaylandFocus;
+    state.space.elements().find_map(|window| {
+        let surface = window.wl_surface()?.into_owned();
+        let xr = crate::xr::state_of(&surface);
+        if !xr.is_projection() {
+            return None;
+        }
+        let size = with_renderer_surface_state(&surface, |s| s.surface_size()).flatten()?;
+        Some(Room {
+            surface,
+            frame: head,
+            fov,
+            rect: xr.eye_rect(true),
+            size: (size.w as f64, size.h as f64),
+        })
+    })
+}
+
 /// Everything the pointer layer remembers between frames.
 #[derive(Debug, Default)]
 pub struct PointerState {
@@ -495,6 +574,8 @@ pub struct PointerState {
     last_focus: Option<usize>,
     /// Where a controller layout's mouse is inside the focused window, surface pixels.
     mapped_cursor: Option<(f64, f64)>,
+    /// The room, when an application is drawing it; set each frame. See [`Room`].
+    room: Option<Room>,
 }
 
 /// A ray plus what it currently hits.
@@ -664,6 +745,12 @@ pub fn surface_position(
 }
 
 impl PointerState {
+    /// Where the room is this frame; see [`Room`]. Set every frame, so a room given up stops
+    /// taking the pointer the moment it is given up.
+    pub fn set_room(&mut self, room: Option<Room>) {
+        self.room = room;
+    }
+
     /// Send motion for wherever the pointer is now.
     pub fn motion(
         &mut self,
@@ -711,6 +798,18 @@ impl PointerState {
                     let window = windows.get(index)?;
                     surface_position(&hit, window.pixels, &window.placement)
                 }),
+        };
+        // **Past every window and every menu, the room.** Only when the ray touched nothing
+        // else at all: a hit on a window's own chrome leaves `local` empty too, and that must
+        // stay a hit on the window, not fall through into the world behind it.
+        let (focus, local) = match (focus, local, aim.hit) {
+            (None, None, None) => match self.room.as_ref().and_then(|room| {
+                room.point(&aim.ray).map(|point| (room.surface.clone(), point))
+            }) {
+                Some((surface, point)) => (Some((surface, Point::from((0.0, 0.0)))), Some(point)),
+                None => (None, None),
+            },
+            (focus, local, _) => (focus, local),
         };
 
         // **Where the laser is, a layout's mouse is too.** A button a controller layout
@@ -983,6 +1082,48 @@ impl PointerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A symmetric 40-by-25 degree eye, left half of a side-by-side surface 3840 by 1080.
+    const FOV: [f32; 4] = [-0.349_066, 0.349_066, 0.218_166, -0.218_166];
+    const LEFT_HALF: [f32; 4] = [0.0, 0.5, 0.0, 1.0];
+    const SBS: (f64, f64) = (3840.0, 1080.0);
+
+    #[test]
+    fn pointing_straight_ahead_lands_in_the_middle_of_the_left_eye() {
+        // Not the middle of the whole buffer: that is the seam between the eyes, and a click
+        // there would land half an eye to the right of where the wearer is looking.
+        let (x, y) = room_point(glam::DQuat::IDENTITY, FOV, LEFT_HALF, SBS, DVec3::X).expect("on");
+        assert!((x - 960.0).abs() < 1e-6, "x = {x}");
+        assert!((y - 540.0).abs() < 1e-6, "y = {y}");
+    }
+
+    #[test]
+    fn pointing_right_and_up_moves_right_and_up_in_the_picture() {
+        // +Y is left and +Z up in spatiand's frame; a surface's y grows downwards.
+        let dir = DVec3::new(1.0, -0.2, 0.1).normalize();
+        let (x, y) = room_point(glam::DQuat::IDENTITY, FOV, LEFT_HALF, SBS, dir).expect("on");
+        assert!(x > 960.0, "went left: {x}");
+        assert!(y < 540.0, "went down: {y}");
+    }
+
+    #[test]
+    fn a_turned_head_takes_the_picture_with_it() {
+        // The picture is drawn from the head, so straight ahead of a turned head is still the
+        // middle of the picture -- and straight ahead of the world is now off to one side.
+        let turned = glam::DQuat::from_rotation_z(0.3);
+        let ahead = turned * DVec3::X;
+        let (x, _) = room_point(turned, FOV, LEFT_HALF, SBS, ahead).expect("on");
+        assert!((x - 960.0).abs() < 1e-6, "x = {x}");
+        let (x, _) = room_point(turned, FOV, LEFT_HALF, SBS, DVec3::X).expect("still in view");
+        assert!(x > 960.0, "turning left should put the world's forward to the right: {x}");
+    }
+
+    #[test]
+    fn behind_and_outside_the_picture_is_nowhere() {
+        assert!(room_point(glam::DQuat::IDENTITY, FOV, LEFT_HALF, SBS, -DVec3::X).is_none());
+        let far_left = DVec3::new(1.0, 2.0, 0.0).normalize();
+        assert!(room_point(glam::DQuat::IDENTITY, FOV, LEFT_HALF, SBS, far_left).is_none());
+    }
     use crate::window::Placement;
     use glam::DVec3;
     // Only the tests cast a *bounded* ray; the module itself always wants the whole plane.

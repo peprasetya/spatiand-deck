@@ -21,6 +21,7 @@
 //! ```
 
 mod apps;
+mod appcontrol;
 mod audio;
 mod clipboard;
 mod xwayland;
@@ -34,6 +35,7 @@ mod net;
 mod pace;
 mod pad;
 mod pair;
+mod pose;
 mod route;
 mod state;
 
@@ -350,6 +352,27 @@ fn run_host(
     } else {
         None
     };
+    // The head, for applications that take the view. Losing it costs those applications their
+    // head tracking and nothing else, so a failure is said and survived.
+    let mut render_size: Option<std::sync::Arc<std::sync::atomic::AtomicU64>> = None;
+    let poses = if options.serve {
+        match pose::Poses::new() {
+            Ok(poses) => {
+                render_size = Some(poses.render_size());
+                match poses.read_only() {
+                    Ok(fd) => host.pose_fd = Some(fd),
+                    Err(e) => log::warn!("{e}; applications here will not see the head"),
+                }
+                Some(poses)
+            }
+            Err(e) => {
+                log::warn!("could not make the pose ring: {e}; applications here will not see the head");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let net = if options.serve {
         let trust = Trust::Gate(gate.clone());
         let bind = format!("[::]:{}", options.port).parse().or_else(
@@ -357,7 +380,7 @@ fn run_host(
                 format!("0.0.0.0:{}", options.port).parse()
             },
         )?;
-        Some(Net::start(bind, identity, trust)?)
+        Some(Net::start(bind, identity, trust, poses)?)
     } else {
         None
     };
@@ -371,8 +394,12 @@ fn run_host(
         match library.served.get(id) {
             Some(app) => {
                 let sound = host.sounds.as_mut().map(|s| s.prepare(app)).unwrap_or_default();
-                let pid = apps::launch(app, &host.socket_name, host.x11_display, &sound)?;
-                host.app_of_pid.insert(pid as i32, app.id.clone());
+                let pose = host.pose_fd.as_ref().map(std::os::fd::AsFd::as_fd);
+                let launched = apps::launch(app, &host.socket_name, host.x11_display, &sound, pose)?;
+                host.app_of_pid.insert(launched.pid as i32, app.id.clone());
+                if let Some(control) = launched.control {
+                    appcontrol::watch(&mut host, app.id.clone(), control);
+                }
             }
             None => {
                 return Err(format!(
@@ -772,6 +799,36 @@ fn run_host(
             }
         }
 
+        // --- the size the session wants, for applications drawing two eyes ---
+        if let Some(size) = &render_size {
+            appcontrol::tell_render_size(
+                &mut host,
+                pose::unpack_size(size.load(std::sync::atomic::Ordering::Relaxed)),
+            );
+        }
+
+        // --- what applications have said they became ---
+        //
+        // A viewer that has just logged in and become the world, typically. Its windows'
+        // streams start again, which re-announces them with the new eye layout and sends a
+        // keyframe -- the session opens a fresh decoder on each announcement and waits for
+        // exactly that -- and the session is told what each window now is in the room. The
+        // viewer resizes itself at the same moment, so the restart costs nothing that the
+        // resize was not going to cost anyway.
+        for app in std::mem::take(&mut host.presentation_changed) {
+            let (eyes, layer) = host.presentation.get(&app).copied().unwrap_or_default();
+            log::info!("{app} is now {layer:?}, eyes {eyes:?}");
+            for tracked in host.windows.iter().filter(|t| t.app == app) {
+                streams.remove(&tracked.id.0);
+                if let (Some(net), true) = (&net, attached) {
+                    net.send(ToSession::Control(HostMessage::Layer {
+                        window: tracked.id,
+                        layer,
+                    }));
+                }
+            }
+        }
+
         // --- encode whatever is new, for whoever is listening ---
         if net.is_some() && attached || encoded_file.is_some() {
             let work: Vec<(u32, smithay::desktop::Window, (u32, u32), u64)> = host
@@ -854,7 +911,7 @@ fn run_host(
                                     codec: Codec::H265,
                                     width: size.0,
                                     height: size.1,
-                                    eyes: spatiand_stream::Eyes::Mono,
+                                    eyes: presented(&host, id).0,
                                 }));
                             }
                         }
@@ -965,9 +1022,13 @@ fn start_app(host: &mut state::Host, catalog: &Catalog, app: &str) -> Result<(),
     if !sound.is_empty() {
         sound.extend(microphone::environment());
     }
-    let pid = apps::launch(entry, &host.socket_name, host.x11_display, &sound)
+    let pose = host.pose_fd.as_ref().map(std::os::fd::AsFd::as_fd);
+    let launched = apps::launch(entry, &host.socket_name, host.x11_display, &sound, pose)
         .map_err(|e| format!("could not start {app}: {e}"))?;
-    host.app_of_pid.insert(pid as i32, entry.id.clone());
+    host.app_of_pid.insert(launched.pid as i32, entry.id.clone());
+    if let Some(control) = launched.control {
+        appcontrol::watch(host, entry.id.clone(), control);
+    }
     Ok(())
 }
 
@@ -1000,6 +1061,18 @@ fn admit_pairing(
 }
 
 /// Everything a session is told when it is let in.
+/// What a window's application has said it is: its eye layout and its layer.
+///
+/// By application rather than by window, because that is who says it; a viewer has one window
+/// and says it of that one.
+fn presented(host: &state::Host, window: u32) -> (spatiand_stream::Eyes, spatiand_stream::Layer) {
+    host.windows
+        .iter()
+        .find(|t| t.id.0 == window)
+        .and_then(|t| host.presentation.get(&t.app).copied())
+        .unwrap_or_default()
+}
+
 fn greet(
     net: &Net,
     host: &state::Host,
@@ -1032,7 +1105,16 @@ fn greet(
                 codec: Codec::H265,
                 width: stream.encoder.width,
                 height: stream.encoder.height,
-                eyes: spatiand_stream::Eyes::Mono,
+                eyes: presented(host, tracked.id.0).0,
+            }));
+        }
+        // And what it is in the room, if it is anything other than a window: a session that
+        // arrives while a viewer is already the world has to be told, or it sees a window.
+        let layer = presented(host, tracked.id.0).1;
+        if layer != spatiand_stream::Layer::Window {
+            net.send(ToSession::Control(HostMessage::Layer {
+                window: tracked.id,
+                layer,
             }));
         }
     }

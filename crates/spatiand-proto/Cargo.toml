@@ -8,6 +8,8 @@ repository.workspace = true
 description = "Spatiand's private Wayland protocols"
 
 [dependencies]
+# For the pose ring: memfd, mmap, and reopening it read-only. See `pose::Ring`.
+libc = "0.2"
 # Pinned to the versions smithay already brings in: two copies of wayland-server in one
 # process is not a compile error, it is a runtime one -- objects created through one are
 # unrecognised by the other, and the symptom is a client that binds a global successfully and
@@ -18,3 +20,9 @@ wayland-scanner = "0.31"
 # gives "cannot find module or crate `wayland_backend`" from inside a macro expansion, which
 # points at the macro rather than at the missing dependency.
 wayland-backend = "0.3"
+# Only for the `client` feature. The same 0.31 the session's in-process client already uses:
+# two copies in one process would mean a proxy made through one is unknown to the other.
+wayland-client = { version = "0.31", optional = true }
+
+[features]
+client = ["dep:wayland-client"]

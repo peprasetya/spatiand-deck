@@ -19,6 +19,7 @@ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
 };
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
+use spatiand_proto::client::{spatiand_xr_surface_v1, spatiand_xr_v1};
 use spatiand_stream::Input;
 use spatiand_video::Converted;
 
@@ -44,6 +45,9 @@ pub struct Window {
     /// What the compositor last asked this window to be, if anything.
     pub configured: Option<(i32, i32)>,
     pub closed: bool,
+    /// This window's `spatiand_xr_v1` surface, made the first time its application says it is
+    /// anything other than an ordinary mono window.
+    xr: Option<spatiand_xr_surface_v1::SpatiandXrSurfaceV1>,
 }
 
 /// Everything the client half owns.
@@ -58,6 +62,10 @@ pub struct Client {
     dmabuf: zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
     /// Only for the diagnostic path below.
     shm: wl_shm::WlShm,
+    /// How a remote window claims a layer or an eye layout: the same protocol any local
+    /// application uses, so a remote world is judged — granted, refused, made exclusive — by
+    /// exactly the rules a local one is. Absent only against a compositor too old to offer it.
+    xr: Option<spatiand_xr_v1::SpatiandXrV1>,
     pub windows: HashMap<u32, Window>,
     /// Windows whose buffers the compositor has released since the last look.
     released: Vec<(u32, u32)>,
@@ -113,6 +121,10 @@ impl Client {
         let shm: wl_shm::WlShm = globals
             .bind(&handle, 1..=2, ())
             .map_err(|e| format!("no wl_shm: {e}"))?;
+        let xr: Option<spatiand_xr_v1::SpatiandXrV1> = globals.bind(&handle, 1..=3, ()).ok();
+        if xr.is_none() {
+            log::warn!("remote: the compositor offers no spatiand_xr_v1; remote worlds stay windows");
+        }
 
         let client = Client {
             handle,
@@ -120,6 +132,7 @@ impl Client {
             shell,
             dmabuf,
             shm,
+            xr,
             windows: HashMap::new(),
             released: Vec::new(),
             resized: Vec::new(),
@@ -157,8 +170,36 @@ impl Client {
                 next_buffer: 0,
                 configured: None,
                 closed: false,
+                xr: None,
             },
         );
+    }
+
+    /// Say what a remote window is in the room and how its two eyes are packed, as its
+    /// application has just told its host.
+    ///
+    /// Claimed through `spatiand_xr_v1`, and committed straight away rather than on the next
+    /// picture: a viewer that has just become the world may not send another frame until it
+    /// has one worth sending, and the room should change when it said so, not when it next
+    /// happens to draw. A claim the compositor refuses comes back as `layer_refused` and is
+    /// logged; the window simply stays a window.
+    pub fn present(&mut self, id: u32, eyes: spatiand_stream::Eyes, layer: spatiand_stream::Layer) {
+        use spatiand_xr_surface_v1::{EyeLayout, Layer};
+        let Some(xr) = self.xr.as_ref() else { return };
+        let Some(window) = self.windows.get_mut(&id) else { return };
+        let surface = window
+            .xr
+            .get_or_insert_with(|| xr.get_xr_surface(&window.surface, &self.handle, id));
+        surface.set_eye_layout(match eyes {
+            spatiand_stream::Eyes::Mono => EyeLayout::Mono,
+            spatiand_stream::Eyes::SideBySide => EyeLayout::SideBySide,
+            spatiand_stream::Eyes::TopBottom => EyeLayout::TopBottom,
+        });
+        surface.set_layer(match layer {
+            spatiand_stream::Layer::Window => Layer::Window,
+            spatiand_stream::Layer::Projection => Layer::Projection,
+        });
+        window.surface.commit();
     }
 
     /// A window's application renamed it — a browser moving to another page.
@@ -451,6 +492,42 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Client {
         _connection: &Connection,
         _handle: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<spatiand_xr_v1::SpatiandXrV1, ()> for Client {
+    fn event(
+        _: &mut Self,
+        _: &spatiand_xr_v1::SpatiandXrV1,
+        _: spatiand_xr_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The global has no events.
+    }
+}
+
+impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, u32> for Client {
+    fn event(
+        _: &mut Self,
+        _: &spatiand_xr_surface_v1::SpatiandXrSurfaceV1,
+        event: spatiand_xr_surface_v1::Event,
+        id: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // Said out loud, because the wearer's only other evidence is a world that stayed a
+        // window, which looks exactly like the application never having asked.
+        match event {
+            spatiand_xr_surface_v1::Event::LayerRefused { layer, reason } => {
+                log::warn!("remote: window {id} was refused {layer:?}: {reason}");
+            }
+            spatiand_xr_surface_v1::Event::LayerLost { layer } => {
+                log::info!("remote: window {id} lost {layer:?} and is a window again");
+            }
+            _ => {}
+        }
     }
 }
 

@@ -11,6 +11,14 @@ use std::process::Command;
 
 use spatiand_stream::App;
 
+/// What starting an application produced.
+pub struct Launched {
+    pub pid: u32,
+    /// Our end of the application's control socket, for one that takes the view. See
+    /// `appcontrol`: the caller hands it to `appcontrol::watch`.
+    pub control: Option<std::os::fd::OwnedFd>,
+}
+
 /// Start an application, and say which process it became.
 ///
 /// The environment it is given is everything that makes it behave as a remote application:
@@ -21,7 +29,8 @@ pub fn launch(
     wayland_display: &str,
     x11_display: Option<u32>,
     sound: &[(String, String)],
-) -> std::io::Result<u32> {
+    pose: Option<std::os::fd::BorrowedFd<'_>>,
+) -> std::io::Result<Launched> {
     let mut command = Command::new(&app.exec);
     command.args(&app.args);
     if let Some(dir) = &app.workdir {
@@ -35,6 +44,45 @@ pub fn launch(
     for (key, value) in sound {
         command.env(key, value);
     }
+    // **The head, for an application that takes the view.** A read-only descriptor onto the
+    // pose ring, left open across exec and named in the environment. Only for `kind = "vr"`:
+    // a window among others has no use for the wearer's head, and there is no reason to tell
+    // every program on the machine where somebody is looking.
+    //
+    // Its own number rather than a fixed one: moving it onto, say, 3 would mean `dup2` in the
+    // child, and 3 may be exactly where the standard library put the pipe it reports a failed
+    // exec through — which would turn every launch into a spawn error that makes no sense.
+    if let Some(pose) = pose.filter(|_| app.kind == spatiand_stream::AppKind::Vr) {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let fd = pose.as_raw_fd();
+        command.env("SPATIAND_POSE_FD", fd.to_string());
+        command.env("SPATIAND_POSE_SIZE", spatiand_proto::pose::channel_size().to_string());
+        // SAFETY: between fork and exec only async-signal-safe calls are made, and they touch
+        // nothing but the child's own copy of the descriptor table.
+        unsafe {
+            command.pre_exec(move || keep_across_exec(fd));
+        }
+    }
+    // **And a way to say what it has become.** The other half of taking the view: the pose is
+    // what the application is told, this is what it tells. See `appcontrol`. Held here only
+    // until the spawn, so the child is the only one left holding its end and the socket closes
+    // when the application does.
+    let mut theirs: Option<std::os::fd::OwnedFd> = None;
+    let mut ours: Option<std::os::fd::OwnedFd> = None;
+    if app.kind == spatiand_stream::AppKind::Vr {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let (host_end, app_end) = crate::appcontrol::pair()?;
+        let fd = app_end.as_raw_fd();
+        command.env("SPATIAND_CONTROL_FD", fd.to_string());
+        // SAFETY: as for the pose descriptor above.
+        unsafe {
+            command.pre_exec(move || keep_across_exec(fd));
+        }
+        theirs = Some(app_end);
+        ours = Some(host_end);
+    }
     // **Its own process group**, so that force-quitting it can reach everything it started —
     // a browser's renderers, a game's launcher and the game — with one signal, and so that
     // doing so cannot reach the host, which it would otherwise share a group with.
@@ -43,10 +91,27 @@ pub fn launch(
         command.process_group(0);
     }
     let child = command.spawn()?;
+    drop(theirs);
     log::info!("launched {} as pid {}", app.id, child.id());
     // The child is deliberately not waited on here: an application outliving a viewer is the
     // whole point, and the host reaps it when it exits.
-    Ok(child.id())
+    Ok(Launched {
+        pid: child.id(),
+        control: ours,
+    })
+}
+
+/// Clear close-on-exec on one descriptor, in the child, between fork and exec.
+///
+/// Only async-signal-safe calls, touching nothing but the child's own descriptor table.
+fn keep_across_exec(fd: i32) -> std::io::Result<()> {
+    // SAFETY: fcntl on a descriptor number, with no memory involved.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    // SAFETY: as above.
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Everything a launched application is told.
@@ -156,6 +221,50 @@ mod tests {
             ..App::new("viewer", "Viewer", "/usr/bin/viewer")
         };
         assert_eq!(get(&stereo), "side_by_side");
+    }
+
+    /// Start `/bin/sh -c script` the way the host starts anything, and say whether it succeeded.
+    fn exits_cleanly(kind: spatiand_stream::AppKind, script: String) -> bool {
+        use std::os::fd::AsFd;
+        let poses = crate::pose::Poses::new().expect("ring");
+        let ro = poses.read_only().expect("read-only descriptor");
+        let app = App {
+            kind,
+            args: vec!["-c".into(), script],
+            ..App::new("probe", "Probe", "/bin/sh")
+        };
+        let launched = launch(&app, "wayland-probe", None, &[], Some(ro.as_fd())).expect("launched");
+        let mut status = 0;
+        // SAFETY: waiting on a child this test just started.
+        unsafe { libc::waitpid(launched.pid as i32, &mut status, 0) };
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    }
+
+    #[test]
+    fn an_application_that_takes_the_view_is_handed_the_head() {
+        // Named, and actually open on the other side of exec -- the flag that would have
+        // closed it is the whole thing being tested.
+        assert!(exits_cleanly(
+            spatiand_stream::AppKind::Vr,
+            r#"[ -n "$SPATIAND_POSE_FD" ] && [ -e "/proc/self/fd/$SPATIAND_POSE_FD" ] && [ "$SPATIAND_POSE_SIZE" -gt 0 ]"#.into(),
+        ));
+    }
+
+    #[test]
+    fn an_application_that_takes_the_view_can_say_what_it_has_become() {
+        // Its end of the control socket is open on the other side of exec, and writable.
+        assert!(exits_cleanly(
+            spatiand_stream::AppKind::Vr,
+            r#"[ -n "$SPATIAND_CONTROL_FD" ] && [ -w "/proc/self/fd/$SPATIAND_CONTROL_FD" ]"#.into(),
+        ));
+    }
+
+    #[test]
+    fn a_window_is_not_told_where_the_wearer_is_looking() {
+        assert!(exits_cleanly(
+            spatiand_stream::AppKind::Window,
+            r#"[ -z "$SPATIAND_POSE_FD" ]"#.into(),
+        ));
     }
 
     #[test]

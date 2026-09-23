@@ -3957,6 +3957,7 @@ dependencies = [
  "spatiand-host-catalog",
  "spatiand-pad",
  "spatiand-platform",
+ "spatiand-proto",
  "spatiand-stream",
  "tokio",
  "toml",
@@ -4027,7 +4028,9 @@ dependencies = [
 name = "spatiand-proto"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "wayland-backend",
+ "wayland-client",
  "wayland-scanner",
  "wayland-server",
 ]
