@@ -88,6 +88,11 @@ pub fn environment(
     }
     // Says which host and which application, for anything that wants to know it is remote.
     env.insert("SPATIAND_REMOTE_APP".into(), app.id.clone());
+    // **Being remote is not the same as being in a headset.** Today every session is a pair of
+    // eyes, so an application could get away with reading `SPATIAND_REMOTE_APP` and assuming
+    // stereo — and would then be wrong the first time this protocol carries a window to an
+    // ordinary flat desktop. An application that draws its own two eyes reads this instead.
+    env.insert("SPATIAND_EYES".into(), app.eyes.as_str().into());
     for (key, value) in &app.env {
         env.insert(key.clone(), value.clone());
     }
@@ -132,6 +137,25 @@ mod tests {
             "",
             "an inherited X display would take the window somewhere we cannot see it"
         );
+    }
+
+    #[test]
+    fn an_application_is_told_whether_it_has_two_eyes_to_draw() {
+        let get = |app: &App| {
+            environment(app, "wayland-1", None)
+                .iter()
+                .find(|(key, _)| key == "SPATIAND_EYES")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        // The default is one eye, so a remote window on a flat desktop stays flat even though
+        // everything reaching it today is a headset.
+        assert_eq!(get(&App::new("thing", "Thing", "/usr/bin/thing")), "mono");
+        let stereo = App {
+            eyes: spatiand_stream::Eyes::SideBySide,
+            ..App::new("viewer", "Viewer", "/usr/bin/viewer")
+        };
+        assert_eq!(get(&stereo), "side_by_side");
     }
 
     #[test]

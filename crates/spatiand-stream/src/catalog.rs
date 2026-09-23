@@ -131,6 +131,20 @@ pub enum Eyes {
     TopBottom,
 }
 
+impl Eyes {
+    /// The name as the catalogue file spells it, which is also what a launched application is
+    /// told in `SPATIAND_EYES`. An application that renders its own two eyes has to be given
+    /// this before its first frame, and it is the same word on both sides so that a reader of
+    /// `apps.toml` and a reader of the environment are never looking at two vocabularies.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Eyes::Mono => "mono",
+            Eyes::SideBySide => "side_by_side",
+            Eyes::TopBottom => "top_bottom",
+        }
+    }
+}
+
 /// What shape the application's sound is.
 ///
 /// `Auto` is right for almost everything: the host opens a stereo sink and the session places
