@@ -301,6 +301,15 @@ pub fn run(
     // Which keys the pointers are over, so they can be drawn raised. At most one per pad.
     use spatiand_shell::keyboard::Key;
     let mut keyboard_hover: Vec<&'static Key> = Vec::new();
+    /// How long a key stays drawn as pressed after it is struck.
+    ///
+    /// A press through a pointer has no duration of its own -- the trigger clicks and the
+    /// character is sent in the same instant -- so the key has to be held down for the eye
+    /// rather than for the keymap. Shorter than this and a quick word shows nothing; longer and
+    /// a key is still down when the next one is struck.
+    const PRESS_SHOWN: Duration = Duration::from_millis(130);
+    /// Keys struck recently, and when, so a press can be seen as well as heard.
+    let mut keyboard_struck: Vec<(&'static Key, std::time::Instant)> = Vec::new();
     // Where each ray meets the keyboard, as `[right, left]`, so the reticle can be put *on* it.
     //
     // The keyboard is not a window and so is not in the list the aim is cast against. Without
@@ -1925,8 +1934,25 @@ pub fn run(
                 scene.sync_keyboard(&mut renderer, &mut text, &keyboard, ppd)?;
                 // A picture of each raised key. Built here rather than in the draw closure,
                 // which holds the GL context and cannot also take the renderer.
+                // A key is drawn down for a moment after it is struck, then comes back up.
+                keyboard_struck.retain(|(_, when)| when.elapsed() < PRESS_SHOWN);
                 for key in &keyboard_hover {
-                    scene.sync_key_cap(&mut renderer, &mut text, &keyboard, key)?;
+                    scene.sync_key_cap(
+                        &mut renderer,
+                        &mut text,
+                        &keyboard,
+                        key,
+                        crate::keyboard_face::Lift::Hover,
+                    )?;
+                }
+                for (key, _) in &keyboard_struck {
+                    scene.sync_key_cap(
+                        &mut renderer,
+                        &mut text,
+                        &keyboard,
+                        key,
+                        crate::keyboard_face::Lift::Press,
+                    )?;
                 }
                 debug_assert!(keyboard_hover.len() <= 2, "at most one key per pad");
             }
@@ -2626,6 +2652,9 @@ pub fn run(
                                         }
                                     }
                                     keyboard.after_press(key);
+                                    // Shown as pressed for a moment. See `PRESS_SHOWN`.
+                                    keyboard_struck.retain(|(k, _)| k.code != key.code);
+                                    keyboard_struck.push((key, std::time::Instant::now()));
                                 }
                                 Some(spatiand_shell::keyboard::Target::SoundToggle) => {
                                     // Counts as having typed, so this press does not also fall
@@ -2845,6 +2874,9 @@ pub fn run(
                 let keyboard_state = &keyboard;
                 let keyboard_hot = keyboard_border_hot;
                 let keyboard_raised = &keyboard_hover;
+                let pressed_now: Vec<&'static Key> =
+                    keyboard_struck.iter().map(|(key, _)| *key).collect();
+                let keyboard_down = &pressed_now;
                 renderer.with_context(|gl| unsafe {
                     gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
                     gl.Disable(ffi::SCISSOR_TEST);
@@ -2926,6 +2958,7 @@ pub fn run(
                                 keyboard_state,
                                 keyboard_hot,
                                 keyboard_raised,
+                                keyboard_down,
                             );
                         }
                         scene.draw_menu(gl, &eye, &shell, (stereo.h_fov_deg, stereo.v_fov_deg()));
@@ -3109,6 +3142,9 @@ pub fn run(
                                         }
                                     }
                                     keyboard.after_press(key);
+                                    // Shown as pressed for a moment. See `PRESS_SHOWN`.
+                                    keyboard_struck.retain(|(k, _)| k.code != key.code);
+                                    keyboard_struck.push((key, std::time::Instant::now()));
                                     continue;
                                 }
                                 crate::sidecar::Action::ToggleKeyClick => {

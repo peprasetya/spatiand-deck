@@ -25,6 +25,10 @@
 //! catch the exit button part-way through its hold. `SPATIAND_VIEW_MENU=output|input` draws
 //! that sound picker with its list open.
 //!
+//! `SPATIAND_VIEW_HOVER=g` draws that key of the world's keyboard raised, and
+//! `SPATIAND_VIEW_PRESS=h` draws that one pressed — the only way to see either state without a
+//! controller in hand.
+//!
 //! `SPATIAND_VIEW_CLICK=off` draws either keyboard with its sound turned off, which is the
 //! only way to look at the muted speaker without a headset and a finger.
 //!
@@ -874,8 +878,34 @@ pub fn run(
                 .collect(),
             _ => Vec::new(),
         };
+    // `SPATIAND_VIEW_PRESS=h` draws that key pressed, the same way.
+    let pressed_keys: Vec<&'static spatiand_shell::keyboard::Key> =
+        match std::env::var("SPATIAND_VIEW_PRESS") {
+            Ok(want) if !want.is_empty() => spatiand_shell::keyboard::ROWS
+                .iter()
+                .flat_map(|r| r.iter())
+                .find(|k| k.label == want)
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
     for key in &hovered_keys {
-        scene.sync_key_cap(&mut renderer, &mut text, &keyboard, key)?;
+        scene.sync_key_cap(
+            &mut renderer,
+            &mut text,
+            &keyboard,
+            key,
+            crate::keyboard_face::Lift::Hover,
+        )?;
+    }
+    for key in &pressed_keys {
+        scene.sync_key_cap(
+            &mut renderer,
+            &mut text,
+            &keyboard,
+            key,
+            crate::keyboard_face::Lift::Press,
+        )?;
     }
     let shell_ref = &shell;
     let scene_ref = &scene;
@@ -921,6 +951,7 @@ pub fn run(
                 keyboard_state,
                 false,
                 &hovered_keys,
+                &pressed_keys,
             );
         }
         scene_ref.draw_menu(gl, &eye, shell_ref, (stereo.h_fov_deg, stereo.v_fov_deg()));

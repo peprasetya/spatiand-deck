@@ -80,10 +80,24 @@ const KEYBOARD_DISTANCE: f32 = 1.3;
 const KEYBOARD_FACE_PX: u32 = 1792;
 /// How far a hovered key stands off the face, metres.
 ///
-/// Small: at a keyboard about 1.3 m away this is a couple of millimetres, which is enough for
-/// the cap to cast itself clear of its neighbours and be seen as raised without the letters
-/// swimming as the pointer moves between keys.
-const HOVER_LIFT_M: f32 = 0.006;
+/// Six millimetres to begin with, which was honest about the arithmetic — a quarter of a degree
+/// at arm's length — and invisible to the person wearing the glasses, who reported the keyboard
+/// as flat. Depth alone is a weak cue at this size; what carries it is the shadow beneath the
+/// cap and the cap growing very slightly as it comes closer, so all three are turned up
+/// together rather than the distance alone.
+const HOVER_LIFT_M: f32 = 0.018;
+/// How far a pressed key sinks *below* the face, metres.
+///
+/// Past where it started, not merely back to flat. A key that returns to level on being
+/// pressed looks like the hover ending; one that goes under reads as having bottomed out.
+const PRESS_SINK_M: f32 = 0.007;
+/// How much a cap grows as it rises and shrinks as it is pressed.
+///
+/// Small on purpose. This is perspective, not a cartoon: the amount a cap really would gain by
+/// coming 18 mm closer is under a percent, and the exaggeration here is what makes the movement
+/// legible at a glance without the letters appearing to swim.
+const HOVER_GROW: f32 = 1.06;
+const PRESS_SHRINK: f32 = 0.93;
 /// How far a popup stands off the window it belongs to, metres, per level of nesting.
 ///
 /// There is no depth buffer — the scene is flat quads sorted back to front — so a menu drawn
@@ -1113,14 +1127,15 @@ impl Scene {
         text: &mut TextRenderer,
         keyboard: &spatiand_shell::keyboard::Keyboard,
         key: &spatiand_shell::keyboard::Key,
+        lift: crate::keyboard_face::Lift,
     ) -> Result<(), String> {
-        let id = crate::keyboard_face::cap_id(keyboard, key);
+        let id = crate::keyboard_face::cap_id(keyboard, key, lift);
         if self.key_caps.contains_key(&id) {
             return Ok(());
         }
         // Drawn well above the size it appears at: this is the one key being looked at
         // directly, and the face behind it only affords a hundred-odd pixels per cell.
-        let image = crate::keyboard_face::cap(text, keyboard, key, KEY_CAP_PX);
+        let image = crate::keyboard_face::cap(text, keyboard, key, KEY_CAP_PX, lift);
         if image.is_empty() {
             return Ok(());
         }
@@ -1247,6 +1262,7 @@ impl Scene {
         keyboard: &spatiand_shell::keyboard::Keyboard,
         border_hot: bool,
         hovered: &[&'static spatiand_shell::keyboard::Key],
+        pressed: &[&'static spatiand_shell::keyboard::Key],
     ) {
         let Some(face) = self.keys else {
             return;
@@ -1281,31 +1297,41 @@ impl Scene {
             (0.0, 1.0),
         );
 
-        if hovered.is_empty() {
+        if hovered.is_empty() && pressed.is_empty() {
             return;
         }
-        // The key under a pointer, lifted off the face.
+        // The key under a pointer, lifted off the face; the key being pressed, driven into it.
         //
-        // Lifted *in the world*, along the face's own normal, rather than merely tinted: this
-        // is a 3D keyboard and the obvious way for a key to say "you are about to press me" is
-        // to stand proud of the ones around it. A flat highlight has to be read; a raised cap
-        // is seen.
+        // Moved *in the world*, along the face's own normal, rather than merely tinted: this is
+        // a 3D keyboard, and the obvious way for a key to say "you are about to press me" is to
+        // stand proud of the ones around it, and for a pressed one to go under. A flat
+        // highlight has to be read; a raised cap is seen.
         //
-        // One quad, carrying a picture of that key drawn brighter and with a shadow under it —
-        // the same cap in the same place, not a slab laid over it. The picture is exactly its
-        // own cell plus the margin its shadow needs, so nothing spills across the keys beside
-        // it, and everything outside the cap's rounded outline is transparent.
+        // One quad each, carrying a picture of that key — the same cap in the same place, not a
+        // slab laid over it. The picture is exactly its own cell plus the margin its shadow
+        // needs, so nothing spills across the keys beside it, and everything outside the cap's
+        // rounded outline is transparent.
         let normal = facing * Vec3::X;
         let grow = 1.0 + 2.0 * crate::keyboard_face::CAP_MARGIN;
         for (key, rect) in spatiand_shell::keyboard::layout() {
-            if !hovered.iter().any(|k| k.code == key.code) {
+            // A press beats a hover, because the finger is on the key either way and what
+            // matters at that moment is that it went down.
+            let lift = if pressed.iter().any(|k| k.code == key.code) {
+                crate::keyboard_face::Lift::Press
+            } else if hovered.iter().any(|k| k.code == key.code) {
+                crate::keyboard_face::Lift::Hover
+            } else {
                 continue;
-            }
+            };
             let Some(cap) = self
                 .key_caps
-                .get(&crate::keyboard_face::cap_id(keyboard, key))
+                .get(&crate::keyboard_face::cap_id(keyboard, key, lift))
             else {
                 continue;
+            };
+            let (along, scale) = match lift {
+                crate::keyboard_face::Lift::Hover => (HOVER_LIFT_M, HOVER_GROW),
+                crate::keyboard_face::Lift::Press => (-PRESS_SINK_M, PRESS_SHRINK),
             };
             // The cell's middle, in the face's plane. `v` runs down and the world's z runs up.
             let offset = facing
@@ -1314,9 +1340,9 @@ impl Scene {
                     -((rect.u as f32 - 0.5) * face_w),
                     (0.5 - rect.v as f32) * face_h,
                 );
-            let at = centre + offset + normal * HOVER_LIFT_M;
-            let cap_w = (rect.half_u * 2.0) as f32 * face_w * grow;
-            let cap_h = (rect.half_v * 2.0) as f32 * face_h * grow;
+            let at = centre + offset + normal * along;
+            let cap_w = (rect.half_u * 2.0) as f32 * face_w * grow * scale;
+            let cap_h = (rect.half_v * 2.0) as f32 * face_h * grow * scale;
             self.quads.draw(
                 gl,
                 cap.id,

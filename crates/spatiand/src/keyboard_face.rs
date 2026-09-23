@@ -66,6 +66,14 @@ pub const CAP_MARGIN: f32 = 0.20;
 /// coming up to meet the thumb.
 const RAISE: f32 = 1.85;
 
+/// How much darker a cap is while it is being pressed.
+///
+/// Below the face's own caps rather than merely below a raised one, so the moment of the press
+/// is unmistakable: the key goes past where it started, the way a real key does when it bottoms
+/// out. Brightness alone would read as the hover ending; brightness *and* the cap sinking
+/// through the plate reads as a press.
+const PRESSED: f32 = 0.62;
+
 /// The shadow under a raised cap: how far it falls and how far it fades, as fractions of the
 /// cap's shorter side.
 const SHADOW_DROP: f32 = 0.10;
@@ -178,7 +186,23 @@ pub fn sound_symbol(keyboard: &Keyboard) -> &'static str {
 /// re-rendered the legend over it at its own size; what that produced was a square slab behind
 /// the key and a legend fractionally off the one underneath, which reads as a shadow on the
 /// lettering. Nothing here is drawn twice, so neither can happen.
-pub fn cap(text: &mut TextRenderer, keyboard: &Keyboard, key: &Key, width_px: u32) -> TextImage {
+/// What a cap is doing, which decides how its picture is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lift {
+    /// Under a pointer and not yet pressed: brighter, with a shadow beneath it.
+    Hover,
+    /// Being pressed: darker, and with no shadow, because a key that has gone *into* the plate
+    /// has nothing left to cast one onto.
+    Press,
+}
+
+pub fn cap(
+    text: &mut TextRenderer,
+    keyboard: &Keyboard,
+    key: &Key,
+    width_px: u32,
+    lift: Lift,
+) -> TextImage {
     let Some((_, cell)) = layout().into_iter().find(|(k, _)| k.code == key.code) else {
         return TextImage {
             width: 0,
@@ -214,24 +238,30 @@ pub fn cap(text: &mut TextRenderer, keyboard: &Keyboard, key: &Key, width_px: u3
     // the parallax between them is far below what the eye can pick out.
     let under = (rect.0, rect.1 + short * SHADOW_DROP, rect.2, rect.3);
     let (fill, ink) = appearance(keyboard, key);
-    rounded_rect_with(
-        &mut rgba,
-        width,
-        height,
-        under,
-        radius,
-        SHADOW,
-        short * SHADOW_BLUR,
-        false,
-    );
+    if lift == Lift::Hover {
+        rounded_rect_with(
+            &mut rgba,
+            width,
+            height,
+            under,
+            radius,
+            SHADOW,
+            short * SHADOW_BLUR,
+            false,
+        );
+    }
 
-    let raised = [
-        (fill[0] * RAISE).min(1.0),
-        (fill[1] * RAISE).min(1.0),
-        (fill[2] * RAISE).min(1.0),
+    let shade = match lift {
+        Lift::Hover => RAISE,
+        Lift::Press => PRESSED,
+    };
+    let lit = [
+        (fill[0] * shade).min(1.0),
+        (fill[1] * shade).min(1.0),
+        (fill[2] * shade).min(1.0),
         fill[3],
     ];
-    rounded_rect_with(&mut rgba, width, height, rect, radius, raised, 1.0, true);
+    rounded_rect_with(&mut rgba, width, height, rect, radius, lit, 1.0, true);
 
     let label = keyboard.label(key);
     if !label.is_empty() {
@@ -249,11 +279,11 @@ pub fn cap(text: &mut TextRenderer, keyboard: &Keyboard, key: &Key, width_px: u3
 /// whether it is latched. Anything agreeing on all three draws identically, so one texture
 /// serves both — and the cache and the drawing ask the same question, so a stale cap is not a
 /// thing that can happen.
-pub fn cap_id(keyboard: &Keyboard, key: &Key) -> String {
+pub fn cap_id(keyboard: &Keyboard, key: &Key, lift: Lift) -> String {
     // The toggle is not a key and never rises, so it is deliberately not part of this. What
     // *does* depend on it is the face, whose cache lives in `Scene::sync_keyboard`.
     format!(
-        "{}|{}|{}",
+        "{}|{}|{}|{lift:?}",
         key.code,
         keyboard.label(key),
         keyboard.is_latched(key)
@@ -633,6 +663,71 @@ mod tests {
             on_ground < 0.6,
             "{:.1}% is bare ground; the caps are too small",
             on_ground * 100.0
+        );
+    }
+
+    /// The average brightness of everything the cap actually paints, ignoring what is clear.
+    fn lit_fraction(image: &TextImage) -> f32 {
+        let (mut sum, mut count) = (0.0f32, 0usize);
+        for p in image.rgba.chunks_exact(4) {
+            if p[3] < 200 {
+                continue;
+            }
+            sum += (p[0] as f32 + p[1] as f32 + p[2] as f32) / (3.0 * 255.0);
+            count += 1;
+        }
+        if count == 0 {
+            return 0.0;
+        }
+        sum / count as f32
+    }
+
+    #[test]
+    fn a_pressed_key_is_darker_than_one_merely_hovered() {
+        // The two states have to be told apart at a glance and across a room, which means by
+        // brightness rather than by geometry alone: the lift and the sink are a couple of
+        // centimetres at over a metre away.
+        let mut text = TextRenderer::new();
+        let key = &ROWS[1][3];
+        let hover = cap(&mut text, &Keyboard::default(), key, 160, Lift::Hover);
+        let press = cap(&mut text, &Keyboard::default(), key, 160, Lift::Press);
+        assert!(
+            lit_fraction(&press) < lit_fraction(&hover) * 0.75,
+            "pressed {:.3} against hovered {:.3}",
+            lit_fraction(&press),
+            lit_fraction(&hover)
+        );
+    }
+
+    #[test]
+    fn a_pressed_key_casts_no_shadow() {
+        // It has gone into the plate; there is nothing left for it to cast one onto. The
+        // shadow lives in the margin below the cap, so that is where the two differ.
+        let mut text = TextRenderer::new();
+        let key = &ROWS[1][3];
+        let shaded = |image: &TextImage| {
+            let row = (image.height as f32 * 0.93) as usize;
+            let start = row * image.width as usize * 4;
+            image.rgba[start..start + image.width as usize * 4]
+                .chunks_exact(4)
+                .filter(|p| p[3] > 8)
+                .count()
+        };
+        let hover = cap(&mut text, &Keyboard::default(), key, 160, Lift::Hover);
+        let press = cap(&mut text, &Keyboard::default(), key, 160, Lift::Press);
+        assert!(shaded(&hover) > 0, "a raised cap should cast a shadow");
+        assert_eq!(shaded(&press), 0, "a pressed cap should cast none");
+    }
+
+    #[test]
+    fn the_two_states_are_cached_apart() {
+        // One id for both would show whichever was drawn first for the rest of the session --
+        // a key that stays down, or one that never goes down at all.
+        let keyboard = Keyboard::default();
+        let key = &ROWS[1][3];
+        assert_ne!(
+            cap_id(&keyboard, key, Lift::Hover),
+            cap_id(&keyboard, key, Lift::Press)
         );
     }
 
