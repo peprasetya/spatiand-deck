@@ -297,7 +297,13 @@ impl Controls {
 
     pub fn open_editor(&mut self) {
         let layout = self.engine.layout().clone();
-        self.editor = Some(Editor::new(self.app.clone(), self.app_name.clone(), layout));
+        // Every other application's saved layout, so a new one can start from controls the
+        // wearer already built rather than from a template. Read now rather than at startup:
+        // a layout saved for another application a minute ago has to be on the list.
+        let others = self.store.saved_except(&self.app);
+        self.editor = Some(
+            Editor::new(self.app.clone(), self.app_name.clone(), layout).with_others(others),
+        );
         self.reset_to_default = false;
     }
 

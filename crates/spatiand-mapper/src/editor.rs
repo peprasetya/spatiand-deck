@@ -160,6 +160,7 @@ enum Page {
     Categories(Target, usize, Option<usize>),
     Choices(Target, usize, Option<usize>, Category),
     Templates,
+    Import,
     Sets,
 }
 
@@ -213,6 +214,7 @@ enum Do {
     RemoveAction(Target, usize, usize),
     SetMode(Group, bool, ModeKind),
     Template(usize),
+    Import(usize),
     SelectSet(usize),
     AddSet,
     RemoveSet,
@@ -242,6 +244,9 @@ struct Built {
 pub struct Editor {
     app: AppKey,
     app_name: String,
+    /// Other applications' saved layouts, by the name a person would know each by, to copy
+    /// from. Handed in by whoever opened the editor: the editor itself never touches a disk.
+    others: Vec<(String, Layout)>,
     layout: Layout,
     original: Layout,
     set: usize,
@@ -252,11 +257,18 @@ pub struct Editor {
 const TURBO_STEPS: [Option<u32>; 6] = [None, Some(50), Some(100), Some(150), Some(250), Some(500)];
 
 impl Editor {
+    /// Offer these layouts to copy from. See [`crate::store::Store::saved_except`].
+    pub fn with_others(mut self, others: Vec<(String, Layout)>) -> Self {
+        self.others = others;
+        self
+    }
+
     pub fn new(app: AppKey, app_name: impl Into<String>, layout: Layout) -> Self {
         let layout = layout.repaired();
         Self {
             app,
             app_name: app_name.into(),
+            others: Vec::new(),
             original: layout.clone(),
             layout,
             set: 0,
@@ -753,6 +765,27 @@ impl Editor {
                     .collect(),
                 detail: String::new(),
             },
+            Page::Import => Built {
+                title: "Copy from another application".into(),
+                rows: self
+                    .others
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (app, layout))| {
+                        (
+                            Row {
+                                label: app.clone(),
+                                value: Some(layout.name.clone()),
+                            },
+                            Op::Do(Do::Import(i)),
+                            format!(
+                                "Use the controls already set up for {app}. Undo puts these back."
+                            ),
+                        )
+                    })
+                    .collect(),
+                detail: String::new(),
+            },
             Page::Sets => self.sets_page(),
         }
     }
@@ -764,6 +797,16 @@ impl Editor {
                 Op::Open(Page::Templates),
                 "Start again from one of the built-in layouts.".to_string(),
             ),
+        ];
+        // Only when there is something to copy: a row that opens an empty page is a dead end.
+        if !self.others.is_empty() {
+            rows.push((
+                row("Copy from", Some(format!("{} saved", self.others.len()))),
+                Op::Open(Page::Import),
+                "Start from the controls you already set up for another application.".to_string(),
+            ));
+        }
+        rows.extend([
             (
                 row("Action set", Some(self.set_name(self.set))),
                 Op::Cycle(Field::Set, Some(Page::Sets)),
@@ -782,7 +825,7 @@ impl Editor {
                 "Edit the action set itself, or a layer that changes some controls while it is on."
                     .to_string(),
             ),
-        ];
+        ]);
         let effective = self.layout.effective(self.set, self.layer);
         let bound = Button::ALL
             .iter()
@@ -1558,6 +1601,15 @@ impl Editor {
                 self.pop(1);
                 Event::Changed
             }
+            Do::Import(index) => {
+                if let Some((_, layout)) = self.others.get(index) {
+                    self.layout = layout.clone().repaired();
+                    self.set = 0;
+                    self.layer = None;
+                }
+                self.pop(1);
+                Event::Changed
+            }
             Do::SelectSet(index) => {
                 self.set = index.min(self.layout.sets.len() - 1);
                 self.layer = None;
@@ -1893,6 +1945,24 @@ mod tests {
         assert_eq!(choose(&mut e, "Undo changes"), Event::Changed);
         assert_eq!(e.layout().name, "Gamepad");
         assert!(!e.is_dirty());
+    }
+
+    #[test]
+    fn another_applications_layout_can_be_copied_and_undone() {
+        let mut viewer = templates::gamepad();
+        viewer.name = "Viewer controls".into();
+        let mut e = editor().with_others(vec![("firestorm on 192.0.2.7".into(), viewer)]);
+        choose(&mut e, "Copy from");
+        choose(&mut e, "firestorm on 192.0.2.7");
+        assert_eq!(e.layout().name, "Viewer controls");
+        assert_eq!(choose(&mut e, "Undo changes"), Event::Changed);
+        assert_eq!(e.layout().name, "Gamepad");
+    }
+
+    #[test]
+    fn with_nothing_to_copy_there_is_no_row_that_leads_nowhere() {
+        let e = editor();
+        assert!(!e.view().rows.iter().any(|r| r.label == "Copy from"));
     }
 
     #[test]
