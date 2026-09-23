@@ -877,3 +877,69 @@ none of it was where it was expected to be.
 The lesson worth keeping is the third one. **A remote window freezing is not evidence about
 the remote link.** Three separate networks are in play — the headset to the host, the host to
 the internet, and the application to whatever it talks to — and only the first is ours.
+
+## The clipboard, across every machine — 2026-09-23
+
+Copy in Firestorm on a host, paste into Chrome on the headset. Copy on the headset, paste into
+a terminal on the host. With two hosts attached, copy on one and paste on the other. **The
+session holds the clipboard for everything it can see**, which is what makes two or three
+machines feel like one.
+
+The messages have been in `spatiand_stream::control::Clipboard` since the protocol was written
+and nothing sent or answered them, which is why copying did nothing at all. Both ends now do:
+`spatiand-host`'s `clipboard` module and the session's `crate::clipboard`.
+
+### What travels, and when
+
+A copy announces **what forms the selection could be turned into**, not the data:
+
+```text
+host -> session   Offer { mime_types: ["text/plain;charset=utf-8", "image/png"],
+                          text: Some("…"), bytes: 42 }
+session -> host   Want { mime_type: "image/png" }      (somebody pasted)
+host -> session   Data { mime_type, bytes }
+```
+
+Text at or under `CLIPBOARD_EAGER_BYTES` (256 KB) is carried with the announcement, so the
+common paste is instant. Everything else waits to be asked for, because a copied screenshot
+would otherwise cost as much as a second of video on every copy, for a paste that usually never
+comes. Nothing over `clipboard::LARGEST` (32 MB) is transferred at all.
+
+### The three things that shaped the code
+
+**A clipboard is a promise.** Copying puts nothing anywhere; the application hands over bytes
+only when somebody pastes. So both ends keep *who owns it* and go back to that owner on a
+paste.
+
+**Reading one blocks.** The data comes down a pipe from an application that may be slow or
+wedged, and a pipe holds 64 KB, so writing a picture into one waits for the reader. Every read
+and every write is on its own thread. A compositor that waited on either would stop drawing.
+
+**Xwayland bridges nothing by itself.** `XwmHandler::allow_selection_access` defaults to
+`false`, which is exactly why pasting into an X11 window did nothing before. Both compositors
+now implement it, along with `new_selection` and `send_selection`, so Firestorm and anything
+under Proton take part.
+
+### Details that are not obvious
+
+- **The handler runs before the selection is stored.** `new_selection` is called and *then*
+  the compositor records the new source, so reading the seat on the spot hands back the
+  previous clipboard. Announcing waits one turn of the event loop.
+- **An announcement must not circulate.** The session tells every host, including the one it
+  heard from, and a host applying its own announcement back would replace the owning
+  application's selection with a copy of itself that cannot serve anything large. Both ends
+  remember what they last announced and recognise it coming back.
+- **A paste that is never answered ends empty after five seconds.** A pipe left open is a
+  window that has hung, which is worse than a paste that produced nothing.
+- **The primary selection — middle-click paste — is deliberately not carried.** It changes with
+  every drag over text, and would be a stream of announcements nobody asked for.
+
+### Known limits
+
+- **Files are paths, not contents.** Copying a file in a file manager offers `text/uri-list`,
+  and the path it names does not exist on the other machine. Dragging files between machines
+  is a separate job.
+- **A copy is only announced while the application still owns it.** Quitting the application
+  that copied leaves the announcement without a source, so a later paste of a large form
+  arrives empty.
+- **Copying requires keyboard focus**, which is a Wayland rule rather than a choice here.

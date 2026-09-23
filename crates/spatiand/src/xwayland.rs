@@ -184,6 +184,62 @@ impl XwmHandler for Spatiand {
 
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
+    // --- the clipboard, X11's half ---
+    //
+    // Without these an X11 application here can neither copy to nor paste from anything else,
+    // on this machine or on a host. See `crate::clipboard`.
+
+    /// Yes: an X11 client here may read what the compositor is holding. The default is `false`,
+    /// which is why pasting into an X11 window used to do nothing at all.
+    fn allow_selection_access(
+        &mut self,
+        _xwm: XwmId,
+        _selection: smithay::wayland::selection::SelectionTarget,
+    ) -> bool {
+        true
+    }
+
+    fn new_selection(
+        &mut self,
+        _xwm: XwmId,
+        selection: smithay::wayland::selection::SelectionTarget,
+        mime_types: Vec<String>,
+    ) {
+        if selection != smithay::wayland::selection::SelectionTarget::Clipboard {
+            return;
+        }
+        // Offered to this session's own Wayland windows as well as to the hosts, so copying in
+        // an X11 window and pasting into a Wayland one works with no host in the picture.
+        smithay::wayland::selection::data_device::set_data_device_selection(
+            &self.display_handle,
+            &self.seat,
+            mime_types.clone(),
+            (),
+        );
+        self.clipboard.copied_here(mime_types, true, None);
+    }
+
+    fn send_selection(
+        &mut self,
+        _xwm: XwmId,
+        selection: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+    ) {
+        if selection != smithay::wayland::selection::SelectionTarget::Clipboard {
+            return;
+        }
+        if let Some(say) = self.clipboard.paste_here(
+            mime_type,
+            fd,
+            &self.seat,
+            self.xwm.as_mut(),
+            &self.loop_handle,
+        ) {
+            self.clipboard_out.push(say);
+        }
+    }
+
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     /// The client wants its window on screen.
@@ -338,6 +394,37 @@ impl Spatiand {
 impl XwmHandler for Runtime {
     fn xwm_state(&mut self, xwm: XwmId) -> &mut X11Wm {
         self.state.xwm_state(xwm)
+    }
+    fn allow_selection_access(
+        &mut self,
+        xwm: XwmId,
+        selection: smithay::wayland::selection::SelectionTarget,
+    ) -> bool {
+        self.state.allow_selection_access(xwm, selection)
+    }
+    fn new_selection(
+        &mut self,
+        xwm: XwmId,
+        selection: smithay::wayland::selection::SelectionTarget,
+        mime_types: Vec<String>,
+    ) {
+        self.state.new_selection(xwm, selection, mime_types)
+    }
+    fn send_selection(
+        &mut self,
+        xwm: XwmId,
+        selection: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+    ) {
+        self.state.send_selection(xwm, selection, mime_type, fd)
+    }
+    fn cleared_selection(
+        &mut self,
+        xwm: XwmId,
+        selection: smithay::wayland::selection::SelectionTarget,
+    ) {
+        self.state.cleared_selection(xwm, selection)
     }
     fn new_window(&mut self, xwm: XwmId, window: X11Surface) {
         self.state.new_window(xwm, window)

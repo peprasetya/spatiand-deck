@@ -123,6 +123,13 @@ pub struct Host {
     /// Pointer buttons a session has pressed and not released, so they can be let go of if
     /// it leaves while one is down. See `input::release_everything`.
     pub held_buttons: Vec<u32>,
+    /// Copy and paste, both ways across the link. See `clipboard`.
+    pub clipboard: crate::clipboard::Clipboard,
+    /// Where to post to the session, once there is a network. The clipboard needs it from
+    /// inside a protocol handler, where nothing else is reachable.
+    pub out: Option<tokio::sync::mpsc::UnboundedSender<crate::net::ToSession>>,
+    /// The event loop, which serving an X11 selection needs in order to wait on a pipe.
+    pub loop_handle: smithay::reexports::calloop::LoopHandle<'static, Host>,
     /// Windows that have appeared or gone since the last time anyone looked.
     pub arrived: Vec<WindowId>,
     pub departed: Vec<WindowId>,
@@ -206,6 +213,9 @@ impl Host {
             xwayland_shell_state,
             x11_display: None,
             held_buttons: Vec::new(),
+            clipboard: crate::clipboard::Clipboard::new(),
+            out: None,
+            loop_handle: loop_handle.clone(),
             arrived: Vec::new(),
             departed: Vec::new(),
         }
@@ -638,10 +648,75 @@ impl SeatHandler for Host {
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
     }
+
+    /// **Give the clipboard to whoever has the keyboard.**
+    ///
+    /// This was an empty stub, and the whole of why copy and paste worked nowhere: without it
+    /// no application is ever the data device's focus, so none is told what is on the
+    /// clipboard and none may put anything there. Every application could still paste its own
+    /// copy — that never leaves its own process — which makes the failure look like each
+    /// application having a private clipboard rather than like a compositor serving none.
+    ///
+    /// A client with the keyboard may read the selection. That is the rule the protocol sets,
+    /// and it is why this hangs off focus rather than being granted outright.
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&KeyboardFocus>) {
+        use smithay::wayland::seat::WaylandFocus;
+        let client = focused
+            .and_then(|focus| focus.wl_surface().map(|s| s.into_owned()))
+            .and_then(|surface| self.display_handle.get_client(surface.id()).ok());
+        smithay::wayland::selection::data_device::set_data_device_focus(
+            &self.display_handle,
+            seat,
+            client,
+        );
+    }
 }
 
 impl SelectionHandler for Host {
     type SelectionUserData = ();
+
+    /// An application here copied something, or stopped offering what it had.
+    fn new_selection(
+        &mut self,
+        ty: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        // The primary selection — middle-click paste — is deliberately left alone. It changes
+        // with every drag of a mouse over text, and sending that across a link would be a
+        // stream of announcements nobody asked for.
+        if ty != smithay::wayland::selection::SelectionTarget::Clipboard {
+            return;
+        }
+        let Some(out) = self.out.as_ref() else { return };
+        let _ = out;
+        if let Some(source) = source {
+            self.clipboard.copied_here(source, self.xwm.as_mut());
+        }
+    }
+
+    /// Something here is pasting what the session holds.
+    fn send_selection(
+        &mut self,
+        ty: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        if ty != smithay::wayland::selection::SelectionTarget::Clipboard {
+            return;
+        }
+        let Some(out) = self.out.clone() else { return };
+        self.clipboard.paste_here(
+            mime_type,
+            fd,
+            &self.seat,
+            self.xwm.as_mut(),
+            &self.loop_handle,
+            &out,
+        );
+    }
 }
 
 impl DataDeviceHandler for Host {

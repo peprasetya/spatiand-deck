@@ -22,6 +22,7 @@
 
 mod apps;
 mod audio;
+mod clipboard;
 mod xwayland;
 mod compose;
 mod control;
@@ -362,6 +363,9 @@ fn run_host(
     };
 
     host.sounds = net.as_ref().map(|n| audio::Sounds::new(n.sender()));
+    // The clipboard has to post from inside a protocol handler, where the network is not
+    // otherwise reachable. See `clipboard`.
+    host.out = net.as_ref().map(|n| n.sender());
 
     if let Some(id) = &options.run {
         match library.served.get(id) {
@@ -480,6 +484,10 @@ fn run_host(
                     }
                     FromSession::Left => {
                         attached = false;
+                        // What the session was holding goes with it. What was copied here
+                        // stays, so a paste between two applications on this machine still
+                        // works with no headset in the room.
+                        host.clipboard.session_left();
                         if let Some(s) = &host.sounds {
                             s.set_attached(false);
                         }
@@ -533,6 +541,12 @@ fn run_host(
             if let Some(app) = host.app_of_pid.remove(&pid) {
                 log::info!("{app} (pid {pid}) exited");
             }
+        }
+
+        // Pick up whatever the clipboard's reader threads finished, and give up on any paste
+        // the other end never answered.
+        if let Some(out) = host.out.clone() {
+            host.clipboard.pump(&host.seat, &out);
         }
 
         // **Every turn, listening or not.** The kernel blocks a game's force-feedback upload
@@ -1034,6 +1048,41 @@ fn greet(
     }
 }
 
+/// Act on one thing the session said about the clipboard.
+///
+/// Its own function because each arm needs a different set of the compositor's parts, and
+/// because the borrow checker will not have `host.clipboard` and `host.seat` reached through
+/// `host` twice -- see `clipboard::Clipboard::session_offered`.
+fn clipboard_said(host: &mut state::Host, what: spatiand_stream::control::Clipboard) {
+    use spatiand_stream::control::Clipboard as Says;
+    let Some(out) = host.out.clone() else { return };
+    match what {
+        Says::Offer {
+            mime_types,
+            text,
+            bytes,
+        } => {
+            let held = spatiand_stream::clipboard::Held {
+                mime_types,
+                text,
+                bytes,
+            };
+            host.clipboard.session_offered(
+                held,
+                &host.display_handle,
+                &host.seat,
+                host.xwm.as_mut(),
+            );
+        }
+        Says::Want { mime_type } => {
+            crate::clipboard::Clipboard::note_session_paste(&mime_type);
+            host.clipboard
+                .session_wants(mime_type, &host.seat, host.xwm.as_mut(), &host.loop_handle, &out)
+        }
+        Says::Data { mime_type, bytes } => host.clipboard.arrived(&mime_type, bytes),
+    }
+}
+
 /// Act on one thing the session said.
 fn said(
     host: &mut state::Host,
@@ -1044,6 +1093,7 @@ fn said(
 ) {
     use spatiand_stream::ClientMessage as Says;
     match message {
+        Says::Clipboard(what) => clipboard_said(host, what),
         Says::Hello {
             version, session, ..
         } => {

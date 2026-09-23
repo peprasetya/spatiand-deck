@@ -363,6 +363,18 @@ async fn serve(
                                         Err(e) => log::error!("remote: window {}: {e}", window.0),
                                     }
                                 }
+                                HostMessage::Clipboard(what) => {
+                                    // Queued for the compositor, which owns the selection and
+                                    // the only pipes an application is reading.
+                                    if let Ok(mut v) = view.lock() {
+                                        // A cap, because a host that talked to a session that
+                                        // was not listening would otherwise grow this for ever.
+                                        if v.clipboard.len() >= 16 {
+                                            v.clipboard.remove(0);
+                                        }
+                                        v.clipboard.push(what);
+                                    }
+                                }
                                 HostMessage::Rumble { strong, weak } => {
                                     // The motors are the compositor's; it takes this on its
                                     // next frame. Only the newest matters -- a rumble that
@@ -515,6 +527,9 @@ async fn serve(
                         }
                         Some(Command::Pad(state)) => {
                             say(&out, ClientMessage::Pad(state));
+                        }
+                        Some(Command::Clipboard(what)) => {
+                            say(&out, ClientMessage::Clipboard(what));
                         }
                         None => {}
                     }

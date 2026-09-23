@@ -36,6 +36,7 @@
 
 pub mod audio;
 pub mod catalog;
+pub mod clipboard;
 pub mod control;
 pub mod link;
 pub mod transport;

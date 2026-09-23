@@ -52,6 +52,10 @@ pub struct HostView {
     /// A game there asked the pad to rumble, and nothing has played it yet. Taken by the
     /// compositor, which owns the only motors.
     pub rumble: Option<(u16, u16)>,
+    /// What this host has said about the clipboard and nothing has acted on yet. A queue
+    /// rather than the latest, because an announcement, a paste's question and its answer are
+    /// three different things and losing any of them loses a paste.
+    pub clipboard: Vec<spatiand_stream::control::Clipboard>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -129,6 +133,9 @@ pub enum Command {
     ForceQuit(String),
     /// The whole state of the gamepad, for whatever is being played there.
     Pad(spatiand_stream::Pad),
+    /// Something about the clipboard: what has been copied, a paste asking for bytes, or the
+    /// bytes themselves. See `crate::clipboard`.
+    Clipboard(spatiand_stream::control::Clipboard),
 }
 
 /// A host being shown in this session.
@@ -203,6 +210,19 @@ impl Remote {
 
     fn pad(&self, state: spatiand_stream::Pad) {
         let _ = self.commands.send(Command::Pad(state));
+    }
+
+    /// Tell this host something about the clipboard.
+    fn clipboard(&self, what: spatiand_stream::control::Clipboard) {
+        let _ = self.commands.send(Command::Clipboard(what));
+    }
+
+    /// Whatever it has said about the clipboard since the last look.
+    fn take_clipboard(&self) -> Vec<spatiand_stream::control::Clipboard> {
+        self.view
+            .lock()
+            .map(|mut v| std::mem::take(&mut v.clipboard))
+            .unwrap_or_default()
     }
 
     /// Whether an application id belongs to this host.
@@ -374,6 +394,47 @@ impl Remotes {
     /// What a game on any host has asked the motors to do since the last look.
     pub fn rumble(&self) -> Option<(u16, u16)> {
         self.hosts.iter().find_map(|host| host.take_rumble())
+    }
+
+    /// Everything the hosts have said about the clipboard since the last look, each with the
+    /// host that said it.
+    pub fn clipboard_said(&self) -> Vec<(String, spatiand_stream::control::Clipboard)> {
+        self.hosts
+            .iter()
+            .flat_map(|host| {
+                host.take_clipboard()
+                    .into_iter()
+                    .map(|what| (host.host.clone(), what))
+            })
+            .collect()
+    }
+
+    /// Pass on what the session's clipboard has to say.
+    pub fn clipboard_say(&self, say: crate::clipboard::Say) {
+        match say {
+            crate::clipboard::Say::Everyone { except, what } => {
+                for host in &self.hosts {
+                    if Some(&host.host) == except.as_ref() {
+                        continue;
+                    }
+                    host.clipboard(what.clone());
+                }
+            }
+            crate::clipboard::Say::Just { host, what } => {
+                if let Some(remote) = self.hosts.iter().find(|h| h.host == host) {
+                    remote.clipboard(what);
+                }
+            }
+        }
+    }
+
+    /// Which hosts are no longer connected, so the board can drop what they were holding.
+    pub fn offline(&self) -> Vec<String> {
+        self.hosts
+            .iter()
+            .filter(|host| !matches!(host.view().link, Link::Online))
+            .map(|host| host.host.clone())
+            .collect()
     }
 
     /// Once a frame: finish a pairing that both ends agreed to, and tell the shell anything

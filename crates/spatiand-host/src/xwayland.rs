@@ -12,6 +12,7 @@
 //! unchanged. Override-redirect windows (X11's menus and tooltips) are not drawn yet; an
 //! application that draws its own interface, as a game or a viewer does, never uses them.
 
+use smithay::wayland::selection::SelectionTarget;
 use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::xwayland::xwm::{Reorder, ResizeEdge, XwmId};
@@ -92,6 +93,71 @@ impl XwmHandler for Host {
     }
 
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
+
+    // --- the clipboard, X11's half ---
+    //
+    // Xwayland bridges nothing by itself: without these an X11 application — Firestorm, Wine,
+    // anything under Proton — can neither copy to nor paste from anything else, on this machine
+    // or across the link. See `crate::clipboard`.
+
+    /// Yes: an X11 client here may read what the compositor is holding.
+    ///
+    /// The default is `false`, and the default is why copying in a Wayland application and
+    /// pasting into an X11 one did nothing at all.
+    fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
+        true
+    }
+
+    /// An X11 client copied something.
+    fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        if selection != SelectionTarget::Clipboard {
+            return;
+        }
+        // Offered to this compositor's Wayland clients as well as to the session, so that
+        // copying in Firestorm and pasting into a Wayland application on the same machine
+        // works whether or not a headset is attached.
+        smithay::wayland::selection::data_device::set_data_device_selection(
+            &self.display_handle,
+            &self.seat,
+            mime_types.clone(),
+            (),
+        );
+        let Some(out) = self.out.clone() else { return };
+        self.clipboard.copied_here_by_x11(
+            mime_types,
+            self.xwm.as_mut(),
+            &self.loop_handle,
+            &out,
+        );
+    }
+
+    /// An X11 client is pasting what the session holds.
+    fn send_selection(
+        &mut self,
+        _xwm: XwmId,
+        selection: SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+    ) {
+        if selection != SelectionTarget::Clipboard {
+            return;
+        }
+        let Some(out) = self.out.clone() else { return };
+        self.clipboard.paste_here(
+            mime_type,
+            fd,
+            &self.seat,
+            self.xwm.as_mut(),
+            &self.loop_handle,
+            &out,
+        );
+    }
+
+    fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+        if selection == SelectionTarget::Clipboard {
+            self.clipboard.cleared_here();
+        }
+    }
 
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 

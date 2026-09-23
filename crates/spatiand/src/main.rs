@@ -23,6 +23,7 @@ mod backend_winit;
 mod bluetooth;
 mod calib;
 mod click;
+mod clipboard;
 mod controls;
 mod desk;
 mod diagram;

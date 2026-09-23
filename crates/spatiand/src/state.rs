@@ -149,6 +149,13 @@ pub struct Spatiand {
     /// `None` before then, and for the whole session if no X server could be started — which
     /// is a session where X11 applications do not run, and everything else is unaffected.
     pub xwm: Option<smithay::xwayland::X11Wm>,
+    /// Copy and paste, here and across every link. See `crate::clipboard`.
+    pub clipboard: crate::clipboard::Board,
+    /// What the clipboard needs said to a host, from inside a protocol handler where the
+    /// hosts are not reachable. Drained once a turn.
+    pub clipboard_out: Vec<crate::clipboard::Say>,
+    /// The event loop, which reading an X11 selection needs in order to wait on a pipe.
+    pub loop_handle: smithay::reexports::calloop::LoopHandle<'static, crate::Runtime>,
     /// The protocol XWayland uses to tell us which surface belongs to which X11 window.
     pub xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
     /// The one display clients are told about, and it is not a display.
@@ -321,6 +328,9 @@ impl Spatiand {
             focus_settled: None,
             cadence: Default::default(),
             xwm: None,
+            clipboard: crate::clipboard::Board::new(),
+            clipboard_out: Vec::new(),
+            loop_handle: loop_handle.clone(),
             xwayland_shell_state,
             xr_surfaces: Vec::new(),
             sky_owner: None,
@@ -1476,7 +1486,28 @@ impl SeatHandler for Spatiand {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&KeyboardFocus>) {}
+    /// **Give the clipboard to whoever has the keyboard.**
+    ///
+    /// This was an empty stub, and the whole of why copy and paste worked nowhere: without it
+    /// no application is ever the data device's focus, so none is told what is on the
+    /// clipboard and none may put anything there. Every application could still paste its own
+    /// copy — that never leaves its own process — which makes the failure look like each
+    /// application having a private clipboard rather than like a compositor serving none.
+    ///
+    /// A client with the keyboard may read the selection. That is the rule the protocol sets,
+    /// and it is why this hangs off focus rather than being granted outright.
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&KeyboardFocus>) {
+        use smithay::reexports::wayland_server::Resource;
+        use smithay::wayland::seat::WaylandFocus;
+        let client = focused
+            .and_then(|focus| focus.wl_surface().map(|s| s.into_owned()))
+            .and_then(|surface| self.display_handle.get_client(surface.id()).ok());
+        smithay::wayland::selection::data_device::set_data_device_focus(
+            &self.display_handle,
+            seat,
+            client,
+        );
+    }
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
@@ -1524,6 +1555,50 @@ impl smithay::wayland::output::OutputHandler for Spatiand {}
 /// selection, so the associated data is unit.
 impl SelectionHandler for Spatiand {
     type SelectionUserData = ();
+
+    /// A window here copied something.
+    fn new_selection(
+        &mut self,
+        ty: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: smithay::input::Seat<Self>,
+    ) {
+        // The primary selection — middle-click paste — is left alone on purpose. It changes
+        // with every drag over text, and announcing that across a link would be a stream of
+        // messages nobody asked for.
+        if ty != smithay::wayland::selection::SelectionTarget::Clipboard {
+            return;
+        }
+        if let Some(source) = source {
+            self.clipboard
+                .copied_here(source.mime_types(), false, self.xwm.as_mut());
+        }
+    }
+
+    /// A window here is pasting what a host holds.
+    fn send_selection(
+        &mut self,
+        ty: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: smithay::input::Seat<Self>,
+        _user_data: &(),
+    ) {
+        if ty != smithay::wayland::selection::SelectionTarget::Clipboard {
+            return;
+        }
+        // Whatever this asks of a host is picked up by `Remotes` on the next turn, along with
+        // everything else the board has to say.
+        if let Some(say) = self.clipboard.paste_here(
+            mime_type,
+            fd,
+            &self.seat,
+            self.xwm.as_mut(),
+            &self.loop_handle,
+        ) {
+            self.clipboard_out.push(say);
+        }
+    }
 }
 
 impl DataDeviceHandler for Spatiand {

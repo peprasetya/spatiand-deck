@@ -1258,6 +1258,63 @@ pub fn run(
 
             shell_events.extend(typed_event.take());
             remotes.tick(&mut runtime.display_handle, &mut prefs, &mut shell);
+
+            // --- the clipboard ---
+            //
+            // The board lives in the compositor because that is where the selection and the
+            // windows are; the hosts are each behind a thread. So everything meets here, once
+            // a frame: what the hosts have said, what the board has to say back, and what the
+            // protocol handlers put down since the last turn. See `crate::clipboard`.
+            {
+                let state = &mut runtime.state;
+                for (host, what) in remotes.clipboard_said() {
+                    use spatiand_stream::control::Clipboard as Said;
+                    match what {
+                        Said::Offer {
+                            mime_types,
+                            text,
+                            bytes,
+                        } => {
+                            let held = spatiand_stream::clipboard::Held {
+                                mime_types,
+                                text,
+                                bytes,
+                            };
+                            if let Some(say) = state.clipboard.host_offered(
+                                &host,
+                                held,
+                                &state.display_handle,
+                                &state.seat,
+                                state.xwm.as_mut(),
+                            ) {
+                                state.clipboard_out.push(say);
+                            }
+                        }
+                        Said::Want { mime_type } => state.clipboard.host_wants(
+                            &host,
+                            mime_type,
+                            &state.seat,
+                            state.xwm.as_mut(),
+                            &state.loop_handle,
+                        ),
+                        Said::Data { mime_type, bytes } => {
+                            state.clipboard.arrived(&mime_type, bytes)
+                        }
+                    }
+                }
+                for host in remotes.offline() {
+                    state.clipboard.host_left(&host);
+                }
+                let mut said = state.clipboard.pump(
+                    &state.seat,
+                    state.xwm.as_mut(),
+                    &state.loop_handle,
+                );
+                said.extend(state.clipboard_out.drain(..));
+                for say in said {
+                    remotes.clipboard_say(say);
+                }
+            }
             if let Some(command) = bluetooth.tick(&mut shell) {
                 if let Err(e) =
                     spatiand_platform::launch(&command, &runtime.state.socket_name, &[])

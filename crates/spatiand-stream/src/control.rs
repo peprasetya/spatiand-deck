@@ -294,7 +294,7 @@ pub struct Viewport {
 /// same thing in both directions. Small text is carried; anything large is announced and
 /// fetched only if somebody actually pastes, because a copied image should not cost the same
 /// as a second of video.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Clipboard {
     /// What is on the clipboard now, with the text included when it is small enough to be
     /// worth sending unasked.
