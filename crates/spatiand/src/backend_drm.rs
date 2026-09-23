@@ -2977,6 +2977,15 @@ pub fn run(
                             {
                                 continue;
                             }
+                            // Over a room that draws its own pointer, at the depth only it
+                            // knows, draw nothing: a second reticle at the wrong depth is
+                            // what that request is there to be rid of.
+                            if a.hit.is_none()
+                                && on_keys.is_none()
+                                && pointers.room_draws_cursor(&a.ray)
+                            {
+                                continue;
+                            }
                             let cursor = match (right_hand, dragging_edge, a.zone) {
                                 (true, Some(edge), _) => Cursor::for_edge(edge),
                                 (_, _, Some(Zone::Resize(edge))) => Cursor::for_edge(edge),

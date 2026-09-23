@@ -11,6 +11,13 @@
 //! set_layer projection
 //! ```
 //!
+//! and, for an application that is the room and draws its own pointer at the depth of what
+//! is under it (see `spatiand_xr_surface_v1.set_cursor_drawn`):
+//!
+//! ```text
+//! set_cursor_drawn 1
+//! ```
+//!
 //! The host says one thing back, whenever it changes:
 //!
 //! ```text
@@ -62,6 +69,7 @@ pub fn pair() -> std::io::Result<(OwnedFd, OwnedFd)> {
 enum Said {
     Eyes(Eyes),
     Layer(Layer),
+    CursorDrawn(bool),
 }
 
 /// Read one message, in `spatiand_xr_v1`'s own words.
@@ -78,6 +86,8 @@ fn parse(message: &str) -> Option<Said> {
         ("set_eye_layout", "top_bottom") => Some(Said::Eyes(Eyes::TopBottom)),
         ("set_layer", "window") => Some(Said::Layer(Layer::Window)),
         ("set_layer", "projection") => Some(Said::Layer(Layer::Projection)),
+        ("set_cursor_drawn", "0") => Some(Said::CursorDrawn(false)),
+        ("set_cursor_drawn", "1") => Some(Said::CursorDrawn(true)),
         _ => None,
     }
 }
@@ -114,6 +124,9 @@ pub fn watch(host: &mut Host, app: String, ours: OwnedFd) {
                 if host.presentation.remove(&app).is_some() {
                     host.presentation_changed.push(app.clone());
                 }
+                if host.cursor_drawn.remove(&app) {
+                    host.cursor_changed.push(app.clone());
+                }
                 host.app_controls.remove(&app);
                 return Ok(PostAction::Remove);
             }
@@ -127,12 +140,24 @@ pub fn watch(host: &mut Host, app: String, ours: OwnedFd) {
             }
             let message = String::from_utf8_lossy(&buffer[..n as usize]);
             match parse(&message) {
+                Some(Said::CursorDrawn(drawn)) => {
+                    let changed = if drawn {
+                        host.cursor_drawn.insert(app.clone())
+                    } else {
+                        host.cursor_drawn.remove(&app)
+                    };
+                    if changed {
+                        log::info!("{app} says {}", message.trim());
+                        host.cursor_changed.push(app.clone());
+                    }
+                }
                 Some(said) => {
                     let now = host.presentation.entry(app.clone()).or_default();
                     let before = *now;
                     match said {
                         Said::Eyes(eyes) => now.0 = eyes,
                         Said::Layer(layer) => now.1 = layer,
+                        Said::CursorDrawn(_) => unreachable!("handled above"),
                     }
                     if *now != before {
                         log::info!("{app} says {}", message.trim());
@@ -186,6 +211,8 @@ mod tests {
         assert_eq!(parse("set_layer window\n"), Some(Said::Layer(Layer::Window)));
         assert_eq!(parse("set_eye_layout side_by_side"), Some(Said::Eyes(Eyes::SideBySide)));
         assert_eq!(parse("set_eye_layout mono"), Some(Said::Eyes(Eyes::Mono)));
+        assert_eq!(parse("set_cursor_drawn 1"), Some(Said::CursorDrawn(true)));
+        assert_eq!(parse("set_cursor_drawn 0"), Some(Said::CursorDrawn(false)));
     }
 
     #[test]
@@ -194,6 +221,7 @@ mod tests {
         assert_eq!(parse("set_layer"), None);
         assert_eq!(parse("set_layer projection please"), None);
         assert_eq!(parse("make_it_so"), None);
+        assert_eq!(parse("set_cursor_drawn yes"), None);
     }
 
     #[test]

@@ -95,6 +95,9 @@ pub struct XrState {
     pub idle_after_ms: u32,
     /// Which edge stays put when the surface's shape changes.
     pub resize_anchor: ResizeAnchor,
+    /// The client draws the pointer over this surface itself, at the depth of whatever is
+    /// under it; the compositor draws none there. See `set_cursor_drawn`.
+    pub cursor_drawn: bool,
 }
 
 impl XrState {
@@ -440,6 +443,9 @@ impl Dispatch<spatiand_xr_surface_v1::SpatiandXrSurfaceV1, Mutex<Pending>> for S
                         "not a resize anchor this version knows",
                     ),
                 }
+            }
+            spatiand_xr_surface_v1::Request::SetCursorDrawn { enable } => {
+                pending.next.cursor_drawn = enable != 0;
             }
             spatiand_xr_surface_v1::Request::Destroy => release(state, &mut pending),
             _ => {}

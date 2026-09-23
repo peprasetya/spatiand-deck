@@ -751,6 +751,15 @@ impl PointerState {
         self.room = room;
     }
 
+    /// Whether a ray that met no window lands on a room that draws its own pointer, so the
+    /// compositor should draw none. Its reticle would be at the room's depth, which for a
+    /// world with a table in front of a mountain is the wrong depth nearly everywhere.
+    pub fn room_draws_cursor(&self, ray: &Ray) -> bool {
+        self.room.as_ref().is_some_and(|room| {
+            crate::xr::state_of(&room.surface).cursor_drawn && room.point(ray).is_some()
+        })
+    }
+
     /// Send motion for wherever the pointer is now.
     pub fn motion(
         &mut self,

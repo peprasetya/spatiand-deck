@@ -121,7 +121,7 @@ impl Client {
         let shm: wl_shm::WlShm = globals
             .bind(&handle, 1..=2, ())
             .map_err(|e| format!("no wl_shm: {e}"))?;
-        let xr: Option<spatiand_xr_v1::SpatiandXrV1> = globals.bind(&handle, 1..=3, ()).ok();
+        let xr: Option<spatiand_xr_v1::SpatiandXrV1> = globals.bind(&handle, 1..=4, ()).ok();
         if xr.is_none() {
             log::warn!("remote: the compositor offers no spatiand_xr_v1; remote worlds stay windows");
         }
@@ -199,6 +199,24 @@ impl Client {
             spatiand_stream::Layer::Window => Layer::Window,
             spatiand_stream::Layer::Projection => Layer::Projection,
         });
+        window.surface.commit();
+    }
+
+    /// Say whether a remote window's application draws the pointer over it itself.
+    ///
+    /// Only a compositor at version 4 understands it; an older one keeps drawing its own
+    /// reticle, which is the right thing to fall back to -- a pointer at the wrong depth is
+    /// better than none.
+    pub fn set_cursor_drawn(&mut self, id: u32, drawn: bool) {
+        let Some(xr) = self.xr.as_ref() else { return };
+        if xr.version() < 4 {
+            return;
+        }
+        let Some(window) = self.windows.get_mut(&id) else { return };
+        let surface = window
+            .xr
+            .get_or_insert_with(|| xr.get_xr_surface(&window.surface, &self.handle, id));
+        surface.set_cursor_drawn(drawn as u32);
         window.surface.commit();
     }
 

@@ -829,6 +829,19 @@ fn run_host(
             }
         }
 
+        // --- who draws the pointer over whose windows ---
+        for app in std::mem::take(&mut host.cursor_changed) {
+            let drawn = host.cursor_drawn.contains(&app);
+            for tracked in host.windows.iter().filter(|t| t.app == app) {
+                if let (Some(net), true) = (&net, attached) {
+                    net.send(ToSession::Control(HostMessage::CursorDrawn {
+                        window: tracked.id,
+                        drawn,
+                    }));
+                }
+            }
+        }
+
         // --- encode whatever is new, for whoever is listening ---
         if net.is_some() && attached || encoded_file.is_some() {
             let work: Vec<(u32, smithay::desktop::Window, (u32, u32), u64)> = host
@@ -1115,6 +1128,12 @@ fn greet(
             net.send(ToSession::Control(HostMessage::Layer {
                 window: tracked.id,
                 layer,
+            }));
+        }
+        if host.cursor_drawn.contains(&tracked.app) {
+            net.send(ToSession::Control(HostMessage::CursorDrawn {
+                window: tracked.id,
+                drawn: true,
             }));
         }
     }

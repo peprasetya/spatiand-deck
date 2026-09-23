@@ -52,7 +52,7 @@
     The per-frame values are not on the wire at all -- see the pose channel.
   </description>
 
-  <interface name="spatiand_xr_v1" version="3">
+  <interface name="spatiand_xr_v1" version="4">
     <description summary="stereoscopic and head-tracked surfaces">
       The factory. Binding it says nothing and changes nothing.
     </description>
@@ -92,7 +92,7 @@
     </enum>
   </interface>
 
-  <interface name="spatiand_xr_surface_v1" version="3">
+  <interface name="spatiand_xr_surface_v1" version="4">
     <description summary="how a surface is drawn for two eyes">
       All state here is double-buffered: it takes effect on the next
       wl_surface.commit, like everything else about a surface. Changing layout
@@ -314,6 +314,30 @@
       <entry name="top" value="1" summary="the top edge stays where it is"/>
       <entry name="bottom" value="2" summary="the bottom edge stays where it is"/>
     </enum>
+
+    <request name="set_cursor_drawn" since="4">
+      <description summary="this surface draws the pointer itself">
+        While the pointer is over this surface, the compositor draws no reticle
+        and no beam for it; the client draws its own.
+
+        The compositor knows which way the pointer points and nothing about how
+        far away what it points at is. For a window that does not matter: the
+        window is the depth. For a surface that is the room -- a projection
+        layer, where one pixel is a table two metres off and the next is a
+        mountain -- a reticle drawn at the room's depth is at the wrong depth
+        almost everywhere, and seen double against whatever the wearer is
+        actually aiming at. The client drew the room and knows the depth of
+        every pixel of it, so the client draws the cursor.
+
+        Where the pointer is still arrives as ordinary pointer motion, in the
+        surface's own coordinates. Only the drawing moves. Over any other
+        surface, or over none, the compositor draws the pointer as it always
+        does.
+
+        Off by default. Double-buffered like everything else here.
+      </description>
+      <arg name="enable" type="uint" summary="0 or 1"/>
+    </request>
   </interface>
 
   <interface name="spatiand_xr_pose_channel_v1" version="1">

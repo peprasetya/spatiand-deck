@@ -423,6 +423,15 @@ async fn serve(
                                         client.present(window.0, after.0, after.1);
                                     }
                                 }
+                                HostMessage::CursorDrawn { window, drawn } => {
+                                    log::info!(
+                                        "remote: window {} on {} {} its own pointer",
+                                        window.0,
+                                        config.host,
+                                        if drawn { "draws" } else { "no longer draws" }
+                                    );
+                                    client.set_cursor_drawn(window.0, drawn);
+                                }
                                 HostMessage::Catalog { apps } => {
                                     log::info!("remote: {} application(s) offered", apps.len());
                                     let listed: Vec<RemoteApp> = apps

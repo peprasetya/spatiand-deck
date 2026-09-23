@@ -150,9 +150,16 @@ pub enum HostMessage {
     /// application that starts drawing two eyes changes the shape of its picture at the same
     /// moment, so the stream is re-announced then anyway.
     ///
+    Layer { window: WindowId, layer: Layer },
+    /// Whether a window's application draws the pointer over it itself, whenever that changes.
+    ///
+    /// A world knows how far away each of its pixels is and the session does not, so a viewer
+    /// that is the room draws its own cursor at the right depth and asks for the session's to
+    /// be left off. Carried to `spatiand_xr_surface_v1.set_cursor_drawn` on the session's side.
+    ///
     /// Last in this enum, and must stay so: a session built before it reports it as unknown
     /// rather than mistaking it for something else. See `crate::VERSION`.
-    Layer { window: WindowId, layer: Layer },
+    CursorDrawn { window: WindowId, drawn: bool },
 }
 
 /// A window the host has.
@@ -432,6 +439,10 @@ mod tests {
             HostMessage::Layer {
                 window: WindowId(1),
                 layer: Layer::Projection,
+            },
+            HostMessage::CursorDrawn {
+                window: WindowId(1),
+                drawn: true,
             },
         ];
         for message in host {

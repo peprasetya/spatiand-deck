@@ -124,6 +124,11 @@ pub struct Host {
     /// Applications whose presentation changed since the main loop last looked, so it can
     /// re-announce their streams and tell the session.
     pub presentation_changed: Vec<String>,
+    /// Applications that draw the pointer over their windows themselves, by catalogue id.
+    /// Kept apart from `presentation` because changing it must not restart a stream.
+    pub cursor_drawn: std::collections::HashSet<String>,
+    /// Applications whose `cursor_drawn` changed since the main loop last looked.
+    pub cursor_changed: Vec<String>,
     /// Our end of each view-taking application's control socket, for saying things to it, and
     /// the render size it was last told. See `appcontrol`.
     pub app_controls: HashMap<String, (std::os::fd::OwnedFd, Option<(u32, u32)>)>,
@@ -224,6 +229,8 @@ impl Host {
             pose_fd: None,
             presentation: HashMap::new(),
             presentation_changed: Vec::new(),
+            cursor_drawn: std::collections::HashSet::new(),
+            cursor_changed: Vec::new(),
             app_controls: HashMap::new(),
             xwm: None,
             xwayland_shell_state,
