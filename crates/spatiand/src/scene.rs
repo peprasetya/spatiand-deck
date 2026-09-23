@@ -1211,7 +1211,15 @@ impl Scene {
         let height = width / aspect;
 
         let half_height = (height / 2.0 / KEYBOARD_DISTANCE).atan();
-        let pitch = half_height + KEYBOARD_GAP;
+        // An application that is the room fills the whole field with its own view and its own
+        // menus, so just under the eye line is the middle of what it draws. Below the field
+        // instead, the way a keyboard sits below a window: a glance down finds it.
+        let below_room = if self.projection.is_some() {
+            (fov.1.to_radians() * 0.5) as f32
+        } else {
+            0.0
+        };
+        let pitch = below_room + half_height + KEYBOARD_GAP;
         // POSITIVE rotation about +Y pitches DOWN in this frame, because +Y is left. Negating
         // it put the keyboard above the eye line, overlapping the status bar -- which looked
         // like a placement choice rather than a sign error.
