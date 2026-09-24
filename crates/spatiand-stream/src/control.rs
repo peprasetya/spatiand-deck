@@ -93,6 +93,18 @@ pub enum ClientMessage {
     /// not worked. Named by catalogue id, because that is what owns the processes; a window
     /// is only one of the things an application has open.
     ForceQuit { app: String },
+    /// [`ClientMessage::Input`], with the session's own time for it, in milliseconds.
+    ///
+    /// The host used to stamp each event with the moment it arrived, so the link's jitter was
+    /// written into every interval between two events. Two clicks made 80 ms apart could
+    /// arrive half a second apart, and a double click -- the way a word is selected in a
+    /// terminal, before it can be copied -- became two single ones. The host keeps these
+    /// intervals exactly; see [`EventClock`].
+    InputAt {
+        window: WindowId,
+        input: Input,
+        time_ms: u32,
+    },
 }
 
 /// What the host sends.
@@ -198,6 +210,53 @@ pub enum Input {
     /// The layout stays on the host, which is the only end that knows what the application
     /// expects. Sending characters instead would break every game that reads scancodes.
     Key { code: u32, pressed: bool },
+}
+
+/// A session's event times, turned into this machine's with the gaps between them kept.
+///
+/// Each event is placed at its session time plus the smallest delay any event has shown so far
+/// -- the delay of the link at its best. So two events keep the interval they were made with,
+/// however unevenly they arrived; none is placed later than it arrived; and none goes back in
+/// time. A jump of more than [`EventClock::REBASE_MS`] either way is a different clock -- a
+/// session that restarted -- and starts afresh.
+#[derive(Debug, Default, Clone)]
+pub struct EventClock {
+    offset: Option<u32>,
+    last: Option<u32>,
+}
+
+impl EventClock {
+    pub const REBASE_MS: i32 = 5_000;
+
+    /// This machine's time for an event the session made at `sent`, which arrived at `now`.
+    /// Both in milliseconds, and both allowed to wrap.
+    pub fn place(&mut self, sent: u32, now: u32) -> u32 {
+        let seen = now.wrapping_sub(sent);
+        let offset = match self.offset {
+            // A smaller delay than any before: the link at a better moment.
+            Some(best) if (seen.wrapping_sub(best) as i32) < 0 => {
+                if (best.wrapping_sub(seen) as i32) > Self::REBASE_MS {
+                    self.last = None;
+                }
+                seen
+            }
+            Some(best) if (seen.wrapping_sub(best) as i32) > Self::REBASE_MS => {
+                self.last = None;
+                seen
+            }
+            Some(best) => best,
+            None => seen,
+        };
+        self.offset = Some(offset);
+        let mut placed = sent.wrapping_add(offset);
+        if let Some(last) = self.last {
+            if (placed.wrapping_sub(last) as i32) < 0 {
+                placed = last;
+            }
+        }
+        self.last = Some(placed);
+        placed
+    }
 }
 
 /// The gamepad, whole, as a snapshot rather than as changes.
@@ -388,6 +447,14 @@ mod tests {
                     pressed: true,
                 },
             },
+            ClientMessage::InputAt {
+                window: WindowId(1),
+                input: Input::Button {
+                    button: 0x110,
+                    pressed: true,
+                },
+                time_ms: 4_000_000_000,
+            },
             ClientMessage::Clipboard(Clipboard::Want {
                 mime_type: "image/png".into(),
             }),
@@ -473,5 +540,44 @@ mod tests {
         // 250 a second has to be unremarkable next to the pictures.
         let bytes = crate::to_bytes(&v).expect("encodes").len();
         assert!(bytes < 128, "a viewport is {bytes} bytes");
+    }
+
+    #[test]
+    fn two_clicks_keep_their_interval_however_the_link_delivers_them() {
+        let mut clock = EventClock::default();
+        // Made 80 ms apart; the second is held up 400 ms more on the way.
+        let first = clock.place(1_000, 51_000);
+        let second = clock.place(1_080, 51_480);
+        assert_eq!(second - first, 80, "a double click must stay a double click");
+    }
+
+    #[test]
+    fn nothing_is_placed_after_it_arrived_or_before_the_one_before_it() {
+        let mut clock = EventClock::default();
+        // The first held up, the second not: the link was better than the first one showed.
+        // Ordered delivery means the second can never arrive before the first.
+        let a = clock.place(1_000, 50_200);
+        let b = clock.place(1_010, 50_205);
+        assert!(a <= 50_200 && b <= 50_205, "placed after it arrived");
+        assert!(b >= a, "placed before the event before it");
+    }
+
+    #[test]
+    fn a_session_that_restarts_is_a_new_clock() {
+        let mut clock = EventClock::default();
+        clock.place(9_000_000, 50_000);
+        // A new session process, counting from nearly zero.
+        let t = clock.place(300, 60_000);
+        let u = clock.place(380, 60_080);
+        assert_eq!(u - t, 80);
+        assert!(u <= 60_080);
+    }
+
+    #[test]
+    fn the_clocks_may_wrap() {
+        let mut clock = EventClock::default();
+        let a = clock.place(u32::MAX - 20, 100);
+        let b = clock.place(u32::MAX.wrapping_add(60), 180);
+        assert_eq!(b.wrapping_sub(a), 80);
     }
 }

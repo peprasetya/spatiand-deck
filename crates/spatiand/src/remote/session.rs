@@ -29,7 +29,7 @@ use spatiand_video::{Converter, Decoder};
 use tokio::sync::mpsc::UnboundedReceiver;
 use wayland_client::EventQueue;
 
-use super::client::{self, Client};
+use super::client::{self, Client, Told};
 use super::{Command, HostView, Link, RemoteApp};
 
 /// Which host to show, and how to reach it.
@@ -312,7 +312,18 @@ async fn serve(
                         Some((message, rest)) => {
                             control = Box::pin(hear(rest));
                             match message {
-                                HostMessage::Welcome { host, reattached, .. } => {
+                                HostMessage::Welcome { version, host, reattached } => {
+                                    // Each version changes what the other end has to
+                                    // understand: a host of 2 cannot read `InputAt`, and would
+                                    // drop every key and click without a word. Refused, it is
+                                    // shown as refused, and tried again until it is updated.
+                                    if version != spatiand_stream::VERSION {
+                                        return Ended::Refused(format!(
+                                            "{host} speaks version {version} and this session {}; \
+                                             update the one that is behind",
+                                            spatiand_stream::VERSION
+                                        ));
+                                    }
                                     log::info!(
                                         "remote: {host} says hello{}",
                                         if reattached { ", with windows already open" } else { "" }
@@ -765,13 +776,17 @@ async fn serve(
             }
             // Everything the wearer did, in the order they did it. Reliable and ordered,
             // because a key that arrives twice or out of turn is worse than one that is late.
-            for (id, input) in std::mem::take(&mut client.input) {
-                say(&out,
-                    ClientMessage::Input {
-                        window: WindowId(id),
+            for told in std::mem::take(&mut client.input) {
+                say(&out, match told {
+                    Told::Input { window, input, time_ms } => ClientMessage::InputAt {
+                        window: WindowId(window),
                         input,
+                        time_ms,
                     },
-                );
+                    Told::Focus(window) => ClientMessage::Focus {
+                        window: window.map(WindowId),
+                    },
+                });
             }
 
             if said.elapsed() >= Duration::from_secs(2) {

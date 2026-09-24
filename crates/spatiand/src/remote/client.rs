@@ -77,8 +77,11 @@ pub struct Client {
     /// Sizes the compositor has asked for since the last look.
     pub resized: Vec<(u32, i32, i32)>,
     pub closing: Vec<u32>,
-    /// What the wearer has done, waiting to be sent to the host.
-    pub input: Vec<(u32, Input)>,
+    /// What the wearer has done, waiting to be sent to the host, in the order it happened.
+    pub input: Vec<Told>,
+    /// The session's time for the last event heard, for the ones this end makes up itself --
+    /// a release after focus left, a pointer that left -- which have no time of their own.
+    last_time: u32,
     /// Which window the pointer is over, so a button knows where it landed.
     pointer_on: Option<u32>,
     /// Which window has the keys.
@@ -94,6 +97,19 @@ pub struct Client {
     ids: HashMap<wl_surface::WlSurface, u32>,
     /// Format and modifier pairs the compositor says it can import.
     importable: std::collections::HashSet<(u32, u64)>,
+}
+
+/// Something to tell the host about what the wearer's hands did.
+///
+/// One queue for both kinds, because their order is the meaning: the key releases for a window
+/// that has lost the keyboard must reach the host before the news of where the keyboard went,
+/// or applying them hands the keyboard straight back.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Told {
+    /// Something done to a window, at the session's time for it, in milliseconds.
+    Input { window: u32, input: Input, time_ms: u32 },
+    /// The keyboard moved to this window, or off every window of this host.
+    Focus(Option<u32>),
 }
 
 impl Client {
@@ -143,6 +159,7 @@ impl Client {
             resized: Vec::new(),
             closing: Vec::new(),
             input: Vec::new(),
+            last_time: 0,
             pointer_on: None,
             keyboard_on: None,
             held_keys: Vec::new(),
@@ -242,30 +259,44 @@ impl Client {
         }
     }
 
+    /// Queue something done to a window. `time` is the event's own; `None` for one this end
+    /// makes up, which is given the time of the last real one.
+    fn told(&mut self, window: u32, input: Input, time: Option<u32>) {
+        let time_ms = time.unwrap_or(self.last_time);
+        self.last_time = time_ms;
+        self.input.push(Told::Input {
+            window,
+            input,
+            time_ms,
+        });
+    }
+
     /// Let go of every key that is down. Called when focus leaves, because after that the
     /// release will never arrive and the application would hold the key for ever.
     fn let_go_of_keys(&mut self) {
         for (id, code) in std::mem::take(&mut self.held_keys) {
-            self.input.push((
+            self.told(
                 id,
                 Input::Key {
                     code,
                     pressed: false,
                 },
-            ));
+                None,
+            );
         }
     }
 
     /// The same for the mouse: an unreleased button is a drag that never ends.
     fn let_go_of_buttons(&mut self) {
         for (id, button) in std::mem::take(&mut self.held_buttons) {
-            self.input.push((
+            self.told(
                 id,
                 Input::Button {
                     button,
                     pressed: false,
                 },
-            ));
+                None,
+            );
         }
     }
 
@@ -279,6 +310,16 @@ impl Client {
             window.toplevel.destroy();
             window.xdg.destroy();
             window.surface.destroy();
+            // And its buffers, said in so many words. Dropping a proxy does not destroy the
+            // object it stands for, so the compositor went on holding every buffer a closed
+            // window still had -- and each buffer holds its picture's dmabufs. About eleven
+            // descriptors a window, for the life of the connection: a session that opened and
+            // closed enough windows ran out of descriptors, and the link to the host went with
+            // them ("Too many open files"). A release for one of these that is already on its
+            // way finds no window in `reap` and is dropped, which is now all it needs.
+            for (buffer, _picture) in window.showing.into_iter().chain(window.in_flight.into_values()) {
+                buffer.destroy();
+            }
         }
     }
 
@@ -754,37 +795,44 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Client {
             } => {
                 state.pointer_on = state.ids.get(&surface).copied();
                 if let Some(id) = state.pointer_on {
-                    state.input.push((
+                    state.told(
                         id,
                         Input::Motion {
                             x: surface_x,
                             y: surface_y,
                         },
-                    ));
+                        None,
+                    );
                 }
             }
             wl_pointer::Event::Leave { .. } => {
                 state.let_go_of_buttons();
                 if let Some(id) = state.pointer_on.take() {
-                    state.input.push((id, Input::Leave));
+                    state.told(id, Input::Leave, None);
                 }
             }
             wl_pointer::Event::Motion {
+                time,
                 surface_x,
                 surface_y,
-                ..
             } => {
                 if let Some(id) = state.pointer_on {
-                    state.input.push((
+                    state.told(
                         id,
                         Input::Motion {
                             x: surface_x,
                             y: surface_y,
                         },
-                    ));
+                        Some(time),
+                    );
                 }
             }
-            wl_pointer::Event::Button { button, state: pressed, .. } => {
+            wl_pointer::Event::Button {
+                button,
+                state: pressed,
+                time,
+                ..
+            } => {
                 if let Some(id) = state.pointer_on {
                     let pressed = matches!(
                         pressed,
@@ -794,10 +842,10 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Client {
                     if pressed {
                         state.held_buttons.push((id, button));
                     }
-                    state.input.push((id, Input::Button { button, pressed }));
+                    state.told(id, Input::Button { button, pressed }, Some(time));
                 }
             }
-            wl_pointer::Event::Axis { axis, value, .. } => {
+            wl_pointer::Event::Axis { axis, value, time } => {
                 if let Some(id) = state.pointer_on {
                     let (horizontal, vertical) = match axis {
                         wayland_client::WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
@@ -805,13 +853,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Client {
                         }
                         _ => (0.0, value),
                     };
-                    state.input.push((
+                    state.told(
                         id,
                         Input::Scroll {
                             horizontal,
                             vertical,
                         },
-                    ));
+                        Some(time),
+                    );
                 }
             }
             _ => {}
@@ -831,12 +880,26 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Client {
         match event {
             wl_keyboard::Event::Enter { surface, .. } => {
                 state.keyboard_on = state.ids.get(&surface).copied();
+                // Said now, not with the first key. The host used to move its focus when a key
+                // arrived, which made that key the moment of the switch -- and an application
+                // not yet made the active window ignores a shortcut. Qt does: the first
+                // Ctrl+Shift+V in a terminal on the host, after turning to it, pasted nothing.
+                if let Some(id) = state.keyboard_on {
+                    state.input.push(Told::Focus(Some(id)));
+                }
             }
             wl_keyboard::Event::Leave { .. } => {
                 state.let_go_of_keys();
-                state.keyboard_on = None;
+                if state.keyboard_on.take().is_some() {
+                    state.input.push(Told::Focus(None));
+                }
             }
-            wl_keyboard::Event::Key { key, state: pressed, .. } => {
+            wl_keyboard::Event::Key {
+                key,
+                state: pressed,
+                time,
+                ..
+            } => {
                 if let Some(id) = state.keyboard_on {
                     let pressed = matches!(
                         pressed,
@@ -846,7 +909,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Client {
                     if pressed {
                         state.held_keys.push((id, key));
                     }
-                    state.input.push((
+                    state.told(
                         id,
                         Input::Key {
                             // `wl_keyboard.key` is already an evdev code, which is what the
@@ -854,7 +917,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Client {
                             code: key,
                             pressed,
                         },
-                    ));
+                        Some(time),
+                    );
                 }
             }
             _ => {}

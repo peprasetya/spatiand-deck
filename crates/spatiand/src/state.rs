@@ -532,7 +532,49 @@ impl Spatiand {
     /// because a client that has taken a keyboard grab for a menu *should* hold the keyboard
     /// and its grab declines to give it back. Comparing against the seat would disagree with
     /// the grab every frame and ask for the focus again on each one.
+    /// Tell the window with the keyboard that it is the active one, and every other that it is
+    /// not.
+    ///
+    /// Nothing said so to a Wayland window before -- only X11 windows were ever activated -- and
+    /// a toolkit that goes by the protocol took every window for a background one. Qt does: its
+    /// window shortcuts wait for an active window, so a terminal took typing and ignored
+    /// Ctrl+Shift+C and Ctrl+Shift+V until something else happened to activate it.
+    ///
+    /// Run on every focus change and once a frame, because a new window is given the keyboard
+    /// before it is in the space: at that moment there is nothing here to tell, and a window
+    /// that is never refocused would never be told at all.
+    ///
+    /// Takes the focus rather than asking the keyboard for it. During a focus change the
+    /// keyboard is locked by the change itself, and asking it then waits for ever -- which is
+    /// how the first version of this stopped the session dead on the first window it opened.
+    fn sync_activation(&self, focused: Option<&KeyboardFocus>) {
+        use smithay::wayland::seat::WaylandFocus;
+        let focused = focused.and_then(|f| f.wl_surface().map(|s| s.into_owned()));
+        for window in self.space.elements() {
+            let Some(toplevel) = window.toplevel() else { continue };
+            let active = focused.as_ref() == Some(toplevel.wl_surface());
+            let was =
+                toplevel.with_pending_state(|s| s.states.contains(xdg_toplevel::State::Activated));
+            if was == active {
+                continue;
+            }
+            window.set_activated(active);
+            // Before its first configure a window is told with that one, which carries whatever
+            // is pending by then.
+            if toplevel.is_initial_configure_sent() {
+                toplevel.send_pending_configure();
+            }
+            log::debug!(
+                "{} is {}active",
+                self.app_id_of(window).unwrap_or_default(),
+                if active { "" } else { "no longer " }
+            );
+        }
+    }
+
     pub fn settle_keyboard_focus(&mut self) {
+        let focus = self.seat.get_keyboard().and_then(|k| k.current_focus());
+        self.sync_activation(focus.as_ref());
         let focused = self
             .space
             .elements()
@@ -1507,6 +1549,7 @@ impl SeatHandler for Spatiand {
             seat,
             client,
         );
+        self.sync_activation(focused);
     }
     fn cursor_image(
         &mut self,

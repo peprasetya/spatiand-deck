@@ -714,6 +714,31 @@ fn run_host(
                             },
                         );
                     }
+                    control::Asked::Keys { client, window, strokes } => {
+                        if !host.windows.iter().any(|t| t.id.0 == window) {
+                            control.tell(client, &format!("failed no window {window}"));
+                            continue;
+                        }
+                        // Stamped the way a session's keys are; see `said`.
+                        let time = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u32)
+                            .unwrap_or(0);
+                        for stroke in &strokes {
+                            for (code, pressed) in spatiand_stream::keys::transitions(stroke) {
+                                input::apply(
+                                    &mut host,
+                                    spatiand_stream::WindowId(window),
+                                    spatiand_stream::Input::Key { code, pressed },
+                                    time,
+                                );
+                            }
+                        }
+                        control.tell(client, "done");
+                    }
+                    control::Asked::Clipboard { client } => {
+                        read_clipboard(&mut host, control, client);
+                    }
                     control::Asked::Restart { client } => {
                         log::info!("asked to restart; exiting for the service manager");
                         control.tell(client, "restarting");
@@ -1149,6 +1174,44 @@ fn greet(
     }
 }
 
+/// Answer a control client with what pasting here gives right now, through the same path an
+/// application's paste takes. See `control`.
+fn read_clipboard(host: &mut state::Host, control: &control::Control, client: u64) {
+    use std::io::{Read, Write};
+    control.tell(client, &format!("held {}", host.clipboard.describe()));
+    let Some(mut writer) = control.writer(client) else { return };
+    let (mut reader, pipe_in) = match std::io::pipe() {
+        Ok(pipe) => pipe,
+        Err(e) => return control.tell(client, &format!("failed no pipe: {e}")),
+    };
+    // With no session there is nobody to ask, and a paste that would have asked ends empty.
+    let out = host
+        .out
+        .clone()
+        .unwrap_or_else(|| tokio::sync::mpsc::unbounded_channel().0);
+    host.clipboard.paste_here(
+        "text/plain;charset=utf-8".into(),
+        pipe_in.into(),
+        &host.seat,
+        host.xwm.as_mut(),
+        &host.loop_handle,
+        &out,
+    );
+    std::thread::spawn(move || {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = done_tx.send(reader.read_to_end(&mut bytes).map(|_| bytes));
+        });
+        let line = match done_rx.recv_timeout(Duration::from_secs(6)) {
+            Ok(Ok(bytes)) => format!("text {}", spatiand_stream::keys::escape(&bytes)),
+            Ok(Err(e)) => format!("failed reading: {e}"),
+            Err(_) => "failed nothing finished writing in 6 s".into(),
+        };
+        let _ = writeln!(writer, "{line}");
+    });
+}
+
 /// Act on one thing the session said about the clipboard.
 ///
 /// Its own function because each arm needs a different set of the compositor's parts, and
@@ -1184,6 +1247,14 @@ fn clipboard_said(host: &mut state::Host, what: spatiand_stream::control::Clipbo
     }
 }
 
+/// This machine's clock for input, in milliseconds. Wraps; only differences mean anything.
+fn arrival_ms() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u32)
+        .unwrap_or(0)
+}
+
 /// Act on one thing the session said.
 fn said(
     host: &mut state::Host,
@@ -1199,6 +1270,8 @@ fn said(
             version, session, ..
         } => {
             log::info!("session {session} speaks version {version}");
+            // A session's event times are its own clock; a new one starts a new mapping.
+            host.event_clock = spatiand_stream::EventClock::default();
         }
         Says::Launch { app } => {
             if let Err(e) = start_app(host, catalog, &app) {
@@ -1206,12 +1279,19 @@ fn said(
             }
         }
         Says::Input { window, input } => {
-            let time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u32)
-                .unwrap_or(0);
+            input::apply(host, window, input, arrival_ms());
+        }
+        // The same, at the time the wearer did it: the intervals between events are the
+        // wearer's, not the link's. See `spatiand_stream::EventClock`.
+        Says::InputAt {
+            window,
+            input,
+            time_ms,
+        } => {
+            let time = host.event_clock.place(time_ms, arrival_ms());
             input::apply(host, window, input, time);
         }
+        Says::Focus { window } => input::focus(host, window),
         Says::Pad(state) => pads.apply(&state),
         Says::WantKeyframe { window } => {
             if let Some(stream) = streams.get_mut(&window.0) {

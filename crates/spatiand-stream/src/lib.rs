@@ -38,14 +38,15 @@ pub mod audio;
 pub mod catalog;
 pub mod clipboard;
 pub mod control;
+pub mod keys;
 pub mod link;
 pub mod transport;
 pub mod video;
 
 pub use catalog::{App, AppKind, AudioMode, Catalog, Detach, Eyes, Layer, PadProfile};
 pub use control::{
-    Bandwidth, ClientMessage, HostMessage, Input, Pad, Viewport, WindowId, WindowInfo,
-    CONTROL_MAGIC,
+    Bandwidth, ClientMessage, EventClock, HostMessage, Input, Pad, Viewport, WindowId,
+    WindowInfo, CONTROL_MAGIC,
 };
 pub use transport::{pairing_code, Fingerprint, Gate, Identity, Trust};
 pub use video::{Codec, Packet, Reassembler};
@@ -58,7 +59,11 @@ pub use video::{Codec, Packet, Reassembler};
 /// postcard tolerates — at the end of a struct, or as a new enum variant that older peers
 /// report as unknown rather than treating as something else.
 /// 2: catalogue entries carry the icon the owner chose, beside the rendered one.
-pub const VERSION: u32 = 2;
+/// 3: input carries the session's own time (`InputAt`), and keyboard focus is said as it moves
+///    (`Focus`) rather than guessed from the first key. A host of 2 would ignore the first and
+///    drop every key, click and scroll, so a session refuses a host of another version
+///    rather than half-working.
+pub const VERSION: u32 = 3;
 
 /// Encode a message for the wire.
 pub fn to_bytes<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, postcard::Error> {

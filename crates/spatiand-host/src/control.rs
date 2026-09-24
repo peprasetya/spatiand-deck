@@ -31,7 +31,18 @@
 //! ← done | failed <why>
 //! → restart                         exit, for the service manager to start a fresh host
 //! ← restarting
+//!
+//! → key 3 ctrl+a ctrl+c             press these in window 3, as the session's keys would
+//! → type 3 clip-4821                type this in window 3, US layout
+//! ← done | failed <why>
+//! → clipboard                       paste here, as an application would, and say what came
+//! ← held <who holds it, as what>
+//! ← text <the bytes, escaped>       see spatiand_stream::keys::escape
 //! ```
+//!
+//! The last three exist for tests that copy in one application and paste in another across
+//! machines: nobody can do that by hand forty times, and it only means something done through
+//! the compositor's own seat and its own paste path.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -60,6 +71,10 @@ pub enum Asked {
     Kill { client: u64, app: String },
     /// Stop, so the service manager starts a fresh host.
     Restart { client: u64 },
+    /// Press these in this window, through the seat.
+    Keys { client: u64, window: u32, strokes: Vec<spatiand_stream::keys::Stroke> },
+    /// Paste the clipboard into a pipe, as an application would, and say what came out.
+    Clipboard { client: u64 },
 }
 
 /// Where the socket is.
@@ -110,6 +125,11 @@ impl Control {
         self.inbox.try_iter().collect()
     }
 
+    /// A second handle on one client's stream, for an answer that arrives on another thread.
+    pub fn writer(&self, client: u64) -> Option<UnixStream> {
+        self.clients.lock().ok()?.get(&client)?.try_clone().ok()
+    }
+
     /// Say one line to one client. A client that has gone is not an error.
     pub fn tell(&self, client: u64, line: &str) {
         if let Ok(mut clients) = self.clients.lock() {
@@ -155,6 +175,28 @@ fn accept(listener: UnixListener, tx: Sender<Asked>, clients: Arc<Mutex<HashMap<
                         },
                         "kill" if !rest.is_empty() => Asked::Kill { client, app: rest },
                         "restart" => Asked::Restart { client },
+                        "clipboard" => Asked::Clipboard { client },
+                        "key" | "type" => {
+                            let (window, what) = rest.split_once(' ').unwrap_or((&rest, ""));
+                            let strokes = if word == "key" {
+                                what.split_whitespace()
+                                    .map(spatiand_stream::keys::chord)
+                                    .collect::<Result<Vec<_>, _>>()
+                            } else {
+                                spatiand_stream::keys::typing(what)
+                            };
+                            match (window.parse(), strokes) {
+                                (Ok(window), Ok(strokes)) => Asked::Keys { client, window, strokes },
+                                (Err(_), _) => {
+                                    tell_now(&clients, client, &format!("failed {window:?} is not a window number"));
+                                    continue;
+                                }
+                                (_, Err(why)) => {
+                                    tell_now(&clients, client, &format!("failed {why}"));
+                                    continue;
+                                }
+                            }
+                        }
                         _ => continue,
                     };
                     if tx.send(asked).is_err() {
@@ -166,6 +208,14 @@ fn accept(listener: UnixListener, tx: Sender<Asked>, clients: Arc<Mutex<HashMap<
                     clients.remove(&client);
                 }
             });
+    }
+}
+
+fn tell_now(clients: &Mutex<HashMap<u64, UnixStream>>, client: u64, line: &str) {
+    if let Ok(mut clients) = clients.lock() {
+        if let Some(stream) = clients.get_mut(&client) {
+            let _ = writeln!(stream, "{line}");
+        }
     }
 }
 

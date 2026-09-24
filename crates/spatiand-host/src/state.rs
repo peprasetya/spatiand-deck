@@ -140,6 +140,8 @@ pub struct Host {
     /// Pointer buttons a session has pressed and not released, so they can be let go of if
     /// it leaves while one is down. See `input::release_everything`.
     pub held_buttons: Vec<u32>,
+    /// The session's event times, mapped onto this machine's. See `spatiand_stream::EventClock`.
+    pub event_clock: spatiand_stream::EventClock,
     /// Copy and paste, both ways across the link. See `clipboard`.
     pub clipboard: crate::clipboard::Clipboard,
     /// Where to post to the session, once there is a network. The clipboard needs it from
@@ -236,6 +238,7 @@ impl Host {
             xwayland_shell_state,
             x11_display: None,
             held_buttons: Vec::new(),
+            event_clock: Default::default(),
             clipboard: crate::clipboard::Clipboard::new(),
             out: None,
             loop_handle: loop_handle.clone(),
@@ -683,6 +686,7 @@ impl SeatHandler for Host {
     /// A client with the keyboard may read the selection. That is the rule the protocol sets,
     /// and it is why this hangs off focus rather than being granted outright.
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&KeyboardFocus>) {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
         use smithay::wayland::seat::WaylandFocus;
         let client = focused
             .and_then(|focus| focus.wl_surface().map(|s| s.into_owned()))
@@ -692,6 +696,25 @@ impl SeatHandler for Host {
             seat,
             client,
         );
+        // And the window with the keyboard is told it is the active one; every other is told
+        // it is not. Nothing said so to a Wayland window before -- only X11 windows were ever
+        // activated -- and a toolkit that goes by the protocol took every window for a
+        // background one. Qt does: its window shortcuts need an active window, so a terminal
+        // took typing and ignored Ctrl+Shift+C and Ctrl+Shift+V, which is to say a terminal
+        // could neither copy nor paste. Chrome opened new windows with the keyboard in the
+        // address bar rather than the page for the same reason.
+        let focused_surface = focused.and_then(|f| f.wl_surface()).map(|s| s.into_owned());
+        for window in self.space.elements() {
+            let Some(toplevel) = window.toplevel() else { continue };
+            let active = focused_surface.as_ref() == Some(toplevel.wl_surface());
+            let was = toplevel.with_pending_state(|s| s.states.contains(xdg_toplevel::State::Activated));
+            if was != active {
+                window.set_activated(active);
+                if toplevel.is_initial_configure_sent() {
+                    toplevel.send_pending_configure();
+                }
+            }
+        }
     }
 }
 

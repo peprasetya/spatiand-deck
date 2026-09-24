@@ -45,6 +45,37 @@ pub fn release_everything(host: &mut Host, time_ms: u32) {
     }
 }
 
+/// The session moved its keyboard: to one of the windows here, or off all of them.
+///
+/// Acted on when it is said, not when the first key arrives: an application that has not yet
+/// become the active window ignores a shortcut, so a first key that was Ctrl+Shift+V pasted
+/// nothing. Off all of them is a real state too -- the wearer is typing somewhere else -- and
+/// a window here that still believed itself active would draw a caret nobody is typing into.
+pub fn focus(host: &mut Host, window: Option<WindowId>) {
+    let target = window.and_then(|w| {
+        host.windows
+            .iter()
+            .find(|t| t.id == w)
+            .map(|t| t.window.clone())
+    });
+    match target {
+        Some(target) => {
+            if let Some(surface) = crate::state::surface_of(&target) {
+                focus_keyboard(host, &target, surface);
+            }
+        }
+        None => {
+            let Some(keyboard) = host.seat.get_keyboard() else {
+                return;
+            };
+            if let Some(crate::state::KeyboardFocus::X11(old)) = keyboard.current_focus() {
+                let _ = old.set_activated(false);
+            }
+            keyboard.set_focus(host, None, SERIAL_COUNTER.next_serial());
+        }
+    }
+}
+
 /// Apply one event to one window.
 pub fn apply(host: &mut Host, window: WindowId, input: Input, time_ms: u32) {
     let Some(target) = host.windows.iter().find(|t| t.id == window).map(|t| t.window.clone())
@@ -178,26 +209,10 @@ pub fn apply(host: &mut Host, window: WindowId, input: Input, time_ms: u32) {
             let Some(keyboard) = host.seat.get_keyboard() else {
                 return;
             };
+            // Focus follows the keys as well as `ClientMessage::Focus`: a key is never meant
+            // for any other window, whatever the session has or has not said.
+            focus_keyboard(host, &target, surface);
             let serial = SERIAL_COUNTER.next_serial();
-            // Focus follows the keys. A session sends keys for the window the wearer is using,
-            // so the window they are meant for is the one named on the event. An X11 window is
-            // focused as itself, raised and activated; see `state::KeyboardFocus`.
-            let wanted = match target.x11_surface() {
-                Some(x11) => crate::state::KeyboardFocus::X11(x11.clone()),
-                None => crate::state::KeyboardFocus::Wayland(surface),
-            };
-            if keyboard.current_focus().as_ref() != Some(&wanted) {
-                if let Some(crate::state::KeyboardFocus::X11(old)) = keyboard.current_focus() {
-                    let _ = old.set_activated(false);
-                }
-                if let crate::state::KeyboardFocus::X11(x11) = &wanted {
-                    if let Some(wm) = host.xwm.as_mut() {
-                        let _ = wm.raise_window(x11);
-                    }
-                    let _ = x11.set_activated(true);
-                }
-                keyboard.set_focus(host, Some(wanted), serial);
-            }
             keyboard.input::<(), _>(
                 host,
                 // The wire carries evdev codes; smithay's keyboard takes XKB codes, which are
@@ -216,4 +231,35 @@ pub fn apply(host: &mut Host, window: WindowId, input: Input, time_ms: u32) {
             );
         }
     }
+}
+
+/// Give a window the keyboard, if it does not have it already.
+///
+/// The window the session names is the window the wearer is using. An X11 window is focused as
+/// itself, raised and activated; see `state::KeyboardFocus`.
+fn focus_keyboard(
+    host: &mut Host,
+    target: &smithay::desktop::Window,
+    surface: smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) {
+    let Some(keyboard) = host.seat.get_keyboard() else {
+        return;
+    };
+    let wanted = match target.x11_surface() {
+        Some(x11) => crate::state::KeyboardFocus::X11(x11.clone()),
+        None => crate::state::KeyboardFocus::Wayland(surface),
+    };
+    if keyboard.current_focus().as_ref() == Some(&wanted) {
+        return;
+    }
+    if let Some(crate::state::KeyboardFocus::X11(old)) = keyboard.current_focus() {
+        let _ = old.set_activated(false);
+    }
+    if let crate::state::KeyboardFocus::X11(x11) = &wanted {
+        if let Some(wm) = host.xwm.as_mut() {
+            let _ = wm.raise_window(x11);
+        }
+        let _ = x11.set_activated(true);
+    }
+    keyboard.set_focus(host, Some(wanted), SERIAL_COUNTER.next_serial());
 }
