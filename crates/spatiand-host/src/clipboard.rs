@@ -95,6 +95,16 @@ impl Clipboard {
         }
     }
 
+    /// Who holds the clipboard and as what, in a line. For the control socket.
+    pub fn describe(&self) -> String {
+        match (&self.mine, &self.theirs) {
+            (Some(Mine::Wayland(forms)), _) => format!("wayland {}", forms.join(",")),
+            (Some(Mine::X11(forms)), _) => format!("x11 {}", forms.join(",")),
+            (None, Some(held)) => format!("session {}", held.mime_types.join(",")),
+            (None, None) => "nobody".into(),
+        }
+    }
+
     /// An application here copied something. Tell the session what it has.
     ///
     /// The forms are known at once; the text, if there is any, has to be fetched from the
@@ -197,6 +207,11 @@ impl Clipboard {
         );
         self.theirs = Some(held);
         self.mine = None;
+        // What this end announced is no longer on the clipboard, so hearing it again is a new
+        // copy of the same thing, not an echo. Remembering it past here dropped the second copy
+        // of, say, an address copied twice with something else in between -- and every image
+        // after the first, since two images with no text compare equal by their forms alone.
+        self.announced = None;
         let held_types = mime_types.clone();
         smithay::wayland::selection::data_device::set_data_device_selection(
             display_handle,

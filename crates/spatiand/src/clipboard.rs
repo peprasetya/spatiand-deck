@@ -108,6 +108,19 @@ impl Board {
         }
     }
 
+    /// Who holds the clipboard and as what, in a line. For the control socket and the log.
+    pub fn describe(&self) -> String {
+        match &self.owner {
+            Some(Owner::Here(forms)) => format!("wayland {}", forms.join(",")),
+            Some(Owner::HereX11(forms)) => format!("x11 {}", forms.join(",")),
+            Some(Owner::Host(host)) => format!(
+                "host {host} {}",
+                self.held.as_ref().map_or(String::new(), |h| h.mime_types.join(","))
+            ),
+            None => "nobody".into(),
+        }
+    }
+
     /// A window here copied something.
     pub fn copied_here(
         &mut self,
@@ -166,6 +179,11 @@ impl Board {
         );
         self.owner = Some(Owner::Host(host.to_string()));
         self.held = Some(held.clone());
+        // What was announced is no longer on the clipboard, so hearing it again is not an echo
+        // but a new copy of the same thing: the same address copied twice, say, with something
+        // else copied in between. Remembering it past this point dropped that second copy and
+        // left whatever came between on the clipboard.
+        self.announced = None;
         smithay::wayland::selection::data_device::set_data_device_selection(
             display_handle,
             seat,
@@ -396,6 +414,59 @@ impl Board {
             }
             alive
         });
+    }
+}
+
+/// Once a frame: everything the hosts said about the clipboard, everything the board has to say
+/// back, and whatever the protocol handlers put down since the last turn.
+///
+/// The board lives in the compositor because that is where the selection and the windows are;
+/// the hosts are each behind a thread. So everything meets here. One function, called by every
+/// backend that holds hosts, so a session on a desk and one in the glasses cannot come to
+/// disagree about what a copy means.
+pub fn exchange(remotes: &mut crate::remote::Remotes, state: &mut Spatiand) {
+    use spatiand_stream::control::Clipboard as Said;
+    for (host, what) in remotes.clipboard_said() {
+        match what {
+            Said::Offer {
+                mime_types,
+                text,
+                bytes,
+            } => {
+                let held = Held {
+                    mime_types,
+                    text,
+                    bytes,
+                };
+                if let Some(say) = state.clipboard.host_offered(
+                    &host,
+                    held,
+                    &state.display_handle,
+                    &state.seat,
+                    state.xwm.as_mut(),
+                ) {
+                    state.clipboard_out.push(say);
+                }
+            }
+            Said::Want { mime_type } => state.clipboard.host_wants(
+                &host,
+                mime_type,
+                &state.seat,
+                state.xwm.as_mut(),
+                &state.loop_handle,
+            ),
+            Said::Data { mime_type, bytes } => state.clipboard.arrived(&mime_type, bytes),
+        }
+    }
+    for host in remotes.offline() {
+        state.clipboard.host_left(&host);
+    }
+    let mut said = state
+        .clipboard
+        .pump(&state.seat, state.xwm.as_mut(), &state.loop_handle);
+    said.extend(state.clipboard_out.drain(..));
+    for say in said {
+        remotes.clipboard_say(say);
     }
 }
 

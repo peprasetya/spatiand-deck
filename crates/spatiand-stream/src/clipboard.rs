@@ -117,11 +117,21 @@ pub fn resolve(requested: &str, available: &[String]) -> Option<String> {
 ///
 /// X11 answers `TARGETS` with a handful of names that describe the selection rather than its
 /// contents. Announcing them would offer a paste that hands back the word "TIMESTAMP".
+///
+/// Chrome adds two of its own to every copy: a token naming the frame that copied, which
+/// means something only inside the browser process that issued it, and the page's address,
+/// which it uses to decide how a paste may be used. Carried to another machine, the Chrome
+/// there asked for both on every paste, each a round trip to the machine that copied, and
+/// pasted nothing until they came back -- and on its own machine the frame token names
+/// nothing at all. Chrome pastes plain text and HTML across machines without either.
 pub fn is_private(mime: &str) -> bool {
-    matches!(
-        mime.to_ascii_uppercase().as_str(),
-        "TARGETS" | "TIMESTAMP" | "MULTIPLE" | "SAVE_TARGETS" | "DELETE" | "INSERT_SELECTION"
-    )
+    let lower = mime.to_ascii_lowercase();
+    lower.starts_with("chromium/x-internal-")
+        || lower == "chromium/x-source-url"
+        || matches!(
+            mime.to_ascii_uppercase().as_str(),
+            "TARGETS" | "TIMESTAMP" | "MULTIPLE" | "SAVE_TARGETS" | "DELETE" | "INSERT_SELECTION"
+        )
 }
 
 /// What is announced, from everything a selection claims to offer.
@@ -215,6 +225,22 @@ mod tests {
     fn the_best_text_form_is_the_one_that_says_its_encoding() {
         let offered = strings(&["text/plain", "TARGETS", "text/plain;charset=utf-8"]);
         assert_eq!(best_text(&offered).as_deref(), Some("text/plain;charset=utf-8"));
+    }
+
+    #[test]
+    fn chromes_own_bookkeeping_stays_on_its_own_machine() {
+        let chrome = strings(&[
+            "text/plain;charset=utf-8",
+            "chromium/x-internal-source-rfh-token",
+            "chromium/x-source-url",
+            "chromium/x-web-custom-data",
+            "text/html",
+        ]);
+        assert_eq!(
+            offered(chrome),
+            strings(&["text/plain;charset=utf-8", "chromium/x-web-custom-data", "text/html"]),
+            "the frame token and source address are Chrome's own; its custom data is content"
+        );
     }
 
     #[test]
