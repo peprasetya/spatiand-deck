@@ -29,7 +29,7 @@ use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle, Resource};
-use smithay::utils::{Serial, Transform};
+use smithay::utils::{Point, Serial, Transform};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, is_sync_subsurface, CompositorClientState, CompositorHandler, CompositorState,
@@ -140,6 +140,13 @@ pub struct Host {
     /// Pointer buttons a session has pressed and not released, so they can be let go of if
     /// it leaves while one is down. See `input::release_everything`.
     pub held_buttons: Vec<u32>,
+    /// Where the session last put the pointer, and what it was over there, so a movement can
+    /// also be told as a relative one -- which is all a locked pointer is told. See
+    /// `PointerConstraintsHandler` below.
+    pub pointer_last: Option<(WlSurface, Point<f64, smithay::utils::Logical>, Point<f64, smithay::utils::Logical>)>,
+    /// Held because the globals live as long as they do.
+    pub _relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
+    pub _pointer_constraints: smithay::wayland::pointer_constraints::PointerConstraintsState,
     /// The session's event times, mapped onto this machine's. See `spatiand_stream::EventClock`.
     pub event_clock: spatiand_stream::EventClock,
     /// Copy and paste, both ways across the link. See `clipboard`.
@@ -175,6 +182,12 @@ impl Host {
         // How XWayland says which surface is which X11 window.
         let xwayland_shell_state =
             smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(&dh);
+        // Relative motion and pointer locks: what XWayland needs to let an X11 client warp the
+        // pointer. See `PointerConstraintsHandler` below.
+        let relative_pointer =
+            smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Self>(&dh);
+        let pointer_constraints =
+            smithay::wayland::pointer_constraints::PointerConstraintsState::new::<Self>(&dh);
 
         // One seat, fed entirely from the network. Nothing local ever types here.
         let mut seat = seat_state.new_wl_seat(&dh, "spatiand-host");
@@ -238,6 +251,9 @@ impl Host {
             xwayland_shell_state,
             x11_display: None,
             held_buttons: Vec::new(),
+            pointer_last: None,
+            _relative_pointer: relative_pointer,
+            _pointer_constraints: pointer_constraints,
             event_clock: Default::default(),
             clipboard: crate::clipboard::Clipboard::new(),
             out: None,
@@ -827,6 +843,47 @@ pub fn surface_of(window: &Window) -> Option<WlSurface> {
 }
 
 smithay::delegate_xwayland_shell!(Host);
+
+/// **Pointer locks, for applications that steer by the mouse.** Second Life's Alt-drag camera,
+/// and any game with mouse look, hides the cursor and puts it back where it started after every
+/// movement, reading only how far it went. An X11 client does that with XWarpPointer, which
+/// XWayland can only honour by locking the pointer and reading relative motion -- so without
+/// these two protocols the warp was lost, the next absolute position from the session read as
+/// the whole distance from the start all over again, and the camera spun away on its own.
+///
+/// A lock is granted to the surface the pointer is over as soon as it asks; while it holds,
+/// the session's pointer is passed on as relative motion only. See `input::apply`.
+impl smithay::wayland::pointer_constraints::PointerConstraintsHandler for Host {
+    fn new_constraint(
+        &mut self,
+        surface: &WlSurface,
+        pointer: &smithay::input::pointer::PointerHandle<Self>,
+    ) {
+        if pointer.current_focus().as_ref() == Some(surface) {
+            smithay::wayland::pointer_constraints::with_pointer_constraint(
+                surface,
+                pointer,
+                |constraint| {
+                    if let Some(constraint) = constraint {
+                        constraint.activate();
+                    }
+                },
+            );
+        }
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &smithay::input::pointer::PointerHandle<Self>,
+        _location: Point<f64, smithay::utils::Logical>,
+    ) {
+        // Where the client says the cursor is when the lock ends. The session owns the
+        // pointer's position, so there is nothing here to move.
+    }
+}
+smithay::delegate_pointer_constraints!(Host);
+smithay::delegate_relative_pointer!(Host);
 
 /// What the keyboard is given: a Wayland surface, or an X11 window itself.
 ///

@@ -11,7 +11,7 @@
 
 use smithay::backend::input::{Axis, AxisSource, ButtonState, KeyState};
 use smithay::input::keyboard::FilterResult;
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent};
 use smithay::utils::{Point, SERIAL_COUNTER};
 use spatiand_stream::{Input, WindowId};
 
@@ -103,18 +103,84 @@ pub fn apply(host: &mut Host, window: WindowId, input: Input, time_ms: u32) {
                 .surface_under(location, smithay::desktop::WindowSurfaceType::ALL)
                 .map(|(s, at)| (s, at.to_f64()))
                 .unwrap_or((surface, (0.0, 0.0).into()));
+            // How far it moved, for relative motion: the whole of what a locked pointer is
+            // told, and alongside every absolute move otherwise, as a real mouse gives both.
+            let delta = host
+                .pointer_last
+                .as_ref()
+                .map(|(_, _, last)| location - *last)
+                .unwrap_or_default();
+            // Locked -- see `PointerConstraintsHandler` in state.rs -- the pointer stays where
+            // it is and only the movement is passed on.
+            let locked = host.pointer_last.as_ref().is_some_and(|(held, _, _)| {
+                pointer.current_focus().as_ref() == Some(held)
+                    && smithay::wayland::pointer_constraints::with_pointer_constraint(
+                        held,
+                        &pointer,
+                        |constraint| {
+                            constraint.is_some_and(|c| {
+                                c.is_active()
+                                    && matches!(
+                                        &*c,
+                                        smithay::wayland::pointer_constraints::PointerConstraint::Locked(_)
+                                    )
+                            })
+                        },
+                    )
+            });
+            if locked {
+                let (held, origin, _) = host.pointer_last.clone().expect("locked implies a last");
+                pointer.relative_motion(
+                    host,
+                    Some((held.clone(), origin)),
+                    &RelativeMotionEvent {
+                        delta,
+                        delta_unaccel: delta,
+                        utime: time_ms as u64 * 1000,
+                    },
+                );
+                pointer.frame(host);
+                host.pointer_last = Some((held, origin, location));
+                return;
+            }
             pointer.motion(
                 host,
-                Some(focus),
+                Some(focus.clone()),
                 &MotionEvent {
                     location,
                     serial: SERIAL_COUNTER.next_serial(),
                     time: time_ms,
                 },
             );
+            if delta != Point::default() {
+                pointer.relative_motion(
+                    host,
+                    Some(focus.clone()),
+                    &RelativeMotionEvent {
+                        delta,
+                        delta_unaccel: delta,
+                        utime: time_ms as u64 * 1000,
+                    },
+                );
+            }
             pointer.frame(host);
+            // A lock asked for before the pointer arrived is granted now it has.
+            smithay::wayland::pointer_constraints::with_pointer_constraint(
+                &focus.0,
+                &pointer,
+                |constraint| {
+                    if let Some(constraint) = constraint {
+                        if !constraint.is_active() {
+                            constraint.activate();
+                        }
+                    }
+                },
+            );
+            host.pointer_last = Some((focus.0, focus.1, location));
         }
         Input::Leave => {
+            // Coming back in is a new position, not a movement from where it left.
+            host.pointer_last = None;
             let Some(pointer) = host.seat.get_pointer() else {
                 return;
             };
