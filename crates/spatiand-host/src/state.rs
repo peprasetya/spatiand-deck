@@ -691,6 +691,17 @@ impl SeatHandler for Host {
         &mut self.seat_state
     }
 
+    /// The session draws its own pointer, so what a client sets is not shown -- but whether it
+    /// hid it is worth knowing: XWayland locks the pointer for a warp only while it is hidden.
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: smithay::input::pointer::CursorImageStatus) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static HIDDEN: AtomicBool = AtomicBool::new(false);
+        let hidden = matches!(image, smithay::input::pointer::CursorImageStatus::Hidden);
+        if HIDDEN.swap(hidden, Ordering::Relaxed) != hidden {
+            log::info!("pointer: the application {} its cursor", if hidden { "hid" } else { "showed" });
+        }
+    }
+
     /// **Give the clipboard to whoever has the keyboard.**
     ///
     /// This was an empty stub, and the whole of why copy and paste worked nowhere: without it
@@ -859,7 +870,12 @@ impl smithay::wayland::pointer_constraints::PointerConstraintsHandler for Host {
         surface: &WlSurface,
         pointer: &smithay::input::pointer::PointerHandle<Self>,
     ) {
-        if pointer.current_focus().as_ref() == Some(surface) {
+        let focused = pointer.current_focus().as_ref() == Some(surface);
+        log::info!(
+            "pointer: an application asked for a pointer constraint ({})",
+            if focused { "granted" } else { "waiting for the pointer" }
+        );
+        if focused {
             smithay::wayland::pointer_constraints::with_pointer_constraint(
                 surface,
                 pointer,

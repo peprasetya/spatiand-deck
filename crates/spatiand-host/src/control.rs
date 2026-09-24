@@ -35,6 +35,10 @@
 //! → key 3 ctrl+a ctrl+c             press these in window 3, as the session's keys would
 //! → type 3 clip-4821                type this in window 3, US layout
 //! ← done | failed <why>
+//! → input 3 move 640 400             one input to window 3 exactly as a session sends it:
+//! → input 3 button 272 1             move the pointer, press (1) or release (0) a button or
+//! → input 3 keycode 56 1             a key by its evdev code -- held across commands, so a
+//! ← done | failed <why>              drag with Alt down can be done a step at a time
 //! → clipboard                       paste here, as an application would, and say what came
 //! ← held <who holds it, as what>
 //! ← text <the bytes, escaped>       see spatiand_stream::keys::escape
@@ -73,6 +77,8 @@ pub enum Asked {
     Restart { client: u64 },
     /// Press these in this window, through the seat.
     Keys { client: u64, window: u32, strokes: Vec<spatiand_stream::keys::Stroke> },
+    /// One input to a window, as a session would send it. See `input` above.
+    Input { client: u64, window: u32, input: spatiand_stream::Input },
     /// Paste the clipboard into a pipe, as an application would, and say what came out.
     Clipboard { client: u64 },
 }
@@ -176,6 +182,13 @@ fn accept(listener: UnixListener, tx: Sender<Asked>, clients: Arc<Mutex<HashMap<
                         "kill" if !rest.is_empty() => Asked::Kill { client, app: rest },
                         "restart" => Asked::Restart { client },
                         "clipboard" => Asked::Clipboard { client },
+                        "input" => match parse_input(&rest) {
+                            Ok((window, input)) => Asked::Input { client, window, input },
+                            Err(why) => {
+                                tell_now(&clients, client, &format!("failed {why}"));
+                                continue;
+                            }
+                        },
                         "key" | "type" => {
                             let (window, what) = rest.split_once(' ').unwrap_or((&rest, ""));
                             let strokes = if word == "key" {
@@ -209,6 +222,32 @@ fn accept(listener: UnixListener, tx: Sender<Asked>, clients: Arc<Mutex<HashMap<
                 }
             });
     }
+}
+
+/// `3 move 640 400`, `3 button 272 1`, `3 keycode 56 0`.
+fn parse_input(rest: &str) -> Result<(u32, spatiand_stream::Input), String> {
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let number = |i: usize| -> Result<f64, String> {
+        words
+            .get(i)
+            .ok_or_else(|| format!("missing argument {i}"))?
+            .parse::<f64>()
+            .map_err(|_| format!("{:?} is not a number", words[i]))
+    };
+    let window = number(0)? as u32;
+    let input = match words.get(1).copied() {
+        Some("move") => spatiand_stream::Input::Motion { x: number(2)?, y: number(3)? },
+        Some("button") => spatiand_stream::Input::Button {
+            button: number(2)? as u32,
+            pressed: number(3)? != 0.0,
+        },
+        Some("keycode") => spatiand_stream::Input::Key {
+            code: number(2)? as u32,
+            pressed: number(3)? != 0.0,
+        },
+        other => return Err(format!("unknown input {other:?}")),
+    };
+    Ok((window, input))
 }
 
 fn tell_now(clients: &Mutex<HashMap<u64, UnixStream>>, client: u64, line: &str) {

@@ -736,6 +736,18 @@ fn run_host(
                         }
                         control.tell(client, "done");
                     }
+                    control::Asked::Input { client, window, input } => {
+                        if !host.windows.iter().any(|t| t.id.0 == window) {
+                            control.tell(client, &format!("failed no window {window}"));
+                            continue;
+                        }
+                        let time = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u32)
+                            .unwrap_or(0);
+                        input::apply(&mut host, spatiand_stream::WindowId(window), input, time);
+                        control.tell(client, "done");
+                    }
                     control::Asked::Clipboard { client } => {
                         read_clipboard(&mut host, control, client);
                     }

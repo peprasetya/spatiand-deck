@@ -128,6 +128,13 @@ pub fn apply(host: &mut Host, window: WindowId, input: Input, time_ms: u32) {
                         },
                     )
             });
+            {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static WAS_LOCKED: AtomicBool = AtomicBool::new(false);
+                if WAS_LOCKED.swap(locked, Ordering::Relaxed) != locked {
+                    log::info!("pointer: {}", if locked { "locked; passing movement on as relative only" } else { "unlocked" });
+                }
+            }
             if locked {
                 let (held, origin, _) = host.pointer_last.clone().expect("locked implies a last");
                 pointer.relative_motion(
