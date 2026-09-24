@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use glam::{DQuat, DVec3, Mat4, Vec3};
 use smithay::backend::renderer::gles::{ffi, GlesRenderer};
+use smithay::backend::renderer::{Frame, Renderer};
 use smithay::backend::winit::{self, WinitEvent};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::EventLoop;
@@ -250,6 +251,12 @@ pub fn run(
     );
 
     while runtime.state.running {
+        // SIGTERM is caught for every backend (`main` installs the handler), so a loop that does
+        // not look is a process `systemctl stop` has to wait out and then kill.
+        if crate::shutdown::requested() {
+            log::info!("nested: asked to stop");
+            break;
+        }
         // Drain every sample since the last frame: the stream runs at ~1 kHz and the display
         // at 72 Hz, so feeding all of them keeps the filter's dt honest.
         if let Some(h) = hmd.as_mut() {
@@ -472,7 +479,7 @@ pub fn run(
             }
         };
 
-        let (renderer, framebuffer) = backend.bind()?;
+        let (renderer, mut framebuffer) = backend.bind()?;
         // Answered here because this is where a renderer exists. Advertising dmabuf without
         // answering for it would leave a client waiting on every buffer it ever offered.
         crate::dmabuf::settle(&mut runtime.state, renderer);
@@ -536,7 +543,17 @@ pub fn run(
         });
         let scene = &scene;
         let shell = &shell;
-        renderer.with_context(|gl| unsafe {
+        // Drawn through a frame on the window's framebuffer, not through the renderer's
+        // `with_context`. In smithay 0.7 that makes the context current with *no* surface --
+        // right for uploading textures, which is all the calls above do, and wrong for drawing
+        // to the window: every draw went into a framebuffer with nothing behind it ("incomplete
+        // framebuffer" on the first clear), the swap found its surface was never current
+        // (BAD_SURFACE), smithay tried to make a new one for the same window (BAD_ALLOC), and the
+        // backend gave up on its first frame. The DRM backend never met this because it draws into
+        // framebuffers of its own, which need no surface. A frame makes this window's surface
+        // current for as long as the drawing takes.
+        let mut frame = renderer.render(&mut framebuffer, size, Transform::Normal)?;
+        frame.with_context(|gl| unsafe {
             gl.Disable(ffi::SCISSOR_TEST);
             gl.Viewport(0, 0, size.w, size.h);
             gl.ClearColor(0.02, 0.02, 0.05, 1.0);
@@ -575,6 +592,7 @@ pub fn run(
                 }
             }
         })?;
+        let _ = frame.finish()?;
 
         drop(framebuffer);
         backend.submit(Some(&[Rectangle::from_size(size)]))?;
