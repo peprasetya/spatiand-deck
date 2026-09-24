@@ -237,6 +237,9 @@ pub fn run(
     // Remote hosts, if any are configured. Held for the life of the session: dropping one
     // closes its windows. Paired and forgotten from the HUD, as the session runs.
     let mut remotes = crate::remote::Remotes::start(&mut runtime.display_handle, &prefs);
+    // Asked to do what a wearer would -- focus, keys, read the clipboard -- by a test on the
+    // other end of a socket. See `crate::control`.
+    let control = crate::control::Control::start();
     // Bluetooth devices for the HUD's page, asked on a thread of its own.
     let mut bluetooth = crate::bluetooth::Devices::start();
     // An event the keyboard produced after this frame's events were already handled — Enter
@@ -308,7 +311,7 @@ pub fn run(
     /// rather than for the keymap. Shorter than this and a quick word shows nothing; longer and
     /// a key is still down when the next one is struck.
     const PRESS_SHOWN: Duration = Duration::from_millis(130);
-    /// Keys struck recently, and when, so a press can be seen as well as heard.
+    // Keys struck recently, and when, so a press can be seen as well as heard.
     let mut keyboard_struck: Vec<(&'static Key, std::time::Instant)> = Vec::new();
     // Where each ray meets the keyboard, as `[right, left]`, so the reticle can be put *on* it.
     //
@@ -1277,60 +1280,12 @@ pub fn run(
 
             // --- the clipboard ---
             //
-            // The board lives in the compositor because that is where the selection and the
-            // windows are; the hosts are each behind a thread. So everything meets here, once
-            // a frame: what the hosts have said, what the board has to say back, and what the
-            // protocol handlers put down since the last turn. See `crate::clipboard`.
-            {
-                let state = &mut runtime.state;
-                for (host, what) in remotes.clipboard_said() {
-                    use spatiand_stream::control::Clipboard as Said;
-                    match what {
-                        Said::Offer {
-                            mime_types,
-                            text,
-                            bytes,
-                        } => {
-                            let held = spatiand_stream::clipboard::Held {
-                                mime_types,
-                                text,
-                                bytes,
-                            };
-                            if let Some(say) = state.clipboard.host_offered(
-                                &host,
-                                held,
-                                &state.display_handle,
-                                &state.seat,
-                                state.xwm.as_mut(),
-                            ) {
-                                state.clipboard_out.push(say);
-                            }
-                        }
-                        Said::Want { mime_type } => state.clipboard.host_wants(
-                            &host,
-                            mime_type,
-                            &state.seat,
-                            state.xwm.as_mut(),
-                            &state.loop_handle,
-                        ),
-                        Said::Data { mime_type, bytes } => {
-                            state.clipboard.arrived(&mime_type, bytes)
-                        }
-                    }
-                }
-                for host in remotes.offline() {
-                    state.clipboard.host_left(&host);
-                }
-                let mut said = state.clipboard.pump(
-                    &state.seat,
-                    state.xwm.as_mut(),
-                    &state.loop_handle,
-                );
-                said.extend(state.clipboard_out.drain(..));
-                for say in said {
-                    remotes.clipboard_say(say);
-                }
+            // What the hosts said, what the board says back, and what the protocol handlers
+            // put down since the last turn. See `crate::clipboard::exchange`.
+            if let Some(control) = &control {
+                control.serve(&mut runtime.state);
             }
+            crate::clipboard::exchange(&mut remotes, &mut runtime.state);
             if let Some(command) = bluetooth.tick(&mut shell) {
                 if let Err(e) =
                     spatiand_platform::launch(&command, &runtime.state.socket_name, &[])

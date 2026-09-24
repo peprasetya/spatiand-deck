@@ -18,12 +18,14 @@ mod attention;
 mod audio;
 mod cadence;
 mod backend_drm;
+mod backend_headless;
 mod backend_snapshot;
 mod backend_winit;
 mod bluetooth;
 mod calib;
 mod click;
 mod clipboard;
+mod control;
 mod controls;
 mod desk;
 mod diagram;
@@ -123,6 +125,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        // Everything but the pictures, for tests driven through the control socket.
+        "headless" => {
+            if let Err(e) = backend_headless::run(&mut event_loop, &mut display, &mut runtime) {
+                log::error!("headless backend failed: {e}");
+                std::process::exit(1);
+            }
+        }
         // Renders one frame to a PNG with no display, no session and no headset. The only
         // way to see a layout bug without putting the glasses on and describing it.
         "snapshot" => {
@@ -132,7 +141,7 @@ fn main() {
             }
         }
         other => {
-            log::error!("unknown backend {other:?}; expected winit, drm or snapshot");
+            log::error!("unknown backend {other:?}; expected winit, drm, headless or snapshot");
             std::process::exit(1);
         }
     }

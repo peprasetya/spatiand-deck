@@ -928,7 +928,12 @@ under Proton take part.
 - **An announcement must not circulate.** The session tells every host, including the one it
   heard from, and a host applying its own announcement back would replace the owning
   application's selection with a copy of itself that cannot serve anything large. Both ends
-  remember what they last announced and recognise it coming back.
+  remember what they last announced and recognise it coming back -- but only until the
+  clipboard moves on. Remembered for longer, it dropped a real second copy of the same thing
+  (an address copied twice with something else between) and every image after the first.
+- **Chrome's bookkeeping stays home.** Every Chrome copy carries a frame token and the page's
+  address. Carried across, the other machine's Chrome asked for both on every paste and waited
+  a round trip for each. `is_private` leaves them out; text, HTML and Chrome's custom data go.
 - **A paste that is never answered ends empty after five seconds.** A pipe left open is a
   window that has hung, which is worse than a paste that produced nothing.
 - **The primary selection — middle-click paste — is deliberately not carried.** It changes with
@@ -943,3 +948,36 @@ under Proton take part.
   that copied leaves the announcement without a source, so a later paste of a large form
   arrives empty.
 - **Copying requires keyboard focus**, which is a Wayland rule rather than a choice here.
+
+### Tested end to end — 2026-09-24
+
+`tools/clipboard-matrix.py` copies in every application and pastes in every other, through
+both real compositors, and reads each paste back without touching the clipboard (a saved file,
+a terminal that writes what it is given, a page title). Seven applications: KWrite, Konsole
+and Chrome on the Deck; Chrome and qterminal on the host; and Chrome under X11 on each machine,
+standing in for SpatiWorld/Firestorm's path through the X11 bridge. 42 pastes, three runs in
+a row, none lost.
+
+It needs a session with its control socket, and a headset is not one of the requirements:
+
+```
+SPATIAND_BACKEND=headless ./target/release/spatiand     # on the Deck, in desktop mode
+python3 tools/clipboard-matrix.py --deck USER@DECK --host USER@HOST [--only a,b] [--keep] [--trace]
+```
+
+What it found, apart from the clipboard itself:
+
+- **No Wayland window was ever told it was the active one**, on either compositor — only X11
+  windows were. Qt waits for that before it honours a window's shortcuts, so a terminal took
+  typing and ignored Ctrl+Shift+C and Ctrl+Shift+V. `sync_activation` in the session, the same
+  in the host's `focus_changed`.
+- **The host moved its keyboard focus on the first key**, so that key was the moment of the
+  switch and a first Ctrl+Shift+V after turning to a host terminal did nothing. The session
+  now says `ClientMessage::Focus` as its keyboard moves, in the same ordered queue as the keys.
+- **The host stamped input with its arrival time**, writing the link's jitter into every
+  interval: two clicks made 80 ms apart could arrive 500 ms apart and stop being a double
+  click. Input now travels as `InputAt` with the session's own time, and `EventClock` keeps
+  the intervals. Protocol version 3.
+- **A closed remote window's buffers were never destroyed**, and each held its picture's
+  dmabufs for the life of the connection: a long session would run out of descriptors and
+  lose the link to the host ("Too many open files").
