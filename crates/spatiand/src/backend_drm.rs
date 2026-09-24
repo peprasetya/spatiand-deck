@@ -2399,6 +2399,29 @@ pub fn run(
                             -(delivery.wheel.1 as f64) * 15.0,
                             time_ms,
                         );
+                    } else if crate::pointer::room_window(&runtime.state).is_some_and(|room| {
+                        runtime.state.layout.is_focused(&room)
+                            || !runtime
+                                .state
+                                .space
+                                .elements()
+                                .any(|w| runtime.state.layout.is_focused(w))
+                    }) {
+                        // The room, which is in front of the wearer with nothing else focused
+                        // and has no quad to be found among the windows: a layout's clicks and
+                        // wheel went nowhere, so a trigger set to click did nothing in it.
+                        // Delivered where the pointer already is, since the room's pointer is
+                        // the wearer's own; the layout's mouse *movement* is not -- it would
+                        // throw that pointer to a cursor of the layout's own.
+                        for (code, pressed) in &delivery.mouse_buttons {
+                            pointers.button(&mut runtime.state, *code, *pressed, time_ms);
+                        }
+                        pointers.scroll(
+                            &mut runtime.state,
+                            delivery.wheel.0 as f64 * 15.0,
+                            -(delivery.wheel.1 as f64) * 15.0,
+                            time_ms,
+                        );
                     }
                 }
 
