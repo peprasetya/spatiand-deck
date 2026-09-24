@@ -1110,12 +1110,17 @@ pub fn run(
             // and a mouse. The layout is chosen again only when focus moves, since choosing it
             // reads the window's process environment for a Steam game's id.
             {
+                // With nothing focused, the application that is the room: it fills the whole
+                // field, so it is what the wearer is in front of, and a pad that went nowhere
+                // the moment focus was lost -- to a recentre, to another window closing --
+                // left an avatar that would not walk while the pointer still worked.
                 let focused = runtime
                     .state
                     .space
                     .elements()
                     .find(|w| runtime.state.layout.is_focused(w))
-                    .cloned();
+                    .cloned()
+                    .or_else(|| crate::pointer::room_window(&runtime.state));
                 let id = focused.as_ref().and_then(|w| runtime.state.layout.id_of(w));
                 if id != controls_focus {
                     controls_focus = id;
@@ -1151,7 +1156,9 @@ pub fn run(
                 .space
                 .elements()
                 .find(|w| runtime.state.layout.is_focused(w))
-                .and_then(|w| runtime.state.app_id_of(w));
+                .cloned()
+                .or_else(|| crate::pointer::room_window(&runtime.state))
+                .and_then(|w| runtime.state.app_id_of(&w));
             remotes.pad(focused_app_id.as_deref(), pad_state(&controls.report()));
             if let Some((strong, weak)) = controls.rumble().or_else(|| remotes.rumble()) {
                 if let Some(c) = controller.as_ref() {
@@ -2450,6 +2457,10 @@ pub fn run(
                                     pointers.motion(&mut runtime.state, aim, &windows, time_ms);
                                     if let Some(quad) = aim.hit.and_then(|(i, _)| windows.get(i)) {
                                         runtime.state.focus_window(&quad.window);
+                                    } else if let Some(room) =
+                                        crate::pointer::room_window(&runtime.state)
+                                    {
+                                        runtime.state.focus_window(&room);
                                     }
                                 }
                                 pointers.button(&mut runtime.state, code, pressed, time_ms);
@@ -2773,6 +2784,12 @@ pub fn run(
                                 if let Some((index, _)) = a.hit {
                                     if let Some(quad) = windows.get(index) {
                                         runtime.state.focus_window(&quad.window);
+                                    }
+                                } else if keyboard_reach[0].is_none() && !a.on_popup() {
+                                    // On the room, which has no quad to hit: it takes focus
+                                    // back the way a window does when it is clicked.
+                                    if let Some(room) = crate::pointer::room_window(&runtime.state) {
+                                        runtime.state.focus_window(&room);
                                     }
                                 }
                                 pointers.button(&mut runtime.state, BTN_LEFT, true, time_ms);

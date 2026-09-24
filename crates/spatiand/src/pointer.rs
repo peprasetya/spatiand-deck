@@ -564,6 +564,23 @@ pub fn room(state: &Spatiand, head: glam::DQuat, fov: [f32; 4]) -> Option<Room> 
     })
 }
 
+/// The window that is the room, when an application has become it.
+///
+/// It has no quad for a ray to hit, so nothing that focuses "the window under the pointer" ever
+/// finds it: a click on the room, or a pad with nothing else focused, has to ask for it here.
+pub fn room_window(state: &Spatiand) -> Option<smithay::desktop::Window> {
+    use smithay::wayland::seat::WaylandFocus;
+    state
+        .space
+        .elements()
+        .find(|window| {
+            window
+                .wl_surface()
+                .is_some_and(|surface| crate::xr::state_of(&surface).is_projection())
+        })
+        .cloned()
+}
+
 /// Everything the pointer layer remembers between frames.
 #[derive(Debug, Default)]
 pub struct PointerState {

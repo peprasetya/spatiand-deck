@@ -44,6 +44,11 @@ pub struct Window {
     next_buffer: u32,
     /// What the compositor last asked this window to be, if anything.
     pub configured: Option<(i32, i32)>,
+    /// Whether the compositor's first configure has come. That one is only its default for a
+    /// window it has just been handed, and the window already has a size -- the host's, which
+    /// is where the application lives. Passed on, it resized a viewer that was drawing both
+    /// eyes at 3840x1080 down to 1280x800 whenever the session came back after a dropout.
+    first_configured: bool,
     pub closed: bool,
     /// This window's `spatiand_xr_v1` surface, made the first time its application says it is
     /// anything other than an ordinary mono window.
@@ -169,6 +174,7 @@ impl Client {
                 showing: None,
                 next_buffer: 0,
                 configured: None,
+                first_configured: false,
                 closed: false,
                 xr: None,
             },
@@ -578,9 +584,13 @@ impl Dispatch<xdg_surface::XdgSurface, u32> for Client {
         if let xdg_surface::Event::Configure { serial } = event {
             surface.ack_configure(serial);
             if let Some(window) = state.windows.get_mut(id) {
+                let first = !std::mem::replace(&mut window.first_configured, true);
                 if let Some((width, height)) = window.configured.take() {
-                    // Only now is it settled, so this is where the host is told.
-                    state.resized.push((*id, width, height));
+                    // Only now is it settled, so this is where the host is told -- unless it
+                    // is the compositor's opening suggestion, which the wearer never asked for.
+                    if !first {
+                        state.resized.push((*id, width, height));
+                    }
                 }
             }
         }
