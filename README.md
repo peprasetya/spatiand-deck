@@ -5,7 +5,9 @@ alongside Desktop and Game.
 
 Windows hang on a sphere around you and stay where you left them when you turn
 your head. Each one's sound comes from where the window is. The Deck's own
-screen becomes a control panel for the session you are wearing.
+screen becomes a control panel for the session you are wearing. Applications
+running on another Linux computer arrive as windows of their own, beside the
+Deck's.
 
 **This is early.** It runs, it is used, and it is not finished. What follows is
 an honest account of which parts do what.
@@ -26,7 +28,8 @@ being put in a room, every X11 window says so on its title bar, and
 
 **3D applications.** `spatiand_xr_v1` lets an application say how its two eye
 views are packed into one buffer, whether it follows the view, and whether it is
-the room itself — 180° or 360°, mono or stereo. It also hands over head and eye
+the room itself — a 180° or 360° picture, mono or stereo, or its own two eye
+views filling the view, drawn behind every window. It also hands over head and eye
 poses through shared memory, so an application drawing its own views can read
 them at the last moment before it draws. A surface can also ask the compositor
 to fade it out while nobody is attending to it and bring it back on a glance,
@@ -53,9 +56,14 @@ makes Kodi drop its chrome and fill the window instead of laying out for a
 framebuffer twice as wide as the world.
 
 **Input.** The Deck's trackpads are two pointers with laser beams. The D-pad
-types arrow keys into the focused window, A is enter, B is escape. A window switcher
-in the HUD brings any window to the centre of your view. A USB or
-Bluetooth keyboard types; a mouse is a third pointer that fades when idle.
+types arrow keys into the focused window, A is enter, B is escape; in
+Spatiand's own menus a held direction keeps moving, as a held arrow key does. A
+window switcher in the HUD brings any window to the centre of your view. A USB
+or Bluetooth keyboard types; a mouse is a third pointer that fades when idle.
+
+**Copy and paste** work between Wayland and X11 applications, and between the
+Deck and a remote host in both directions. Tested end to end across seven
+applications on two machines — every copy pasted into every other.
 
 **Games.** Every control, the four back paddles included, is remappable per
 application in Settings → Controller layout, and what a game sees is one
@@ -63,6 +71,23 @@ gamepad wearing Steam's own virtual gamepad identity, so Proton games launched
 through Steam pick it up. A Steam game starts on a plain gamepad layout,
 anything else on the desktop one. A game gets a stereo sink placed on its
 window. See [docs/input-mapper.md](docs/input-mapper.md).
+
+**Applications on another computer.** `spatiand-host` runs on any ordinary
+Linux machine and hands each application to the glasses as a window of its own,
+not as a remote desktop. Pictures are encoded on that machine's GPU and decoded
+on the Deck's (VA-API, HEVC or H.264), and a window that is not changing sends
+nothing. Sound comes from the window, as a local application's does; keys, both
+pointers, the microphone and the controller go the other way — the controller
+as a gamepad of the host's own, played through the application's own layout.
+Applications keep running when the glasses go and are handed back when they
+return. A headset is paired once, by a code confirmed on the host, and is known
+by its certificate afterwards. Every host offers its own settings first, as an
+ordinary window that works with the pointer or with the D-pad, A and B.
+
+An application there can also be the room: a Second Life viewer draws the world
+around you and turns it with your head, while local windows float in front of it.
+If its host goes quiet, the room is taken away within three seconds rather than
+left frozen round you. See [docs/remote.md](docs/remote.md).
 
 **The panel** is a touch sidecar: volume, brightness, audio device, a second
 keyboard, and the way out.
@@ -73,9 +98,6 @@ Listed because finding out by hitting them is worse.
 
   * **Two-handed window gestures.** The geometry is written and tested; nothing
     consumes it, so moving and scaling with both thumbs does nothing.
-  * **OpenXR projection layers.** An application can render its own two eye
-    views and be shown them as a window; what it cannot yet do is have them
-    presented filling the view. The layer is refused rather than ignored.
   * **OpenXR.** Spatiand is not an OpenXR runtime and does not pretend to be
     one. [docs/openxr.md](docs/openxr.md) sets out what would have to be true
     and which of the three possible routes is worth taking.
@@ -83,6 +105,10 @@ Listed because finding out by hitting them is worse.
     gamepad, but resting a thumb on a trackpad over it makes Stumble Guys
     stutter until a few seconds after the thumb lifts. The session log now
     measures the game's own frame gaps to find out why.
+  * **Remote: no webcam, no stream to OBS, and no latency figures yet.** Glass
+    to glass has not been measured against Sunshine and Moonlight. Copying a
+    file between machines copies its path, which does not exist on the other
+    one.
   * **Object audio.** Atmos and DTS:X never reach the OS as objects on Linux, so
     what arrives is channels. Real object audio needs a protocol an application
     would have to speak; it does not exist yet.
@@ -145,7 +171,7 @@ nothing.
 
 ## How it is put together
 
-Nine crates. The three that touch hardware — `spatiand-hmd`, `spatiand-input`,
+Sixteen crates. The three that touch hardware — `spatiand-hmd`, `spatiand-input`,
 `spatiand-platform` — are the only ones whose *logic* knows what a Steam Deck or
 a pair of XREAL glasses is. Everything else sees traits, so a second headset
 should be a table entry rather than a rewrite.
@@ -163,12 +189,18 @@ on purpose — it is shown precisely when there is no headset to ask.
 | `spatiand-hmd` | headset: IMU, display modes, buttons |
 | `spatiand-track` | head tracking: filter, bias, magnetic anchor, prediction |
 | `spatiand-input` | controller, touchscreen, gestures, scroll |
+| `spatiand-pad` | the one virtual gamepad a game sees, here or on a host |
 | `spatiand-mapper` | controller layouts: bindings, templates, the editor's model |
 | `spatiand-render` | GLES 3.2: stereo cameras, skybox, glass, text |
 | `spatiand-shell` | scene graph, launcher, HUD, keyboard |
 | `spatiand-audio` | spatial audio: geometry, HRTF, PipeWire |
 | `spatiand-platform` | session install, launching, desktop settings |
-| `spatiand-proto` | private Wayland protocols (scaffolded) |
+| `spatiand-proto` | private Wayland protocols |
+| `spatiand-stream` | the wire to a remote host: messages, pairing, video packets, the clipboard |
+| `spatiand-video` | decoding a host's pictures on the Deck |
+| `spatiand-host` | the remote application host, a small compositor of its own |
+| `spatiand-host-catalog` | what a host keeps on disk: its applications and settings |
+| `spatiand-host-config` | the host's settings, as an application the headset opens |
 | `spatiand` | the compositor itself |
 
 ## Documentation
@@ -179,6 +211,7 @@ on purpose — it is shown precisely when there is no headset to ask.
 | [docs/x11.md](docs/x11.md) | Why X11 runs and is not supported |
 | [docs/input-mapper.md](docs/input-mapper.md) | Controller layouts and the virtual gamepad a game sees |
 | [docs/openxr.md](docs/openxr.md) | Why Spatiand is not an OpenXR runtime, what it would take, and the order to do it in |
+| [docs/remote.md](docs/remote.md) | Applications on another computer: what was measured, and what each measurement decided |
 | [docs/install.md](docs/install.md) | Installing a release, and what to check when it goes wrong |
 | [docs/xreal-air.md](docs/xreal-air.md) | The glasses' protocol, verified against hardware. Probably the most reusable thing here |
 | [docs/steam-deck-controller.md](docs/steam-deck-controller.md) | The controller's HID reports |
