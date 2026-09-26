@@ -21,7 +21,7 @@
 #
 [Unit]
 Description=Spatiand remote application host
-Documentation=https://github.com/pauluswi/spatiand
+Documentation=https://github.com/peprasetya/spatiand-deck/blob/master/docs/remote.md
 # PipeWire is how applications on this host make a sound. Wanted, not Required: a host with no
 # audio is still worth having, and refusing to start would take the windows with it.
 Wants=pipewire.service
