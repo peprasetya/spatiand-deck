@@ -2807,6 +2807,12 @@ pub fn run(
                             pointers.motion(&mut runtime.state, a, &windows, time_ms);
                             if let Some(quad) = a.hit.and_then(|(i, _)| windows.get(i)) {
                                 runtime.state.focus_window(&quad.window);
+                            } else if keyboard_reach.iter().all(Option::is_none) && !a.on_popup() {
+                                // On the room, as the left button above: a viewer's own menu
+                                // is opened this way, and should find the room focused.
+                                if let Some(room) = crate::pointer::room_window(&runtime.state) {
+                                    runtime.state.focus_window(&room);
+                                }
                             }
                             pointers.button(&mut runtime.state, BTN_RIGHT, true, time_ms);
                         }

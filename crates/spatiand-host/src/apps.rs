@@ -151,6 +151,16 @@ pub fn environment(
     for (key, value) in spatiand_pad::hide_other_controllers() {
         env.insert(key, value);
     }
+    // **A VR application keeps the pad when it loses the keyboard.** SDL 2 throws joystick
+    // input away while its window has no keyboard focus, and Firestorm draws its window with
+    // SDL -- the same SDL its joystick library reads the pad through. So the wearer clicking a
+    // window in the session took this machine's X focus off the viewer, and the stick went dead
+    // until something gave it back. An application that is the room has no window to click
+    // back to. The session already decides who gets the pad, and sends nothing to an
+    // application that does not have it; the viewer does not need to decide again.
+    if app.kind == spatiand_stream::AppKind::Vr {
+        env.insert("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS".into(), "1".into());
+    }
     // Says which host and which application, for anything that wants to know it is remote.
     env.insert("SPATIAND_REMOTE_APP".into(), app.id.clone());
     // **Being remote is not the same as being in a headset.** Today every session is a pair of
@@ -183,6 +193,23 @@ mod tests {
         assert_eq!(get("DISPLAY"), ":3");
         assert!(get("QT_QPA_PLATFORM").starts_with("wayland"));
         assert_eq!(get("SDL_VIDEODRIVER"), "", "SDL chooses for itself");
+    }
+
+    #[test]
+    fn a_vr_application_hears_the_pad_without_the_keyboard() {
+        let get = |app: &App, k: &str| {
+            environment(app, "wayland-1", Some(1))
+                .into_iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v)
+                .unwrap_or_default()
+        };
+        let mut viewer = App::new("spatiworld", "SpatiWorld", "/opt/spatiworld");
+        viewer.kind = spatiand_stream::AppKind::Vr;
+        assert_eq!(get(&viewer, "SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"), "1");
+        // A window among others shares the one pad with them, and focus decides.
+        let game = App::new("game", "Game", "/usr/bin/game");
+        assert_eq!(get(&game, "SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"), "");
     }
 
     #[test]
