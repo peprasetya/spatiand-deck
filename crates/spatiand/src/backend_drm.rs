@@ -313,6 +313,8 @@ pub fn run(
     const PRESS_SHOWN: Duration = Duration::from_millis(130);
     // Keys struck recently, and when, so a press can be seen as well as heard.
     let mut keyboard_struck: Vec<(&'static Key, std::time::Instant)> = Vec::new();
+    // A direction held in a menu, going on like a held arrow key. See `NavRepeat`.
+    let mut nav_repeat = crate::input_map::NavRepeat::default();
     // Where each ray meets the keyboard, as `[right, left]`, so the reticle can be put *on* it.
     //
     // The keyboard is not a window and so is not in the list the aim is cast against. Without
@@ -1085,6 +1087,17 @@ pub fn run(
                             if let Some(event) = shell.handle(intent) {
                                 shell_events.push(event);
                             }
+                        }
+                    }
+                    // Held, the D-pad goes on moving through a menu -- a long list, a slider,
+                    // the controller editor -- as a held arrow key would.
+                    let held = shell
+                        .menu_is_open()
+                        .then(|| crate::input_map::held_direction(c.state().buttons))
+                        .flatten();
+                    if let Some(intent) = nav_repeat.tick(held, std::time::Instant::now()) {
+                        if let Some(event) = shell.handle(intent) {
+                            shell_events.push(event);
                         }
                     }
                     let input = *c.state();
