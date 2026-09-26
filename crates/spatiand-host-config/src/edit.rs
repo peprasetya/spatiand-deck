@@ -46,6 +46,11 @@ impl Editing {
         }
     }
 
+    /// Close the file chooser, if it is open. False when there was none to close.
+    pub fn close_chooser(&mut self) -> bool {
+        self.browsing.take().is_some()
+    }
+
     /// The form as an entry, or what is wrong with it.
     fn finish(&self, config: &Config) -> Result<App, String> {
         let mut app = self.app.clone();

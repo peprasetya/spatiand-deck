@@ -12,6 +12,7 @@
 
 mod edit;
 mod files;
+mod keys;
 mod pairing;
 
 use std::collections::HashMap;
@@ -69,6 +70,8 @@ pub struct Config {
     running: Vec<(u32, String, String)>,
     /// Restart pressed once; the second press does it.
     restart_armed: bool,
+    /// The arrows, Enter and Escape. See `keys`.
+    keys: keys::Keys,
 }
 
 impl Config {
@@ -111,6 +114,7 @@ impl Config {
             fingerprint,
             running: Vec::new(),
             restart_armed: false,
+            keys: keys::Keys::default(),
         }
     }
 
@@ -198,6 +202,9 @@ fn send_to_host(line: &str) -> Result<String, String> {
 
 impl eframe::App for Config {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.keys.begin(ctx) {
+            self.back();
+        }
         if let Some(p) = self.pairing.as_mut() {
             if p.poll() {
                 ctx.request_repaint();
@@ -226,7 +233,12 @@ impl eframe::App for Config {
                     let button = egui::Button::new(egui::RichText::new(label).size(15.0))
                         .selected(chosen)
                         .min_size(egui::vec2(150.0, 34.0));
-                    if ui.add(button).clicked() {
+                    let response = ui.add(button);
+                    self.keys.page_buttons.push(response.id);
+                    if page == self.page && self.keys.take_landing() {
+                        response.request_focus();
+                    }
+                    if response.clicked() {
                         self.page = page;
                         self.editing = None;
                         self.status.clear();
@@ -259,10 +271,25 @@ impl eframe::App for Config {
                 Page::About => self.about_page(ui),
             }
         });
+        self.keys.end(ctx);
     }
 }
 
 impl Config {
+    /// Escape, which is B on the headset: back one step. Out of the file chooser, out of the
+    /// editor without saving, then from a page to the list of pages.
+    fn back(&mut self) {
+        if let Some(editing) = self.editing.as_mut() {
+            if !editing.close_chooser() {
+                self.editing = None;
+                self.status = "Not saved.".into();
+                self.keys.land_soon();
+            }
+        } else if !self.keys.was_on_page_list() {
+            self.keys.land_soon();
+        }
+    }
+
     fn apps_page(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Applications");
