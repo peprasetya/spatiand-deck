@@ -83,6 +83,19 @@ const RESIZE_EVERY: Duration = Duration::from_millis(150);
 /// keyframe. Half a second at the glasses' rate: beyond that the wearer is watching the past.
 const BACKLOG: usize = 36;
 
+/// How long a connected host may say nothing at all before an application of its that is the
+/// room is hidden.
+///
+/// Nothing at all means not a packet: the head's pose goes out every frame and the host
+/// acknowledges it, and both ends prove a quiet link is alive every second, so a host that is
+/// there is never silent for this long even with nothing to draw. The link itself is only
+/// given up after `IDLE_TIMEOUT_MS`, fifteen seconds, which is right for windows -- a stall
+/// that is going to end should not close them -- and far too long to stand inside a world that
+/// stopped moving while the head did. So the room goes first, and comes back by itself.
+const QUIET_AFTER: Duration = Duration::from_secs(3);
+/// How often the link's counters are read for that.
+const QUIET_CHECK: Duration = Duration::from_millis(250);
+
 /// What a remote window's title bar says: what the application calls it, and which computer
 /// it is on — a browser here and a browser there are otherwise indistinguishable.
 fn window_title(view: &Mutex<HostView>, app: &str, title: &str) -> String {
@@ -195,6 +208,9 @@ pub fn run(
                 Err(e) => Ended::Lost(e),
             };
             client.close_all();
+            if let Ok(mut v) = view.lock() {
+                v.quiet = false;
+            }
             let reason = match ended {
                 Ended::Stopped => break,
                 Ended::NoCompositor(e) => {
@@ -276,6 +292,10 @@ async fn serve(
     // What the link had carried by the last report, so each one can say what happened since
     // rather than since the session began. See the cadence line below.
     let mut carried = connection.stats();
+    // When a packet last arrived, as far as the counters say. See `QUIET_AFTER`.
+    let mut heard = (carried.udp_rx.datagrams, Instant::now());
+    let mut listened = Instant::now();
+    let mut quiet = false;
     let mut worked = Instant::now();
     let mut frames = 0u64;
     let mut decode_ms: Vec<f32> = Vec::new();
@@ -787,6 +807,31 @@ async fn serve(
                         window: window.map(WindowId),
                     },
                 });
+            }
+
+            if listened.elapsed() >= QUIET_CHECK {
+                listened = Instant::now();
+                let received = connection.stats().udp_rx.datagrams;
+                if received != heard.0 {
+                    heard = (received, Instant::now());
+                }
+                let now_quiet = heard.1.elapsed() >= QUIET_AFTER;
+                if now_quiet != quiet {
+                    quiet = now_quiet;
+                    if quiet {
+                        log::info!(
+                            "remote {}: nothing heard for {} s; an application of its that is \
+                             the room is hidden until it is",
+                            config.host,
+                            QUIET_AFTER.as_secs()
+                        );
+                    } else {
+                        log::info!("remote {}: heard again", config.host);
+                    }
+                    if let Ok(mut v) = view.lock() {
+                        v.quiet = quiet;
+                    }
+                }
             }
 
             if said.elapsed() >= Duration::from_secs(2) {

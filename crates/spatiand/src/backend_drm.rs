@@ -1277,6 +1277,7 @@ pub fn run(
 
             shell_events.extend(typed_event.take());
             remotes.tick(&mut runtime.display_handle, &mut prefs, &mut shell);
+            runtime.state.quiet_hosts = remotes.quiet();
 
             // --- the clipboard ---
             //

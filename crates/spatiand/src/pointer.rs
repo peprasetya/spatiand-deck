@@ -549,10 +549,10 @@ pub fn room(state: &Spatiand, head: glam::DQuat, fov: [f32; 4]) -> Option<Room> 
     use smithay::wayland::seat::WaylandFocus;
     state.space.elements().find_map(|window| {
         let surface = window.wl_surface()?.into_owned();
-        let xr = crate::xr::state_of(&surface);
-        if !xr.is_projection() {
+        if !state.is_room(window, &surface) {
             return None;
         }
+        let xr = crate::xr::state_of(&surface);
         let size = with_renderer_surface_state(&surface, |s| s.surface_size()).flatten()?;
         Some(Room {
             surface,
@@ -576,7 +576,7 @@ pub fn room_window(state: &Spatiand) -> Option<smithay::desktop::Window> {
         .find(|window| {
             window
                 .wl_surface()
-                .is_some_and(|surface| crate::xr::state_of(&surface).is_projection())
+                .is_some_and(|surface| state.is_room(window, &surface))
         })
         .cloned()
 }

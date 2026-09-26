@@ -56,6 +56,9 @@ pub struct HostView {
     /// rather than the latest, because an announcement, a paste's question and its answer are
     /// three different things and losing any of them loses a paste.
     pub clipboard: Vec<spatiand_stream::control::Clipboard>,
+    /// Connected, but nothing at all has come from the host for a while. See `QUIET_AFTER` in
+    /// `session`: an application that is the room is hidden while this is true.
+    pub quiet: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -452,6 +455,16 @@ impl Remotes {
                 }
             }
         }
+    }
+
+    /// The app-id prefixes of hosts that have gone quiet, for [`crate::state::Spatiand::quiet_hosts`].
+    pub fn quiet(&self) -> Vec<String> {
+        self.hosts
+            .iter()
+            // Read in place: `view()` copies the catalogue, and this is asked every frame.
+            .filter(|host| host.view.lock().is_ok_and(|v| v.quiet))
+            .map(|host| app_id_prefix(&host.host))
+            .collect()
     }
 
     /// Which hosts are no longer connected, so the board can drop what they were holding.

@@ -142,6 +142,9 @@ pub struct Spatiand {
     ///
     /// See [`Spatiand::settle_keyboard_focus`].
     pub focus_settled: Option<KeyboardFocus>,
+    /// App-id prefixes of remote hosts that have gone quiet, set once a frame from
+    /// [`crate::remote::Remotes::quiet`]. An application of theirs that is the room is not.
+    pub quiet_hosts: Vec<String>,
     /// How evenly the window in front is drawing. See [`crate::cadence`].
     pub cadence: crate::cadence::Cadence,
     /// The X11 window manager, once the X server has finished starting.
@@ -326,6 +329,7 @@ impl Spatiand {
             x11_pids: std::collections::HashMap::new(),
             x11_popups: Vec::new(),
             focus_settled: None,
+            quiet_hosts: Vec::new(),
             cadence: Default::default(),
             xwm: None,
             clipboard: crate::clipboard::Board::new(),
@@ -609,6 +613,26 @@ impl Spatiand {
         window
             .toplevel()
             .map(|t| KeyboardFocus::Wayland(t.wl_surface().clone()))
+    }
+
+    /// Whether this window is the room: an application drawing the eye views itself, on a
+    /// host that can still be heard.
+    ///
+    /// **A quiet host's room is not the room.** Its last picture stays on the surface, and
+    /// drawn round the wearer it is a world that stopped moving while the head did -- for the
+    /// fifteen seconds it took the link to be given up, every time the network dropped. Left
+    /// out, the wearer's own environment is back in a moment; heard again, it returns by
+    /// itself, because this is asked every frame.
+    pub fn is_room(&self, window: &smithay::desktop::Window, surface: &WlSurface) -> bool {
+        if !crate::xr::state_of(surface).is_projection() {
+            return false;
+        }
+        if self.quiet_hosts.is_empty() {
+            return true;
+        }
+        !self.app_id_of(window).is_some_and(|id| {
+            self.quiet_hosts.iter().any(|prefix| id.starts_with(prefix.as_str()))
+        })
     }
 
     pub fn focus_window(&mut self, window: &smithay::desktop::Window) {

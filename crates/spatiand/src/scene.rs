@@ -3342,10 +3342,10 @@ pub fn projection_surface(
         let Some(surface) = window.wl_surface().map(|s| s.into_owned()) else {
             continue;
         };
-        let xr = crate::xr::state_of(&surface);
-        if !xr.is_projection() {
+        if !state.is_room(window, &surface) {
             continue;
         }
+        let xr = crate::xr::state_of(&surface);
         if import_surface_tree(renderer, &surface).is_err() {
             continue;
         }
